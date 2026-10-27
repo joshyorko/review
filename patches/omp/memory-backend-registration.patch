@@ -647,11 +647,11 @@ diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/codin
 index 3a082feb51cccc785fd757177bad1c45031cb9ed..2873a8bd70340242ff7dc4751710c01231c9014d 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
-@@ -688,2 +688,4 @@ export class AgentSession implements SettingsScope {
+@@ -857,2 +857,4 @@ export class AgentSession implements SettingsScope {
  	readonly memoryEnabled: boolean;
 +	/** Task depth is required to scope extension memory backends to subagents. */
 +	readonly memoryTaskDepth: number;
- 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
+ 	#costGate: CostGate;
 @@ -1535,2 +1537,3 @@ export class AgentSession implements SettingsScope {
  		this.memoryEnabled = config.memoryEnabled ?? true;
 +		this.memoryTaskDepth = config.memoryTaskDepth ?? 0;

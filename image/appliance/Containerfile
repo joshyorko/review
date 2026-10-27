@@ -8,13 +8,13 @@ ARG AUDIO_BUILDER_IMAGE=${RUNTIME_BUILDER_IMAGE}
 ARG OMP_VERSION=18.13.1
 ARG OMP_SOURCE_COMMIT=0838d2ab4407b74e870de07e1a6780a13c7d542c
 ARG OMP_SOURCE_SHA256=603f6062742036e31c82f8b6bde3f7d682544b70fc8960d87c208d3e4bae0ebb
-ARG OMP_PATCH_SHA256=f42d5ab405047709ceb3a43c8b6793a05ae6b045418cf068cbbf86d05b2a9421
-ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=45c35e40c46166dc726ccc52f5d27f40f2449f99
-ARG OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT=45c35e40c46166dc726ccc52f5d27f40f2449f99
-ARG OMP_CLIPBOARD_PATCH_SHA256=608959e93b132d50aa9b6d015b1b6fecc6dbb644e7295628bee1f11640cf224e
+ARG OMP_PATCH_SHA256=621ae17adc8febc19112610bf18ca73264528465b220b096b8a546dab681c9ab
+ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=0838d2ab4407b74e870de07e1a6780a13c7d542c
+ARG OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT=0838d2ab4407b74e870de07e1a6780a13c7d542c
+ARG OMP_CLIPBOARD_PATCH_SHA256=e2736f73917995bd72f946831857060981ad15205249a23d6270554e67d07ade
 ARG OMP_SESSION_LIFECYCLE_PATCH_SHA256=e1874a3d5368f6fdeb4990128764fc57f15bd8438a84e6f4ffbb14b188800e4b
-ARG OMP_CLIPBOARD_PATCH_PATH=/usr/local/share/review/omp/clipboard-truthful-18.10.3.patch
-ARG OMP_SESSION_LIFECYCLE_PATCH_PATH=/usr/local/share/review/omp/session-lifecycle-18.10.3.patch
+ARG OMP_CLIPBOARD_PATCH_PATH=/usr/local/share/review/omp/clipboard-truthful.patch
+ARG OMP_SESSION_LIFECYCLE_PATCH_PATH=/usr/local/share/review/omp/session-lifecycle.patch
 ARG OMP_BUN_VERSION=1.4.2
 ARG OMP_BUN_X86_64_SHA256=c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f
 ARG OMP_BUN_AARCH64_SHA256=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7
@@ -138,8 +138,8 @@ RUN set -eu; \
 COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp
 COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts
 COPY patches/omp/memory-backend-registration.patch /usr/local/share/review/omp/memory-backend-registration.patch
-COPY patches/omp/clipboard-truthful-18.10.3.patch /usr/local/share/review/omp/clipboard-truthful-18.10.3.patch
-COPY patches/omp/session-lifecycle-18.10.3.patch /usr/local/share/review/omp/session-lifecycle-18.10.3.patch
+COPY patches/omp/clipboard-truthful.patch /usr/local/share/review/omp/clipboard-truthful.patch
+COPY patches/omp/session-lifecycle.patch /usr/local/share/review/omp/session-lifecycle.patch
 RUN set -eu; \
     mkdir -p /out/usr/bin /out/usr/share/review; \
     OMP_VERSION="$OMP_VERSION" \

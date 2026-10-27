@@ -63,7 +63,7 @@ class LifecycleBuildGates(unittest.TestCase):
         self.assertEqual(result.returncode, 19, result.stderr)
         self.assertIn("fixture reached post-patch boundary", result.stderr)
         trace = (self.work / "trace").read_text()
-        clipboard = 'apply --unidiff-zero ' + self.env["OMP_CLIPBOARD_PATCH_PATH"]
+        clipboard = 'apply ' + self.env["OMP_CLIPBOARD_PATCH_PATH"]
         check = 'apply --check ' + self.env["OMP_SESSION_LIFECYCLE_PATCH_PATH"]
         apply = 'apply ' + self.env["OMP_SESSION_LIFECYCLE_PATCH_PATH"]
         self.assertLess(trace.index(clipboard), trace.index(check))

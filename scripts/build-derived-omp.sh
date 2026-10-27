@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+qualification_only=0
+case "${1:-}" in
+--qualify-only)
+  (($# == 1)) || {
+    echo "usage: build-derived-omp.sh [--qualify-only]" >&2
+    exit 2
+  }
+  qualification_only=1
+  ;;
+"") ;;
+*)
+  echo "usage: build-derived-omp.sh [--qualify-only]" >&2
+  exit 2
+  ;;
+esac
 
 : "${OMP_VERSION:?OMP_VERSION is required}"
 : "${OMP_SOURCE_COMMIT:?OMP_SOURCE_COMMIT is required}"
@@ -27,13 +42,21 @@ if [[ ! "$OMP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$OMP_SOURCE_COMMIT" =~ 
   echo "invalid OMP, session lifecycle patch, clipboard patch, or MemoryD version/commit pin" >&2
   exit 1
 fi
-if [[ "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" != "$OMP_SOURCE_COMMIT" ]]; then
-  echo "clipboard patch was reviewed for OMP source ${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT}, not pinned source ${OMP_SOURCE_COMMIT}; requalify the patch before changing the OMP pin" >&2
-  exit 1
-fi
-if [[ "$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT" != "$OMP_SOURCE_COMMIT" ]]; then
-  echo "session lifecycle patch was reviewed for OMP source ${OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT}, not pinned source ${OMP_SOURCE_COMMIT}; requalify the patch before changing the OMP pin" >&2
-  exit 1
+if ((qualification_only == 0)); then
+  stale_patch_sources=()
+  if [[ "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" != "$OMP_SOURCE_COMMIT" ]]; then
+    stale_patch_sources+=("clipboard patch was reviewed for OMP source ${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT}, not pinned source ${OMP_SOURCE_COMMIT}")
+  fi
+  if [[ "$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT" != "$OMP_SOURCE_COMMIT" ]]; then
+    stale_patch_sources+=("session lifecycle patch was reviewed for OMP source ${OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT}, not pinned source ${OMP_SOURCE_COMMIT}")
+  fi
+  if ((${#stale_patch_sources[@]} > 0)); then
+    printf 'OMP compatibility patches require exact-source requalification before changing the OMP pin:\n' >&2
+    printf '  - %s\n' "${stale_patch_sources[@]}" >&2
+    exit 1
+  fi
+else
+  printf 'Qualifying OMP patches against pinned source %s; this mode does not install a binary.\n' "$OMP_SOURCE_COMMIT"
 fi
 for tool in curl git python3 tar sha256sum sha512sum install; do
   command -v "$tool" >/dev/null || {
@@ -131,8 +154,8 @@ sha256sum "$OMP_CLIPBOARD_PATCH_PATH" | {
   echo "OMP clipboard patch digest mismatch" >&2
   exit 1
 }
-git -C "$source_dir" apply --unidiff-zero --check "$OMP_CLIPBOARD_PATCH_PATH"
-git -C "$source_dir" apply --unidiff-zero "$OMP_CLIPBOARD_PATCH_PATH"
+git -C "$source_dir" apply --check "$OMP_CLIPBOARD_PATCH_PATH"
+git -C "$source_dir" apply "$OMP_CLIPBOARD_PATCH_PATH"
 sha256sum "$OMP_SESSION_LIFECYCLE_PATCH_PATH" | {
   read -r actual _
   [[ "$actual" == "$OMP_SESSION_LIFECYCLE_PATCH_SHA256" ]]
@@ -166,7 +189,9 @@ printf '%s  %s\n' "$bun_sha" "$bun_archive" | sha256sum --check --status || {
 }
 python3 -m zipfile -e "$bun_archive" "$workdir"
 install -m 0755 "$workdir/$bun_member" "$workdir/bin/bun"
-install -D -m 0755 "$workdir/bin/bun" /usr/local/bin/bun
+if ((qualification_only == 0)); then
+  install -D -m 0755 "$workdir/bin/bun" /usr/local/bin/bun
+fi
 export PATH="$workdir/bin:$PATH"
 [[ "$(bun --version)" == "$OMP_BUN_VERSION" ]] || {
   echo "downloaded Bun version does not match ${OMP_BUN_VERSION}" >&2
@@ -210,6 +235,10 @@ version_output="$("$candidate" --version)"
   exit 1
 }
 bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/canary"
+if ((qualification_only)); then
+  printf 'OMP patch qualification passed: version=%s commit=%s arch=%s; no OMP binary installed\n' "$OMP_VERSION" "$OMP_SOURCE_COMMIT" "$omp_target"
+  exit 0
+fi
 install -D -m 0755 "$candidate" "$OMP_OUTPUT_PATH"
 # Preserve notices from the exact verified source and its compiled dependencies.
 python3 - "$source_dir" "$OMP_OUTPUT_PATH" <<'PYLICENSE'

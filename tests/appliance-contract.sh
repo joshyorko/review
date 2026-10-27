@@ -92,10 +92,19 @@ for pin in OMP_SOURCE_COMMIT OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT OMP_CLIPB
 done
 omp_source_commit="$(sed -nE 's/^ARG OMP_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$containerfile")"
 clipboard_patch_source_commit="$(sed -nE 's/^ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$containerfile")"
+session_patch_source_commit="$(sed -nE 's/^ARG OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT=([^[:space:]]+)$/\1/p' "$containerfile")"
+stale_patch_provenance=()
 [[ "$clipboard_patch_source_commit" == "$omp_source_commit" ]] ||
-  fail "clipboard patch must be reviewed against the exact pinned OMP source commit"
-[[ "$(sed -nE 's|^ARG OMP_CLIPBOARD_PATCH_PATH=([^[:space:]]+)$|\1|p' "$containerfile")" == "/usr/local/share/review/omp/clipboard-truthful-18.10.3.patch" ]] ||
-  fail "clipboard patch path must name the pinned 18.10.3 patch input"
+  stale_patch_provenance+=("clipboard patch source ${clipboard_patch_source_commit} does not match OMP source ${omp_source_commit}")
+[[ "$session_patch_source_commit" == "$omp_source_commit" ]] ||
+  stale_patch_provenance+=("session lifecycle patch source ${session_patch_source_commit} does not match OMP source ${omp_source_commit}")
+if ((${#stale_patch_provenance[@]} > 0)); then
+  printf 'appliance-contract: patch qualification is stale; run node scripts/qualify-omp-upgrade.mjs --if-stale --record after exact-source qualification\n' >&2
+  printf 'appliance-contract: %s\n' "${stale_patch_provenance[@]}" >&2
+  exit 1
+fi
+[[ "$(sed -nE 's|^ARG OMP_CLIPBOARD_PATCH_PATH=([^[:space:]]+)$|\1|p' "$containerfile")" == "/usr/local/share/review/omp/clipboard-truthful.patch" ]] ||
+  fail "clipboard patch path must use the version-neutral patch input"
 for pin in OMP_VERSION OMP_BUN_VERSION NODE_VERSION OMP_NATIVES_VERSION RTK_VERSION; do
   grep -qE "^ARG ${pin}=[0-9]+\\.[0-9]+\\.[0-9]+$" "$containerfile" ||
     fail "ARG ${pin} must be a semantic version"
@@ -112,8 +121,8 @@ require "$containerfile" \
   'COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp' \
   'COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts' \
   'COPY patches/omp/memory-backend-registration.patch /usr/local/share/review/omp/memory-backend-registration.patch' \
-  'COPY patches/omp/clipboard-truthful-18.10.3.patch /usr/local/share/review/omp/clipboard-truthful-18.10.3.patch' \
-  'COPY patches/omp/session-lifecycle-18.10.3.patch /usr/local/share/review/omp/session-lifecycle-18.10.3.patch' \
+  'COPY patches/omp/clipboard-truthful.patch /usr/local/share/review/omp/clipboard-truthful.patch' \
+  'COPY patches/omp/session-lifecycle.patch /usr/local/share/review/omp/session-lifecycle.patch' \
   'OMP_PATCH_PATH=/usr/local/share/review/omp/memory-backend-registration.patch' \
   'OMP_CLIPBOARD_PATCH_PATH="$OMP_CLIPBOARD_PATCH_PATH"' \
   'OMP_SESSION_LIFECYCLE_PATCH_PATH="$OMP_SESSION_LIFECYCLE_PATCH_PATH"' \
@@ -121,6 +130,8 @@ require "$containerfile" \
   'OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT="$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT"' \
   'OMP_CLIPBOARD_PATCH_SHA256="$OMP_CLIPBOARD_PATCH_SHA256"' \
   'OMP_SESSION_LIFECYCLE_PATCH_SHA256="$OMP_SESSION_LIFECYCLE_PATCH_SHA256"' \
+  'OMP_OUTPUT_PATH=/out/usr/bin/omp' \
+  '/usr/local/libexec/build-derived-omp;' \
   'OMP_OUTPUT_PATH=/out/usr/bin/omp' \
   'https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/${rtk_asset}' \
   'https://raw.githubusercontent.com/rtk-ai/rtk/v${RTK_VERSION}/hooks/pi/rtk.ts' \
@@ -248,8 +259,12 @@ require scripts/build-derived-omp.sh \
   'sha256sum "$OMP_SESSION_LIFECYCLE_PATCH_PATH"' \
   'sha512sum --check --status' \
   'git -C "$source_dir" apply --check "$OMP_PATCH_PATH"' \
-  'git -C "$source_dir" apply --unidiff-zero --check "$OMP_CLIPBOARD_PATCH_PATH"' \
+  'git -C "$source_dir" apply --check "$OMP_CLIPBOARD_PATCH_PATH"' \
   'git -C "$source_dir" apply --check "$OMP_SESSION_LIFECYCLE_PATCH_PATH"' \
+  'qualification_only=0' \
+  'if ((qualification_only == 0)); then' \
+  '--qualify-only' \
+  'no OMP binary installed' \
   'clipboard patch was reviewed for OMP source' \
   'bun --cwd="$workdir/memoryd/adapters/omp-memory-provider" test tests' \
   'bun --cwd=packages/coding-agent test test/session-exit-lifecycle.test.ts' \
@@ -259,7 +274,7 @@ require scripts/build-derived-omp.sh \
 # shellcheck disable=SC2016 # Search for literal source text, not shell expansion.
 memory_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply "$OMP_PATCH_PATH"' scripts/build-derived-omp.sh | cut -d: -f1)"
 # shellcheck disable=SC2016 # Search for literal source text, not shell expansion.
-clipboard_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply --unidiff-zero "$OMP_CLIPBOARD_PATCH_PATH"' scripts/build-derived-omp.sh | cut -d: -f1)"
+clipboard_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply "$OMP_CLIPBOARD_PATCH_PATH"' scripts/build-derived-omp.sh | cut -d: -f1)"
 [[ -n "$memory_patch_apply_line" && -n "$clipboard_patch_apply_line" && "$memory_patch_apply_line" -lt "$clipboard_patch_apply_line" ]] ||
   fail "the clipboard patch must apply after the unchanged MemoryBackend patch"
 require .github/workflows/release.yml 'arch: x86_64' 'arch: aarch64'
@@ -413,8 +428,10 @@ grep -qF '!scripts/derived-omp-canary.ts' .dockerignore ||
   fail ".dockerignore must let the derived OMP canary into the build context"
 grep -qF '!patches/omp/memory-backend-registration.patch' .dockerignore ||
   fail ".dockerignore must let the OMP registration patch into the build context"
-grep -qF '!patches/omp/clipboard-truthful-18.10.3.patch' .dockerignore ||
+grep -qF '!patches/omp/clipboard-truthful.patch' .dockerignore ||
   fail ".dockerignore must let the OMP clipboard patch into the build context"
+grep -qF '!patches/omp/session-lifecycle.patch' .dockerignore ||
+  fail ".dockerignore must let the OMP session lifecycle patch into the build context"
 
 # The generator that fills that SBOM. Its own contract runs here rather than as
 # a separate validate.yml step: the document it writes is part of this image's
@@ -516,7 +533,7 @@ patch = root / "patches/omp" / pathlib.PurePosixPath(pin("OMP_SESSION_LIFECYCLE_
 assert hashlib.sha256(patch.read_bytes()).hexdigest() == pin("OMP_SESSION_LIFECYCLE_PATCH_SHA256")
 assert "!" + str(patch.relative_to(root)) in (root / ".dockerignore").read_text().splitlines()
 build = (root / "scripts/build-derived-omp.sh").read_text()
-assert build.index('apply --unidiff-zero "$OMP_CLIPBOARD_PATCH_PATH"') < build.index('apply "$OMP_SESSION_LIFECYCLE_PATCH_PATH"') < build.index('bun scripts/ci-release-build-binaries.ts')
+assert build.index('apply "$OMP_CLIPBOARD_PATCH_PATH"') < build.index('apply "$OMP_SESSION_LIFECYCLE_PATCH_PATH"') < build.index('bun scripts/ci-release-build-binaries.ts')
 assert "api.sessionShutdownLifecycleVersion !== 1" in (root / "scripts/derived-omp-canary.ts").read_text()
 PY_CHECK
 python3 tests/session_lifecycle_packaging_contract.py

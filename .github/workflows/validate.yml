@@ -98,19 +98,17 @@ jobs:
       # TypeScript here and executes only inside a TUI, so it is driven
       # headlessly against a fake host; the appliance's static contract holds
       # its pins and its version derivation without needing a container engine.
-      - name: Review mode and appliance contracts
+      - name: Review mode and pin updater contracts
         timeout-minutes: 10
         run: |
           set -euo pipefail
           node --test tests/update-omp-pins.test.mjs
+          node --test tests/qualify-omp-upgrade.test.mjs
           node --test tests/update-derived-pins.test.mjs
           bash tests/omp-review-mode.sh
           node --test tests/luna_factory.test.ts
           node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/luna_factory_dogfood_contract.test.ts
           bash tests/appliance-runtime-probe.sh "$RUNNER_TEMP/luna-factory-capabilities" "${{ github.event.pull_request.head.sha || github.sha }}"
-          bash tests/appliance-contract.sh
-
-          bash tests/version-derivation.sh
 
       - name: Pinned OMP SDK type compatibility
         run: |
@@ -121,15 +119,29 @@ jobs:
           OMP_SDK_NODE_MODULES="$sdk_root/node_modules" bash tests/luna-factory-sdk-types.sh
 
       - name: Pinned OMP source regressions
-        # Reuse one checkout for the clipboard patch and async-result checks.
-        # Both fixtures verify the exact OMP source commit shipped here.
+        # Run candidate-pin behavior checks before the strict provenance contract.
         run: |
           set -euo pipefail
           omp_version="$(sed -n 's/^ARG OMP_VERSION=//p' image/appliance/Containerfile)"
           test -n "$omp_version"
           git clone --depth 1 --branch "v${omp_version}" https://github.com/can1357/oh-my-pi.git "$RUNNER_TEMP/review-omp-source"
-          REVIEW_OMP_SOURCE="$RUNNER_TEMP/review-omp-source" node --test tests/fixtures/issue-140-clipboard-truth.test.mjs
+          if [[ "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}" == patchraptor/omp-runtime ]]; then
+            REVIEW_OMP_PATCH_QUALIFICATION=1 REVIEW_OMP_SOURCE="$RUNNER_TEMP/review-omp-source" node --test tests/fixtures/issue-140-clipboard-truth.test.mjs
+          else
+            REVIEW_OMP_SOURCE="$RUNNER_TEMP/review-omp-source" node --test tests/fixtures/issue-140-clipboard-truth.test.mjs
+          fi
           REVIEW_OMP_SOURCE="$RUNNER_TEMP/review-omp-source" node --experimental-transform-types --test --test-name-pattern='packaged OMP current pin delivers and evicts' tests/omp-review-mode.test.ts
+
+      - name: Requalify OMP compatibility patches
+        if: github.head_ref == 'patchraptor/omp-runtime' || github.ref_name == 'patchraptor/omp-runtime'
+        timeout-minutes: 30
+        run: node scripts/qualify-omp-upgrade.mjs --if-stale
+
+      - name: Appliance pin contract
+        run: |
+          set -euo pipefail
+          bash tests/appliance-contract.sh
+          bash tests/version-derivation.sh
 
       - name: Packaged runtime capability report
         run: |

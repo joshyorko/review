@@ -49,10 +49,10 @@ BASE_ARGS = {
     "--omp-patch-sha256": OMP_PATCH,
     "--omp-clipboard-patch-source-commit": SOURCE_COMMIT,
     "--omp-clipboard-patch-sha256": OMP_CLIPBOARD_PATCH,
-    "--omp-clipboard-patch-path": "/usr/local/share/review/omp/clipboard-truthful-18.9.2.patch",
+    "--omp-clipboard-patch-path": "/usr/local/share/review/omp/clipboard-truthful.patch",
     "--omp-session-lifecycle-patch-source-commit": SOURCE_COMMIT,
     "--omp-session-lifecycle-patch-sha256": OMP_SESSION_LIFECYCLE_PATCH,
-    "--omp-session-lifecycle-patch-path": "/usr/local/share/review/omp/session-lifecycle-18.10.3.patch",
+    "--omp-session-lifecycle-patch-path": "/usr/local/share/review/omp/session-lifecycle.patch",
     "--omp-bun-version": "1.4.2",
     "--bun-sha256": BUN_X86,
     "--node-version": "24.21.0",
@@ -214,7 +214,7 @@ class PerArchitectureDigests(unittest.TestCase):
             patch["externalRefs"][0]["referenceLocator"],
             f"pkg:generic/omp-session-lifecycle-patch@{SOURCE_COMMIT}?checksum=sha256:{OMP_SESSION_LIFECYCLE_PATCH}",
         )
-        self.assertEqual(patch["downloadLocation"], f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/session-lifecycle-18.10.3.patch")
+        self.assertEqual(patch["downloadLocation"], f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/session-lifecycle.patch")
         self.assertIn("Bun 1.4.2", comment)
 
 
@@ -295,7 +295,7 @@ class DownloadLocations(unittest.TestCase):
         )
         self.assertEqual(
             found["omp-clipboard-truthfulness-patch"]["downloadLocation"],
-            f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/clipboard-truthful-18.9.2.patch",
+            f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/clipboard-truthful.patch",
         )
 
     def test_node_download_is_versioned_and_architecture_specific(self):

@@ -7,16 +7,10 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const expectedArchiveSha256 = "645df2d527de1b0ff62514ac14250230622439d5d5e84f781ffa06d38415b8d0";
-const expectedSourceCommit = "45c35e40c46166dc726ccc52f5d27f40f2449f99";
-const expectedMemoryPatchSha256 = "f42d5ab405047709ceb3a43c8b6793a05ae6b045418cf068cbbf86d05b2a9421";
-const expectedPatchSha256 = "608959e93b132d50aa9b6d015b1b6fecc6dbb644e7295628bee1f11640cf224e";
-const expectedOmpVersion = "18.12.6";
 const sourceCheckout = process.env.REVIEW_OMP_SOURCE;
 const cachedArchive = process.env.ISSUE140_OMP_ARCHIVE;
+const qualificationMode = process.env.REVIEW_OMP_PATCH_QUALIFICATION === "1";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const memoryPatchPath = path.join(repoRoot, "patches/omp/memory-backend-registration.patch");
-const patchPath = path.join(repoRoot, "patches/omp/clipboard-truthful-18.10.3.patch");
 const containerfile = await readFile(path.join(repoRoot, "image/appliance/Containerfile"), "utf8");
 function pinnedArg(name) {
 	const matches = [...containerfile.matchAll(new RegExp(`^ARG ${name}=([^\\n]+)$`, "gm"))];
@@ -24,25 +18,31 @@ function pinnedArg(name) {
 	return matches[0][1];
 }
 
-assert.equal(pinnedArg("OMP_VERSION"), expectedOmpVersion);
-assert.equal(pinnedArg("OMP_SOURCE_COMMIT"), expectedSourceCommit);
-assert.equal(pinnedArg("OMP_SOURCE_SHA256"), expectedArchiveSha256);
-assert.equal(pinnedArg("OMP_PATCH_SHA256"), expectedMemoryPatchSha256);
-assert.equal(pinnedArg("OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"), expectedSourceCommit);
-assert.equal(pinnedArg("OMP_CLIPBOARD_PATCH_SHA256"), expectedPatchSha256);
-assert.equal(
-	pinnedArg("OMP_CLIPBOARD_PATCH_PATH"),
-	"/usr/local/share/review/omp/clipboard-truthful-18.10.3.patch",
-);
+const expectedArchiveSha256 = pinnedArg("OMP_SOURCE_SHA256");
+const expectedSourceCommit = pinnedArg("OMP_SOURCE_COMMIT");
+const expectedMemoryPatchSha256 = pinnedArg("OMP_PATCH_SHA256");
+const expectedPatchSha256 = pinnedArg("OMP_CLIPBOARD_PATCH_SHA256");
+const expectedOmpVersion = pinnedArg("OMP_VERSION");
+const memoryPatchPath = path.join(repoRoot, "patches/omp/memory-backend-registration.patch");
+const containerPatchPrefix = "/usr/local/share/review/omp/";
+const pinnedPatchPath = pinnedArg("OMP_CLIPBOARD_PATCH_PATH");
+assert.ok(pinnedPatchPath.startsWith(containerPatchPrefix), "clipboard patch is staged from the OMP patch directory");
+const patchPath = path.join(repoRoot, "patches/omp", path.posix.basename(pinnedPatchPath));
+
+if (!qualificationMode) {
+	assert.equal(pinnedArg("OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"), expectedSourceCommit);
+}
+
 assert.ok(!(sourceCheckout && cachedArchive), "set REVIEW_OMP_SOURCE or ISSUE140_OMP_ARCHIVE, not both");
 const patch = await readFile(patchPath);
-assert.equal(createHash("sha256").update(patch).digest("hex"), expectedPatchSha256, "OMP patch pin");
-const memoryPatch = await readFile(memoryPatchPath, "utf8");
-assert.equal(
-	createHash("sha256").update(memoryPatch).digest("hex"),
-	expectedMemoryPatchSha256,
-	"MemoryBackend patch remains unchanged",
-);
+const actualPatchSha256 = createHash("sha256").update(patch).digest("hex");
+const memoryPatchBytes = await readFile(memoryPatchPath);
+const actualMemoryPatchSha256 = createHash("sha256").update(memoryPatchBytes).digest("hex");
+const memoryPatch = memoryPatchBytes.toString("utf8");
+if (!qualificationMode) {
+	assert.equal(actualPatchSha256, expectedPatchSha256, "OMP clipboard patch pin");
+	assert.equal(actualMemoryPatchSha256, expectedMemoryPatchSha256, "OMP MemoryBackend patch pin");
+}
 
 const tempRoot = await mkdtemp(path.join(tmpdir(), "review-issue-140-omp-"));
 const sourceRoot = path.join(tempRoot, "source");
@@ -56,6 +56,7 @@ const patchFiles = source => [...source.matchAll(/^--- a\/(\S+)$/gm)].map((match
 const sourceMembers = [...new Set([
 	...patchFiles(memoryPatch),
 	...patchFiles(patch.toString("utf8")),
+	"packages/coding-agent/package.json",
 	"packages/coding-agent/src/session/session-dump-format.ts",
 ])].map(file => `oh-my-pi-${expectedSourceCommit}/${file}`);
 
@@ -99,6 +100,8 @@ if (sourceCheckout) {
 	);
 	assert.equal(extract.status, 0, `extract pinned OMP source: ${extract.stderr}`);
 }
+const sourcePackage = JSON.parse(await readFile(path.join(sourceRoot, "packages/coding-agent/package.json"), "utf8"));
+assert.equal(sourcePackage.version, expectedOmpVersion, "OMP source package version pin");
 const initialize = spawnSync("git", ["-C", sourceRoot, "init", "-q"], { encoding: "utf8" });
 assert.equal(initialize.status, 0, `initialize temporary patch target: ${initialize.stderr}`);
 
@@ -107,9 +110,9 @@ assert.equal(applyMemory.status, 0, `check OMP MemoryBackend patch: ${applyMemor
 const installMemory = spawnSync("git", ["-C", sourceRoot, "apply", memoryPatchPath], { encoding: "utf8" });
 assert.equal(installMemory.status, 0, `apply OMP MemoryBackend patch: ${installMemory.stderr}`);
 if (process.env.ISSUE140_APPLY_PATCH !== "0") {
-	const applyClipboard = spawnSync("git", ["-C", sourceRoot, "apply", "--unidiff-zero", "--check", patchPath], { encoding: "utf8" });
+	const applyClipboard = spawnSync("git", ["-C", sourceRoot, "apply", "--check", patchPath], { encoding: "utf8" });
 	assert.equal(applyClipboard.status, 0, `check OMP clipboard patch after MemoryBackend: ${applyClipboard.stderr}`);
-	const installClipboard = spawnSync("git", ["-C", sourceRoot, "apply", "--unidiff-zero", patchPath], { encoding: "utf8" });
+	const installClipboard = spawnSync("git", ["-C", sourceRoot, "apply", patchPath], { encoding: "utf8" });
 	assert.equal(installClipboard.status, 0, `apply OMP clipboard patch: ${installClipboard.stderr}`);
 }
 
