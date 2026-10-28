@@ -3,6 +3,18 @@
 Release notes for the Review appliance. New sections are drafted with git-cliff
 and reviewed in the version-bump pull request.
 
+## [0.1.5]
+
+### Dependencies
+
+- **deps**: update dependency python-discovery to v1.6.7 (#87) ([2e392f0](https://github.com/joshyorko/review/commit/2e392f0f85e4c6a1b97e5045f5b24daf78d27a77))
+- **deps**: update dependency platformdirs to v4.13.7 (#86) ([82cd47e](https://github.com/joshyorko/review/commit/82cd47e00ff581f85a8dec5a08b61c08235d83ea))
+- **deps**: update dependency virtualenv to v21.15.1 (#85) ([653435e](https://github.com/joshyorko/review/commit/653435e053f5f992e27e84ebaf5d46b7955ed77c))
+- **deps**: schedule OMP patches weekly (#90) ([92e68f5](https://github.com/joshyorko/review/commit/92e68f5044fa3f6f6eb8c335452d54511731021c))
+- **deps**: update ewatercycle/setup-apptainer action to v3 (#89) ([fe42d57](https://github.com/joshyorko/review/commit/fe42d5785a4d723a4651208d8ce920338d0c457f))
+- **deps**: update dependency can1357/oh-my-pi to v18.13.3 (#88) ([d10b565](https://github.com/joshyorko/review/commit/d10b565f805b52c3f15facee0a2cefd3716c8fd9))
+- **deps**: update dependency node to v26 (#84) ([429d486](https://github.com/joshyorko/review/commit/429d4865af39aef6c491e2cf79e6caf0738b08ac))
+
 ## [0.1.4]
 
 ### Bug Fixes
