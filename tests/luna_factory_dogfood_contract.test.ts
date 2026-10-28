@@ -15,7 +15,7 @@ const assertIncludes = (source: string, markers: readonly string[]) => {
 };
 const isImmutableActionPin = (value: string, repository: string, major: number) =>
   new RegExp(`^${escapeRegExp(repository)}@[a-f0-9]{40} # v${major}(?:\\.\\d+){0,2}$`).test(value);
-const apptainerV2Pin = /^eWaterCycle\/setup-apptainer@[a-f0-9]{40} # v2 tag target$/;
+const apptainerV3Pin = /^eWaterCycle\/setup-apptainer@[a-f0-9]{40} # v3 tag target$/;
 
 test("workflow preserves the bounded exact-head no-publish contract", () => {
   const workflow = read(".github/workflows/luna-factory-dogfood.yml");
@@ -98,18 +98,18 @@ test("OCI Factory dogfood keeps generic qualification separate from krun verifie
   ]);
 });
 
-test("workflow pins the official Apptainer v2 action by immutable digest", () => {
+test("workflow pins the official Apptainer v3 action by immutable digest", () => {
   const workflow = read(".github/workflows/luna-factory-dogfood.yml");
   const step = workflow.match(/- name: Install Apptainer\s+uses: ([^\n]+)/);
   assert.ok(step, "Install Apptainer action step");
-  assert.match(step[1], apptainerV2Pin);
+  assert.match(step[1], apptainerV3Pin);
 
   for (const invalid of [
-    "eWaterCycle/setup-apptainer@v2 # v2 tag target",
-    "eWaterCycle/setup-apptainer@0123456789abcdef0123456789abcdef01234567 # v1 tag target",
-    "other/setup-apptainer@0123456789abcdef0123456789abcdef01234567 # v2 tag target",
+    "eWaterCycle/setup-apptainer@v3 # v3 tag target",
+    "eWaterCycle/setup-apptainer@0123456789abcdef0123456789abcdef01234567 # v2 tag target",
+    "other/setup-apptainer@0123456789abcdef0123456789abcdef01234567 # v3 tag target",
   ]) {
-    assert.doesNotMatch(invalid, apptainerV2Pin);
+    assert.doesNotMatch(invalid, apptainerV3Pin);
   }
 });
 
