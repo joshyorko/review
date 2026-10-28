@@ -319,11 +319,11 @@ index 6317bc3..53996a6 100644
  	| SessionBeforeTreeEvent
  	| SessionTreeEvent
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index 97793ed..25e4d39 100644
+index 25fa864..946d445 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -6847,6 +6847,31 @@ export class InteractiveMode implements InteractiveModeContext {
- 		this.isInitialized = false;
+@@ -7758,6 +7758,31 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		}
  	}
  
 +	#exitGatePending = false;
@@ -354,15 +354,15 @@ index 97793ed..25e4d39 100644
  	async shutdown(): Promise<void> {
  		if (this.#isShuttingDown) return;
  		// The previous graceful teardown failed AT the memoized session.dispose()
-@@ -6865,6 +6890,7 @@ export class InteractiveMode implements InteractiveModeContext {
- 			}
+@@ -7770,6 +7795,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 			await this.#quitHostOwned(130);
  			return;
  		}
 +		if (!(await this.#approveExit("shutdown"))) return;
  		this.#beginClose();
  		const worktreePlan = await this.#planOwnedWorktreeExit();
  		try {
-@@ -6941,6 +6967,7 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -7846,6 +7872,7 @@ export class InteractiveMode implements InteractiveModeContext {
  	 */
  	async restart(): Promise<void> {
  		if (this.#isShuttingDown) return;
