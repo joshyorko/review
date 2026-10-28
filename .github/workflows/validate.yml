@@ -42,7 +42,7 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Set up Node.js 24
+      - name: Set up Node.js 26
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '26.x'
@@ -151,7 +151,7 @@ jobs:
           else
             REVIEW_OMP_SOURCE="$RUNNER_TEMP/review-omp-source" node --test tests/fixtures/issue-140-clipboard-truth.test.mjs
           fi
-          REVIEW_OMP_SOURCE="$RUNNER_TEMP/review-omp-source" node --experimental-transform-types --test --test-name-pattern='packaged OMP current pin delivers and evicts' tests/omp-review-mode.test.ts
+          REVIEW_OMP_SOURCE="$RUNNER_TEMP/review-omp-source" npx --yes tsx@4.21.0 --test --test-name-pattern='packaged OMP current pin delivers and evicts' tests/omp-review-mode.test.ts
 
       - name: Requalify OMP compatibility patches
         if: github.head_ref == 'patchraptor/omp-runtime' || github.ref_name == 'patchraptor/omp-runtime'
