@@ -128,6 +128,14 @@
       }
     },
     {
+      "description": "Collect OMP patch releases into a weekly qualification window; keep major and minor updates on their normal schedule.",
+      "matchDatasources": ["github-releases"],
+      "matchPackageNames": ["can1357/oh-my-pi"],
+      "matchUpdateTypes": ["patch"],
+      "schedule": ["before 6am on monday"],
+      "updateNotScheduled": false
+    },
+    {
       "description": "Track GitHub CLI releases and refresh the appliance's verified binary digests.",
       "matchDatasources": [
         "github-releases"
