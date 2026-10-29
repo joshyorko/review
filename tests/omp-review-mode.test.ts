@@ -3213,6 +3213,28 @@ test("dashboard browser launch exceptions preserve a copyable URL and human reco
 	assert.match(await pi.commands.get("review").handler("details", ctx), /browser launch failed/);
 });
 
+test("dashboard browser failure names an issue accurately", async () => {
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	pi.exec = async () => { throw new Error("browser launch failed"); };
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: issueBackedFetch({ "projectbluefin/review#43": { title: "review issue", submittedPrs: [] } }),
+		env: ISOLATED_ENV,
+	});
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("v");
+	ctx.overlays[0].handleInput("o");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.match(ctx.notifications.at(-1)?.message ?? "", /Couldn’t open the issue in your browser/);
+	assert.doesNotMatch(ctx.notifications.at(-1)?.message ?? "", /pull request/);
+	assert.match(ctx.pasted.at(-1) ?? "", /https:\/\/github\.com\/projectbluefin\/review\/issues\/43/);
+	assert.match(await pi.commands.get("review").handler("details", ctx), /browser launch failed/);
+});
+
 test("dashboard releases its open slot before a closed dialog finishes its action", async () => {
 	const pi = fakeHost();
 	const ctx = fakeCtx();

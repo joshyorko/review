@@ -2926,6 +2926,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return;
 		}
 		if (action.kind === "open_browser") {
+			const itemName = action.item.type === "pr" ? "pull request" : "issue";
+			const browserNotice = {
+				title: `Couldn’t open the ${itemName} in your browser`,
+				outcome: "The review item is still available, and its link is in your draft.",
+				action: "Open the review link from your draft, or check your browser and try again.",
+			};
 			try {
 				const result = await pi.exec(
 					"gh",
@@ -2938,18 +2944,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				}
 				const reason = result.killed ? "browser launch timed out" : result.stderr.trim() || `gh exited with code ${result.code}`;
 				ctx.ui.pasteToEditor(action.item.url);
-				notifyNotice(ctx, "warning", `review-browser:${action.item.repo}#${action.item.id}`, {
-					title: "Couldn’t open the pull request in your browser",
-					outcome: "The review item is still available, and its link is in your draft.",
-					action: "Open the pull request link from your draft, or check your browser and try again.",
-				}, `${reason}; ${action.item.url}`);
+				notifyNotice(ctx, "warning", `review-browser:${action.item.repo}#${action.item.id}`, browserNotice, `${reason}; ${action.item.url}`);
 			} catch (error) {
 				ctx.ui.pasteToEditor(action.item.url);
-				notifyNotice(ctx, "warning", `review-browser:${action.item.repo}#${action.item.id}`, {
-					title: "Couldn’t open the pull request in your browser",
-					outcome: "The review item is still available, and its link is in your draft.",
-					action: "Open the pull request link from your draft, or check your browser and try again.",
-				}, `${errorMessage(error)}; ${action.item.url}`);
+				notifyNotice(ctx, "warning", `review-browser:${action.item.repo}#${action.item.id}`, browserNotice, `${errorMessage(error)}; ${action.item.url}`);
 			}
 			return;
 		}
