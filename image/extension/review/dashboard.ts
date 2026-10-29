@@ -316,13 +316,14 @@ export class ReviewDashboard {
 
 		const width = this.lastWidth || 120;
 		const currentNotice = this.currentNotice();
+		const attentionNotice = Boolean(currentNotice);
 		const highPriorityNotice = currentNotice?.level === "error";
 		const noticeRows = renderNoticeBanner(currentNotice, {
 			fg: (role, text) => this.painter.fg(role === "info" ? "accent" : role, text),
 			bold: (text) => this.painter.bold(text),
 		}, width).length;
 		const reservedFilterRow = this.filtering || this.mode.filter ? 1 : 0;
-		const minimumBodyHeight = highPriorityNotice ? 2 : 4;
+		const minimumBodyHeight = attentionNotice ? 2 : 4;
 		const chromeRows = highPriorityNotice ? 3 : 4;
 		const bodyHeight = Math.max(minimumBodyHeight, this.rows - chromeRows - noticeRows - reservedFilterRow);
 		const bodyStart = 2 + noticeRows;
@@ -1361,8 +1362,9 @@ export class ReviewDashboard {
 		}
 		const reservedFilterRow = this.filtering || this.mode.filter ? 1 : 0;
 		const currentNotice = this.currentNotice();
+		const attentionNotice = Boolean(currentNotice);
 		const highPriorityNotice = currentNotice?.level === "error";
-		const minimumBodyHeight = highPriorityNotice ? 2 : 4;
+		const minimumBodyHeight = attentionNotice ? 2 : 4;
 		const chromeRows = highPriorityNotice ? 3 : 4;
 		const bodyHeight = Math.max(minimumBodyHeight, this.rows - chromeRows - notice.length - reservedFilterRow);
 		const item = this.mode.selected();
@@ -1419,7 +1421,7 @@ export class ReviewDashboard {
 				const rightCell = right[i] ?? "";
 				lines.push(truncateToWidth(`${leftCell} ${separator} ${rightCell}`, width));
 			}
-		} else if (highPriorityNotice && bodyHeight < 7) {
+		} else if (attentionNotice && bodyHeight < 7) {
 			const queueTitle = this.mode.selectedKeys.size > 0
 				? `QUEUE ${this.mode.position()} (${this.mode.selectedKeys.size} selected)`
 				: `QUEUE ${this.mode.position()}`;

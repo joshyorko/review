@@ -64,7 +64,7 @@ function safeDiagnostic(value: string): string {
 
 function safeSteps(value: readonly string[] | undefined, fallback: string): string[] {
 	const steps = (value?.length ? value : [fallback])
-		.map((step) => safeText(step, 180))
+		.map((step) => safeText(step, 500))
 		.filter(Boolean)
 		.slice(0, 5);
 	return steps.length ? steps : ["Run /review details to inspect the saved diagnostic."];

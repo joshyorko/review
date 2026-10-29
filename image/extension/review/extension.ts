@@ -2995,13 +2995,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			const itemName = action.item.type === "pr" ? "pull request" : "issue";
 			const browserNotice = {
 				title: `Couldn’t open the ${itemName} in your browser`,
-				outcome: "The review item is still available. Its full link is saved with the diagnostic.",
-				action: "See the link and retry steps in /review details.",
+				outcome: "The review item is still available. Your draft was left unchanged.",
+				action: "Open the full link below or retry from the reader.",
 				steps: [
-					"Press q twice to close the reader and dashboard.",
-					"If the message box has an unsent draft, save a copy elsewhere, then clear the box.",
-					"In the message box, run /review details to read the full link.",
-					"Press q, then Alt+B; select the same item and press v, then o to retry.",
+					`Full link: ${action.item.url}`,
+					"Open this link in your browser.",
+					"Or, while the reader is open, press o to try again.",
 				],
 			};
 			try {
