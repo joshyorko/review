@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createReviewNoticeComponent, renderNoticeBanner } from "../image/extension/review/notice.ts";
 
-test("notice state is shared and repeated lifecycle notices toast once", () => {
-	const toasts: string[] = [];
-	const first = createReviewNoticeComponent({ notify: (message) => toasts.push(message) });
+test("notice state is shared and repeated lifecycle notices are delivered once", () => {
+	const delivered: string[] = [];
+	const first = createReviewNoticeComponent({ notify: (message) => delivered.push(message) });
 	const second = createReviewNoticeComponent();
 	first.sessionChanged("session-a");
 	assert.equal(first.publish({ id: "worker-completed", sessionId: "session-a", level: "info", message: "Worker completed" }), true);
 	assert.equal(second.current?.message, "Worker completed");
 	assert.equal(second.publish({ id: "worker-completed", sessionId: "session-a", level: "info", message: "Worker completed" }), false);
-	assert.deepEqual(toasts, ["Worker completed"]);
+	assert.deepEqual(delivered, ["Worker completed"]);
 });
 
 test("session changes clear session-owned notices and reject stale events", () => {
@@ -83,15 +83,15 @@ test("explicit acknowledgement clears the persistent notice and dedupe entry", (
 	assert.equal(notice.publish(input), true, "the same unresolved event can reappear after acknowledgement");
 });
 
-test("acknowledgement and session changes invalidate delayed widget installs across module copies", () => {
+test("acknowledgement and session changes clear shared notices across module copies", () => {
 	const firstCopy = createReviewNoticeComponent();
 	const secondCopy = createReviewNoticeComponent();
 	firstCopy.sessionChanged("session-widget-fence");
-	const pending = firstCopy.beginWidgetDelivery();
-	assert.equal(secondCopy.isCurrentWidgetDelivery(pending, "session-widget-fence"), true);
+	firstCopy.publish({ id: "blocked", sessionId: "session-widget-fence", level: "error", message: "Review failed" });
+	assert.equal(secondCopy.current?.message, "Review failed");
 	secondCopy.clear();
-	assert.equal(firstCopy.isCurrentWidgetDelivery(pending, "session-widget-fence"), false);
-	const priorSession = secondCopy.beginWidgetDelivery();
+	assert.equal(firstCopy.current, undefined);
+	firstCopy.publish({ id: "again", sessionId: "session-widget-fence", level: "error", message: "Review failed again" });
 	firstCopy.sessionChanged("session-widget-next");
-	assert.equal(secondCopy.isCurrentWidgetDelivery(priorSession, "session-widget-fence"), false);
+	assert.equal(secondCopy.current, undefined);
 });

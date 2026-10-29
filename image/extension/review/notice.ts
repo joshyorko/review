@@ -24,7 +24,6 @@ interface SharedNoticeState {
 	sessionId?: string;
 	current?: ReviewNotice;
 	readonly delivered: Set<string>;
-	widgetGeneration: number;
 }
 
 const STATE_KEY = Symbol.for("com.review.native-notice.v1");
@@ -33,7 +32,7 @@ const MAX_DELIVERED_IDS = 256;
 
 function sharedState(): SharedNoticeState {
 	const root = globalThis as typeof globalThis & { [STATE_KEY]?: SharedNoticeState };
-	return root[STATE_KEY] ??= { delivered: new Set<string>(), widgetGeneration: 0 };
+	return root[STATE_KEY] ??= { delivered: new Set<string>() };
 }
 
 function safeMessage(value: string): string {
@@ -63,14 +62,8 @@ export function createReviewNoticeComponent(host?: NoticeHost) {
 			state.sessionId = sessionId;
 			state.current = undefined;
 			state.delivered.clear();
-			state.widgetGeneration++;
 			return true;
 		},
-		beginWidgetDelivery(): number { return ++state.widgetGeneration; },
-		isCurrentWidgetDelivery(generation: number, sessionId: string): boolean {
-			return state.widgetGeneration === generation && state.sessionId === sessionId;
-		},
-		invalidateWidgetDelivery(): void { state.widgetGeneration++; },
 		publish(input: { id: string; sessionId: string; level: NoticeLevel; message: string; summary?: string; action?: string }): boolean {
 			if (!input.id || !input.sessionId || input.sessionId !== state.sessionId) return false;
 			const key = `${input.sessionId}\u0000${input.id}`;
@@ -98,7 +91,6 @@ export function createReviewNoticeComponent(host?: NoticeHost) {
 		clear(): void {
 			state.current = undefined;
 			state.delivered.clear();
-			state.widgetGeneration++;
 		},
 	};
 }

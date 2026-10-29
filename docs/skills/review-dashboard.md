@@ -182,10 +182,11 @@ Normal Review commands provide recovery without claim-file or Factory archaeolog
 - `/review slay` starts another issue Slay from the refreshed visible queue.
 
 Review keeps the latest unresolved warning or error visible in the below-editor
-banner and the workbench. On hosts that render OMP `StatusNotice` components,
-the same event also appears as a native terminal toast; ANSI sessions retain the
-notice in the transcript. The `Next:` row keeps the relevant `/review` recovery
-command visible, and notices do not move focus or start work.
+banner and the workbench, with the recovery command on a separate `Next:` row.
+The full diagnostic is sent once through OMP's notification API, which the
+current extension host renders in the transcript. The current OMP extension API
+does not expose its internal `StatusNotice` native-toast component. Notices do
+not move focus or start work.
 Running `/review status` acknowledges and clears that persistent banner; it
 does not release claims or resume work.
 
