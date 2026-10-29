@@ -1,6 +1,6 @@
 import { appendFileSync, readFileSync } from "node:fs";
-import { createReviewExtension, NOTICE_ENTRY, taskSchemaSupportsStructuredOutput } from "/tmp/pr94-refresh-9c_38pxv/final-source/image/extension/review/extension.ts";
-import { rawKeyMatcher } from "/tmp/pr94-refresh-9c_38pxv/final-source/image/extension/review/keys.ts";
+import { createReviewExtension, NOTICE_ENTRY, taskSchemaSupportsStructuredOutput } from "/tmp/pr94-refresh-9c_38pxv/current-source/image/extension/review/extension.ts";
+import { rawKeyMatcher } from "/tmp/pr94-refresh-9c_38pxv/current-source/image/extension/review/keys.ts";
 const reviewPr = {
   number: 42, title: "fixture: incomplete file evidence", url: "https://github.com/fixture/review/pull/42",
   updatedAt: new Date().toISOString(), isDraft: false, mergeable: "MERGEABLE", reviewDecision: "REVIEW_REQUIRED",
@@ -30,11 +30,11 @@ async function fixtureFetch(url, init) {
     if (body.variables?.search !== undefined) {
       if (failNextRefresh) {
         failNextRefresh = false; hadRefreshFailure = true;
-        appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-100x32/probe/fetch-events.jsonl", JSON.stringify({status:503,search:body.variables.search}) + "\n");
+        appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-v2-100x32/probe/fetch-events.jsonl", JSON.stringify({status:503,search:body.variables.search}) + "\n");
         const detail = "fixture returned an incomplete structured reviewer response; ".repeat(7);
         return new Response("{}", { status: 503, statusText: `deterministic refresh failure: ${detail}` });
       }
-      appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-100x32/probe/fetch-events.jsonl", JSON.stringify({status:200,afterFailure:hadRefreshFailure,search:body.variables.search}) + "\n");
+      appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-v2-100x32/probe/fetch-events.jsonl", JSON.stringify({status:200,afterFailure:hadRefreshFailure,search:body.variables.search}) + "\n");
       const isIssue = String(body.variables.search).includes("is:issue");
       const item = isIssue ? { ...reviewPr, title: "fixture: browser issue", url: "https://github.com/fixture/review/issues/42" } : hadRefreshFailure ? { ...reviewPr, title: "fixture: fresh queue read after retry" } : reviewPr;
       return jsonResponse({ viewer: { login: "fixture" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [item] } });
@@ -72,7 +72,7 @@ export default function load(pi) {
 
   pi.sendUserMessage = (message, options) => {
     const targets = [...new Set(String(message).match(/fixture\/review#\d+/g) ?? [])];
-    appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-100x32/probe/send-attempts.jsonl", JSON.stringify({ targets, waveId: options?.waveId, rejected: rejectNextSend }) + "\n");
+    appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-v2-100x32/probe/send-attempts.jsonl", JSON.stringify({ targets, waveId: options?.waveId, rejected: rejectNextSend }) + "\n");
     if (rejectNextSend) {
       rejectNextSend = false;
       throw new Error("fixture intercepted an uncertain OMP handoff before a model request");
@@ -83,12 +83,12 @@ export default function load(pi) {
   pi.registerCommand("visual-record-draft", {
     description: "Record the current editor draft without changing it",
     handler: (_args, ctx) => {
-      appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-100x32/probe/draft-inspections.jsonl", JSON.stringify({draft: ctx.ui.getEditorText?.() ?? null}) + "\n");
+      appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-v2-100x32/probe/draft-inspections.jsonl", JSON.stringify({draft: ctx.ui.getEditorText?.() ?? null}) + "\n");
     },
   });
   const appendEntry = pi.appendEntry.bind(pi);
   pi.appendEntry = (customType, data) => {
-    if (customType === NOTICE_ENTRY) appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-100x32/probe/notice-customentries.jsonl", JSON.stringify({ customType, data }) + "\n");
+    if (customType === NOTICE_ENTRY) appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-v2-100x32/probe/notice-customentries.jsonl", JSON.stringify({ customType, data }) + "\n");
     return appendEntry(customType, data);
   };
   const env = { ...process.env, GH_TOKEN: "visual-probe-only", GITHUB_TOKEN: "", REVIEW_MODE: "review" };
@@ -98,7 +98,7 @@ export default function load(pi) {
   pi.registerCommand("visual-reject-next-send", { description: "Make the next OMP handoff fail before any model request", handler: () => { rejectNextSend = true; } });
   pi.registerCommand("visual-task-check", { description: "Record current task capability", handler: () => {
     const task = pi.getAllTools().find(tool => tool.name === "task");
-    appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-100x32/probe/task-schema-events.jsonl", JSON.stringify({ productionGuard: taskSchemaSupportsStructuredOutput(task?.parameters), apiVersion: pi.sessionShutdownLifecycleVersion ?? null }) + "\n");
+    appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-v2-100x32/probe/task-schema-events.jsonl", JSON.stringify({ productionGuard: taskSchemaSupportsStructuredOutput(task?.parameters), apiVersion: pi.sessionShutdownLifecycleVersion ?? null }) + "\n");
   } });
   pi.registerCommand("visual-inspect-notice-entry", { description: "Record a bounded view of the saved notice custom entry", handler: (_args, ctx) => {
     const file = ctx.sessionManager.getSessionFile();
@@ -109,9 +109,9 @@ export default function load(pi) {
       const entry = memoryEntries.filter((item) => item.type === "custom" && item.customType === NOTICE_ENTRY).at(-1);
       const fileEntry = fileEntries.filter((item) => item.type === "custom" && item.customType === NOTICE_ENTRY).at(-1);
       const data = entry?.data;
-      appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-100x32/probe/persisted-notice-inspection.jsonl", JSON.stringify({ sessionFile: file, memoryCustomCount: memoryEntries.filter((item) => item.type === "custom" && item.customType === NOTICE_ENTRY).length, jsonlCustomCount: fileEntries.filter((item) => item.type === "custom" && item.customType === NOTICE_ENTRY).length, inMemoryKeys: data ? Object.keys(data) : [], jsonlKeys: fileEntry?.data ? Object.keys(fileEntry.data) : [], title: data?.title, outcome: data?.outcome, action: data?.action, steps: data?.steps, diagnosticPreview: typeof data?.details === "string" ? data.details.slice(0, 180) : null }) + "\n");
+      appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-v2-100x32/probe/persisted-notice-inspection.jsonl", JSON.stringify({ sessionFile: file, memoryCustomCount: memoryEntries.filter((item) => item.type === "custom" && item.customType === NOTICE_ENTRY).length, jsonlCustomCount: fileEntries.filter((item) => item.type === "custom" && item.customType === NOTICE_ENTRY).length, inMemoryKeys: data ? Object.keys(data) : [], jsonlKeys: fileEntry?.data ? Object.keys(fileEntry.data) : [], title: data?.title, outcome: data?.outcome, action: data?.action, steps: data?.steps, diagnosticPreview: typeof data?.details === "string" ? data.details.slice(0, 180) : null }) + "\n");
     } catch (error) {
-      appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-100x32/probe/persisted-notice-inspection.jsonl", JSON.stringify({ sessionFile: file, readError: String(error) }) + "\n");
+      appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-v2-100x32/probe/persisted-notice-inspection.jsonl", JSON.stringify({ sessionFile: file, readError: String(error) }) + "\n");
     }
   } });
   pi.on("session_start", (_event, ctx) => {
@@ -123,7 +123,7 @@ export default function load(pi) {
       setWidget(key, content, options);
       const afterDraft = ctx.ui.getEditorText?.() ?? null;
       const afterFocus = getFocused?.();
-      if (key === "review-native-notice") appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-100x32/probe/notice-events.jsonl", JSON.stringify({ key, cleared: content === undefined, beforeDraft, afterDraft, focusInspectable: typeof getFocused === "function", focusStayedSame: typeof getFocused === "function" ? beforeFocus === afterFocus : null }) + "\n");
+      if (key === "review-native-notice") appendFileSync("/tmp/pr94-ansi-1di33tyt/refresh-final-v2-100x32/probe/notice-events.jsonl", JSON.stringify({ key, cleared: content === undefined, beforeDraft, afterDraft, focusInspectable: typeof getFocused === "function", focusStayedSame: typeof getFocused === "function" ? beforeFocus === afterFocus : null }) + "\n");
     };
   });
 }

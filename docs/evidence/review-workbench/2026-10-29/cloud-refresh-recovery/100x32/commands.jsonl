@@ -9,6 +9,8 @@
 {"action": "capture", "name": "03-refresh-failed.png"}
 {"action": "input", "data": "cg==", "label": "r"}
 {"action": "capture", "name": "04-refresh-recovered.png"}
+{"action": "input", "data": "cg==", "label": "r"}
+{"action": "capture", "name": "04b-repeat-healthy-refresh.png"}
 {"action": "input", "data": "cQ==", "label": "q"}
 {"action": "capture", "name": "05-draft-after.png"}
 {"action": "input", "data": "FQ==", "label": "audit draft saved in actions receipt; clear only to enter read-only command"}

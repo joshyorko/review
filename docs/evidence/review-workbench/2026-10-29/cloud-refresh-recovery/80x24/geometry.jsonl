@@ -3,6 +3,7 @@
 {"file": "02-draft-before.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 2097156}
 {"file": "03-refresh-failed.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 2097156}
 {"file": "04-refresh-recovered.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 2097156}
+{"file": "04b-repeat-healthy-refresh.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 2097156}
 {"file": "05-draft-after.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 2097156}
 {"file": "06-resolved-details.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 2097156}
 {"file": "07-status-after-recovery.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 2097156}

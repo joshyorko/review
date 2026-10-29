@@ -2,7 +2,7 @@ from pathlib import Path
 import json, os, shutil, sys, yaml
 
 root = Path(__file__).parent
-source = Path('/tmp/pr94-refresh-9c_38pxv/final-source')
+source = Path('/tmp/pr94-refresh-9c_38pxv/current-source')
 name, scenario = sys.argv[1:3]
 run = root / name
 run.mkdir()
@@ -92,7 +92,7 @@ env.update({'PATH': str(Path(bun).parent) + ':/workspace/.review-dev/tools/node_
     'LUNA_FACTORY_ENABLED': '1', 'LUNA_FACTORY_STATE_ROOT': str(run / 'home/.local/state/luna-factory'),
     'LUNA_FACTORY_CLAIMS_ROOT': str(run / 'home/.local/state/review-claims')})
 (run / 'child-env.json').write_text(json.dumps(env))
-(run / 'run.json').write_text(json.dumps({'scenario': scenario, 'source_sha': 'f9e44bd8614420c5bfb5db5c996db59acf989f5a',
+(run / 'run.json').write_text(json.dumps({'scenario': scenario, 'source_sha': '48fbaa8a0fa6929b261c1556e03dc0ffbdd7df6e',
     'fresh_home_before_spawn': not any((run / 'home/.local').glob('*')),
     'real_omp': '18.13.3 pinned source plus shipped session-lifecycle.patch, existing SDK dependencies; not packaged SIF', 'model_handoffs': 'intercepted before provider calls'}, indent=2) + '\n')
 print(run)

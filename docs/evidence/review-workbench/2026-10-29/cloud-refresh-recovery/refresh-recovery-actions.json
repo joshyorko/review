@@ -32,6 +32,13 @@
     "capture": "04-refresh-recovered.png"
   },
   {
+    "input": "r",
+    "wait": 1
+  },
+  {
+    "capture": "04b-repeat-healthy-refresh.png"
+  },
+  {
     "input": "q"
   },
   {
