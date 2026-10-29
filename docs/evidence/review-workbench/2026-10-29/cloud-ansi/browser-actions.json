@@ -1,0 +1,100 @@
+[
+  {
+    "capture": "01-baseline.png"
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "input": "DRAFT KEEP EXACTLY - review notes awaiting human approval.",
+    "label": "DRAFT KEEP EXACTLY - review notes awaiting human approval.",
+    "wait": 0.5
+  },
+  {
+    "capture": "02-draft-before.png"
+  },
+  {
+    "input": "\u001bb",
+    "label": "<ALT-B>",
+    "wait": 0.5
+  },
+  {
+    "capture": "03-pr-queue.png"
+  },
+  {
+    "input": "v",
+    "label": "v",
+    "wait": 0.5
+  },
+  {
+    "capture": "04-pr-reader.png"
+  },
+  {
+    "input": "o",
+    "label": "o",
+    "wait": 0.5
+  },
+  {
+    "capture": "05-pr-browser-failed.png"
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "capture": "06-draft-after-pr.png"
+  },
+  {
+    "input": "\u001bb",
+    "label": "<ALT-B>",
+    "wait": 0.5
+  },
+  {
+    "input": "\t",
+    "label": "<TAB>",
+    "wait": 0.5
+  },
+  {
+    "capture": "07-issue-queue.png"
+  },
+  {
+    "input": "v",
+    "label": "v",
+    "wait": 0.5
+  },
+  {
+    "capture": "08-issue-reader.png"
+  },
+  {
+    "input": "o",
+    "label": "o",
+    "wait": 0.5
+  },
+  {
+    "capture": "09-issue-browser-failed.png"
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "capture": "10-draft-after-issue.png"
+  },
+  {
+    "quit": true
+  }
+]

@@ -1,0 +1,32 @@
+                 Tip: Run `omp auth-broker serve` once and every machine pulls live
+                   tokens over the wire — refresh keys never leave the host; `omp
+              auth-gateway` fronts it as a drop-in proxy any OpenAI-compatible client
+                                              can hit
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+⬢ REVIEW WORKBENCH ┇ PULL REQUESTS 1/1 · fixture · ✔1 ✘0 ◐0 · 11.5s ago · LOCAL · attention order
+────────────────────────────────────────────────────────────────────────────────────────────────────
+PR READER: fixture/review#42 — fixture: incomplete file evidence
+Author: @fixture · Head: aaaaaaa · URL: https://github.com/fixture/review/pull/42
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Status: review_required · CI: success
+Human review policy: team (default) · Landing: unreviewed
+Deterministic PR fixture; no live GitHub request.
+
+── No comments yet ──
+╰╴ j/k scroll · ctrl+d/u page · n/p next/prev · u refresh · c reply · o browser · q/esc back
+⬢ PR 1/1 #42 ✔ fixture: incomplete file ev…

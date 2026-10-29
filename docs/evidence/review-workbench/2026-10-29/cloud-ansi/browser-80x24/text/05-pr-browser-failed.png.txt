@@ -1,0 +1,24 @@
+                           ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                           ▒▒  ██                  █
+                               ██       v18.13.3
+
+                Tip: Try task isolation to create CoW worktrees
+
+
+⬢ REVIEW WORKBENCH ┇ PULL REQUESTS 1/1 · fixture · ✔1 ✘0 ◐0 · 10.7s ago · LOCAL…
+────────────────────────────────────────────────────────────────────────────────
+│ Couldn’t open the pull request in your browser
+│ The review item is still available. Your draft was left unchanged.
+│ 1. Full link: https://github.com/fixture/review/pull/42
+│ 2. Open this link in your browser.
+│ 3. Or, while the reader is open, press o to try again.
+│ Message box: /review details
+PR READER: fixture/review#42 — fixture: incomplete file evidence
+Author: @fixture · Head: aaaaaaa · URL: https://github.com/fixture/review/pull/4
+────────────────────────────────────────────────────────────────────────────────
+Status: review_required · CI: success
+Human review policy: team (default) · Landing: unreviewed
+Deterministic PR fixture; no live GitHub request.
+
+╰╴ j/k scroll · ctrl+d/u page · n/p next/prev · u refresh · c reply · o browser…
+⬢ PR 1/1 #42 ✔ fixture: incomplete file ev…

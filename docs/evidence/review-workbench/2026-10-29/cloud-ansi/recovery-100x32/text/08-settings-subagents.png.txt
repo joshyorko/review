@@ -1,0 +1,32 @@
+╭─ Settings ───────────────────────────────────────────────────────────────────────────────────────╮
+│  🎨    🤖    ⌨    📋    🧠    📁    💻    🔧 Tools    📦 Tasks    🌐 Providers    📦 Plugins     │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│   Modes              │   Modes                                                                 █ │
+│ ❯ Subagents          │   Plan Mode                      true                                   █ │
+│   Isolation          │   Start in Plan Mode             false                                  █ │
+│   Commands & Skills  │   Autosave Plans                 false                                  █ │
+│                      │   Goal Mode                      true                                   █ │
+│                      │   Goal Status in Footer          true                                   █ │
+│                      │   Title Generator                fork                                   █ │
+│                      │   Refresh Title on Replan        true                                   █ │
+│                      │   Subagents                                                             █ │
+│                      │   Prefer Task Delegation         default                                █ │
+│                      │   Batch Task Calls               true                                   █ │
+│                      │   Structured Task Results        false                                  █ │
+│                      │   Speculative Task Launch        true                                   │ │
+│                      │   Per-Task Effort                false                                  │ │
+│                      │   Max Concurrent Tasks           4                                      │ │
+│                      │   LSP in Subagents               false                                  │ │
+│                      │   Max Task Recursion             1                                      │ │
+│                      │   Max Subagent Runtime           3600000                                │ │
+│                      │   Subagent Completion Probe      true                                   │ │
+│                      │   Soft Subagent Request Budget   90                                     │ │
+│                      │   Soft Request Budget Notice     true                                   │ │
+│                      │   Maximum Per-Spawn Effort       max                                    │ │
+│                                                                                                  │
+│   How strongly to push delegating work to subagents                                              │
+│                                                                                                  │
+│                                                                                                  │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ↑/↓ to jump sections · ⇥/⏎ to settings · ←/→ to switch tabs · ⎋ to close                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

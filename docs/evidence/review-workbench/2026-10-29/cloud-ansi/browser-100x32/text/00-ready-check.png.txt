@@ -1,0 +1,32 @@
+                 Tip: Run `omp auth-broker serve` once and every machine pulls live
+                   tokens over the wire — refresh keys never leave the host; `omp
+              auth-gateway` fronts it as a drop-in proxy any OpenAI-compatible client
+                                              can hit
+
+
+
+⬢ REVIEW WORKBENCH ┇ PULL REQUESTS 1/1 · fixture · ✔1 ✘0 ◐0 · 8.0s ago · LOCAL · attention order
+────────────────────────────────────────────────────────────────────────────────────────────────────
+▼ QUEUE 1/1                                      │ ▶ TRACE fixture/review#42
+▶ ☐ ✔ review #42 fixture: incomplete file evide… │   ○ no OMP activity yet
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+╰╴ s slay · alt+s autoslay · c comment · f fix · F factory · space select · alt+b repo group · A al…
+LOCAL · attention order · 0 selected · RUNNING · no active slay
+⬢ PR 1/1 #42 ✔ fixture: incomplete file ev…

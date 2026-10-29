@@ -1,0 +1,11 @@
+{"file": "00-ready-check.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460}
+{"file": "01-baseline.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460}
+{"file": "02-draft-before.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460}
+{"file": "03-pr-queue.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460}
+{"file": "04-pr-reader.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460}
+{"file": "05-pr-browser-failed.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460}
+{"file": "06-draft-after-pr.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460}
+{"file": "07-issue-queue.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460}
+{"file": "08-issue-reader.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460}
+{"file": "09-issue-browser-failed.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460}
+{"file": "10-draft-after-issue.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460}

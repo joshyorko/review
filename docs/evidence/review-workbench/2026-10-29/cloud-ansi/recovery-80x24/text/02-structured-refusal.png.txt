@@ -1,0 +1,24 @@
+
+                        ████████████    
+                           ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                           ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                           ▒▒  ██                  █
+                               ██       v18.13.3
+
+                    Tip: You can /btw to ask a side question
+
+
+⬢ REVIEW WORKBENCH ┇ PULL REQUESTS 1/1 · fixture · ✔1 ✘0 ◐0 · 17.2s ago · LOCAL…
+────────────────────────────────────────────────────────────────────────────────
+│ Review couldn’t start this item
+│ No new work was started for fixture/review#42.
+│ 1. If the dashboard is open, press q to close it.
+│ 2. If the editor has unsent text, save a copy and leave the box empty.
+│ 3. In the editor, run /settings. Under Tasks → Subagents, turn on Structured
+│    Task Results; it applies now.
+│ 4. Press Esc, then Alt+B; select this PR and press s to retry the slay.
+│ Message box: /review details
+▼ QUEUE 1/1
+▶ ☐ ✔ review #42 fixture: incomplete file evidence · review @fixture
+╰╴ s slay · alt+s autoslay · c comment · f fix · F factory · space select · alt…
+⬢ PR 1/1 #42 ✔ fixture: incomplete file ev…

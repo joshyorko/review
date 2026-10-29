@@ -1,0 +1,32 @@
+                                     ▒▒  ██                  █
+                                         ██       v18.13.3
+
+                              Tip: You can /btw to ask a side question
+
+
+
+⬢ REVIEW WORKBENCH ┇ PULL REQUESTS 1/1 · fixture · ✔1 ✘0 ◐0 · 4.2s ago · LOCAL · attention order
+────────────────────────────────────────────────────────────────────────────────────────────────────
+▼ QUEUE 1/1                                      │ ▶ TRACE fixture/review#42
+▶ ☐ ✔ review #42 fixture: incomplete file evide… │   ○ no OMP activity yet
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+                                                 │ 
+╰╴ s slay · alt+s autoslay · c comment · f fix · F factory · space select · alt+b repo group · A al…
+LOCAL · attention order · 0 selected · RUNNING · no active slay
+⬢ PR 1/1 #42 ✔ fixture: incomplete file ev…

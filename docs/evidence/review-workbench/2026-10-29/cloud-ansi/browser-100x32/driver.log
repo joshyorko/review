@@ -1,0 +1,35 @@
+
+(process:57634): Gtk-WARNING **: 18:32:42.865: Unable to acquire session bus: Could not connect: No such file or directory
+/tmp/pr94-ansi-1di33tyt/capture.py:54: DeprecationWarning: Vte.Terminal.spawn_sync is deprecated
+  ok, pid = term.spawn_sync(Vte.PtyFlags.DEFAULT, str(root / 'work'), argv,
+{"event": "spawn", "ok": true, "pid": 57677, "argv": ["/workspace/.review-dev/visual-install/bun/bun-linux-x64-baseline/bun", "/tmp/pr94-ansi-1di33tyt/omp-lifecycle/packages/coding-agent/src/cli.ts", "--profile", "review-visual", "--cwd", "/tmp/pr94-ansi-1di33tyt/final-browser-100x32/work", "--config", "/tmp/pr94-ansi-1di33tyt/final-browser-100x32/config.yml", "--extension", "/tmp/pr94-ansi-1di33tyt/accepted-source/image/extension/luna-factory", "--extension", "/tmp/pr94-ansi-1di33tyt/final-browser-100x32/probe/visual-probe.ts", "--no-skills", "--no-rules", "--no-context-files", "--no-lsp", "--no-title", "--no-pty", "--model", "local-probe/deterministic"], "timestamp": "2026-10-29T18:32:42Z"}
+/tmp/pr94-ansi-1di33tyt/capture.py:67: DeprecationWarning: Gtk.Widget.get_allocated_width is deprecated
+  'alloc_px': [term.get_allocated_width(), term.get_allocated_height()]}
+/tmp/pr94-ansi-1di33tyt/capture.py:67: DeprecationWarning: Gtk.Widget.get_allocated_height is deprecated
+  'alloc_px': [term.get_allocated_width(), term.get_allocated_height()]}
+/tmp/pr94-ansi-1di33tyt/capture.py:73: DeprecationWarning: GdkX11.X11Surface.get_xid is deprecated
+  g['window_xid'] = win.get_surface().get_xid()
+{"event": "capture", "file": "00-ready-check.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:32:53Z"}
+{"event": "capture", "file": "01-baseline.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:32:54Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:32:54Z"}
+{"event": "input", "label": "DRAFT KEEP EXACTLY - review notes awaiting human approval.", "timestamp": "2026-10-29T18:32:54Z"}
+{"event": "capture", "file": "02-draft-before.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:32:55Z"}
+{"event": "input", "label": "<ALT-B>", "timestamp": "2026-10-29T18:32:55Z"}
+{"event": "capture", "file": "03-pr-queue.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:32:56Z"}
+{"event": "input", "label": "v", "timestamp": "2026-10-29T18:32:56Z"}
+{"event": "capture", "file": "04-pr-reader.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:32:57Z"}
+{"event": "input", "label": "o", "timestamp": "2026-10-29T18:32:57Z"}
+{"event": "capture", "file": "05-pr-browser-failed.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:32:57Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:32:58Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:32:58Z"}
+{"event": "capture", "file": "06-draft-after-pr.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:32:59Z"}
+{"event": "input", "label": "<ALT-B>", "timestamp": "2026-10-29T18:32:59Z"}
+{"event": "input", "label": "<TAB>", "timestamp": "2026-10-29T18:33:00Z"}
+{"event": "capture", "file": "07-issue-queue.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:33:00Z"}
+{"event": "input", "label": "v", "timestamp": "2026-10-29T18:33:00Z"}
+{"event": "capture", "file": "08-issue-reader.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:33:01Z"}
+{"event": "input", "label": "o", "timestamp": "2026-10-29T18:33:01Z"}
+{"event": "capture", "file": "09-issue-browser-failed.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:33:02Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:33:02Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:33:03Z"}
+{"event": "capture", "file": "10-draft-after-issue.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:33:03Z"}

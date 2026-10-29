@@ -1,0 +1,24 @@
+╭─ Settings ───────────────────────────────────────────────────────────────────╮
+│  🎨    🤖    ⌨    📋    🧠    📁    💻    🔧    📦 Tasks    🌐    📦         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│   Goal Mode                      true                                      │ │
+│   Goal Status in Footer          true                                      │ │
+│   Title Generator                fork                                      █ │
+│   Refresh Title on Replan        true                                      █ │
+│   Subagents                                                                █ │
+│   Prefer Task Delegation         default                                   █ │
+│   Batch Task Calls               true                                      │ │
+│ ❯ Structured Task Results        true                                      │ │
+│   Speculative Task Launch        true                                      │ │
+│   Per-Task Effort                false                                     │ │
+│   Max Concurrent Tasks           4                                         │ │
+│   LSP in Subagents               false                                     │ │
+│   Max Task Recursion             1                                         │ │
+│   Max Subagent Runtime           3600000                                   │ │
+│                                                                              │
+│   Expose outputSchema/schemaMode on the task tool and return subagent        │
+│   results through the yield tool, validated against caller or agent output   │
+│   schemas. Off: task subagents have no yield tool and return their final…    │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ⏎/␣ to change · ⇥ to jump sections · ←/→ to switch tabs · Type to search · … │
+╰──────────────────────────────────────────────────────────────────────────────╯

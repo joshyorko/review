@@ -1,0 +1,24 @@
+
+                        ████████████    
+                           ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                           ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                           ▒▒  ██                  █
+                               ██       v18.13.3
+
+                    Tip: You can /btw to ask a side question
+
+ Dispatching fixture/review wave 1/1                                            
+
+⬢ REVIEW WORKBENCH ┇ PULL REQUESTS 1/1 · fixture · ✔1 ✘0 ◐0 · 31.9s ago · LOCAL…
+────────────────────────────────────────────────────────────────────────────────
+▼ QUEUE 1/1
+▶ ☐ ✔ review #42 fixture: incomplete file evidence · review @fixture
+▶ TRACE fixture/review#42
+  ○ no OMP activity yet
+╰╴ s slay · alt+s autoslay · c comment · f fix · F factory · space select · alt…
+LOCAL · attention order · 0 selected · RUNNING · RUNNING 0/1 terminal · 0 activ…
+⬢ PR 1/1 #42 ✔ fixture: incomplete file ev…
+
+
+
+

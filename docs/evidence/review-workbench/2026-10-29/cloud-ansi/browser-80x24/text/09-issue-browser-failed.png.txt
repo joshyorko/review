@@ -1,0 +1,24 @@
+                           ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                           ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                           ▒▒  ██                  █
+                               ██       v18.13.3
+
+                Tip: Try task isolation to create CoW worktrees
+
+
+⬢ REVIEW WORKBENCH ┇ ISSUES 1/1 · fixture · ✔1 ✘0 ◐0 · 2.1s ago · LOCAL · atten…
+────────────────────────────────────────────────────────────────────────────────
+│ Couldn’t open the issue in your browser
+│ The review item is still available. Your draft was left unchanged.
+│ 1. Full link: https://github.com/fixture/review/issues/42
+│ 2. Open this link in your browser.
+│ 3. Or, while the reader is open, press o to try again.
+│ Message box: /review details
+ISSUE READER: fixture/review#42 — fixture: browser issue
+Author: @fixture · Labels: none · URL: https://github.com/fixture/review/issues/
+────────────────────────────────────────────────────────────────────────────────
+State: open
+Human review policy: team (default)
+Deterministic issue fixture; no live GitHub request.
+
+╰╴ j/k scroll · ctrl+d/u page · n/p next/prev · u refresh · c reply · o browser…

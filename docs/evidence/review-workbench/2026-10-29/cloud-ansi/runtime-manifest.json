@@ -1,0 +1,14 @@
+{
+  "omp_version": "18.13.3",
+  "upstream_sha": "413d278a87a69b453efabf8d1fedb9940385e8c6",
+  "runtime": "Actual OMP source CLI executed by pinned Bun; existing SDK dependencies; source runtime, not compiled package or SIF",
+  "shipped_patch": "patches/omp/session-lifecycle.patch",
+  "patch_sha256": "7ea387de3a322c060ede8e7bb236944e1517c5b3591f37589104d923db692016",
+  "upstream_changes": " packages/coding-agent/src/async/job-manager.ts     | 12 ++++\n packages/coding-agent/src/exec/bash-executor.ts    | 63 ++++++++++++++++--\n .../src/extensibility/extensions/loader.ts         |  1 +\n .../src/extensibility/extensions/runner.ts         | 10 ++-\n .../src/extensibility/extensions/types.ts          | 13 ++++\n .../src/extensibility/shared-events.ts             | 26 ++++++++\n .../coding-agent/src/modes/interactive-mode.ts     | 27 ++++++++\n packages/coding-agent/src/session/agent-session.ts | 76 +++++++++++++++++-----\n packages/coding-agent/src/session/bash-runner.ts   | 28 +++++++-\n packages/coding-agent/src/session/eval-runner.ts   |  3 +-\n 10 files changed, 232 insertions(+), 27 deletions(-)\n",
+  "generated_html_asset_source": "Existing installed SDK 18.13.3 src/export/html/tool-views.generated.js",
+  "generated_html_asset_sha256": "1b0e66f293538438267e0232918e959e8e73f1ffb518abd05b6f7ce40a388a43",
+  "bun_version": "1.4.4",
+  "bun_archive_url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64-baseline.zip",
+  "bun_archive_sha256": "e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76",
+  "installation_scope": "Disposable cloud /workspace/.review-dev/visual-install only. No global dpkg or user-computer installation. No Apptainer or Tern installed."
+}

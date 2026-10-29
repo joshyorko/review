@@ -1,0 +1,11 @@
+{"file": "00-ready-check.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "01-baseline.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "02-draft-before.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "03-pr-queue.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "04-pr-reader.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "05-pr-browser-failed.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "06-draft-after-pr.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "07-issue-queue.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "08-issue-reader.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "09-issue-browser-failed.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "10-draft-after-issue.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}

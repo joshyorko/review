@@ -1,0 +1,47 @@
+{"event": "spawn", "ok": true, "pid": 57251, "argv": ["/workspace/.review-dev/visual-install/bun/bun-linux-x64-baseline/bun", "/tmp/pr94-ansi-1di33tyt/omp-lifecycle/packages/coding-agent/src/cli.ts", "--profile", "review-visual", "--cwd", "/tmp/pr94-ansi-1di33tyt/final-100x32-r2/work", "--config", "/tmp/pr94-ansi-1di33tyt/final-100x32-r2/config.yml", "--extension", "/tmp/pr94-ansi-1di33tyt/accepted-source/image/extension/luna-factory", "--extension", "/tmp/pr94-ansi-1di33tyt/final-100x32-r2/probe/visual-probe.ts", "--no-skills", "--no-rules", "--no-context-files", "--no-lsp", "--no-title", "--no-pty", "--model", "local-probe/deterministic"], "timestamp": "2026-10-29T18:31:29Z"}
+{"event": "capture", "file": "00-ready-check.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:33Z"}
+{"event": "capture", "file": "01-baseline.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:36Z"}
+{"event": "input", "label": "refused start", "timestamp": "2026-10-29T18:31:37Z"}
+{"event": "capture", "file": "02-structured-refusal.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:37Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:31:38Z"}
+{"event": "input", "label": "/visual-task-check<ENTER>", "timestamp": "2026-10-29T18:31:38Z"}
+{"event": "input", "label": "/visual-inspect-notice-entry<ENTER>", "timestamp": "2026-10-29T18:31:39Z"}
+{"event": "input", "label": "/review status<ENTER>", "timestamp": "2026-10-29T18:31:39Z"}
+{"event": "capture", "file": "03-status.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:40Z"}
+{"event": "input", "label": "jjjjjjjj", "timestamp": "2026-10-29T18:31:40Z"}
+{"event": "capture", "file": "04-status-scrolled.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:40Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:31:41Z"}
+{"event": "input", "label": "<ALT-B>", "timestamp": "2026-10-29T18:31:41Z"}
+{"event": "capture", "file": "05-same-pr-after-status.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:42Z"}
+{"event": "input", "label": "s", "timestamp": "2026-10-29T18:31:42Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:31:43Z"}
+{"event": "input", "label": "/settings<ENTER>", "timestamp": "2026-10-29T18:31:43Z"}
+{"event": "capture", "file": "06-settings.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:44Z"}
+{"event": "input", "label": "<RIGHT><RIGHT><RIGHT><RIGHT><RIGHT><RIGHT><RIGHT><RIGHT>", "timestamp": "2026-10-29T18:31:44Z"}
+{"event": "capture", "file": "07-settings-tasks.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:45Z"}
+{"event": "input", "label": "<TAB><DOWN>", "timestamp": "2026-10-29T18:31:45Z"}
+{"event": "capture", "file": "08-settings-subagents.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:45Z"}
+{"event": "input", "label": "<ENTER><DOWN><DOWN>", "timestamp": "2026-10-29T18:31:46Z"}
+{"event": "capture", "file": "09-structured-before.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:46Z"}
+{"event": "input", "label": " ", "timestamp": "2026-10-29T18:31:46Z"}
+{"event": "capture", "file": "10-structured-enabled.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:47Z"}
+{"event": "input", "label": "<ESC>", "timestamp": "2026-10-29T18:31:47Z"}
+{"event": "input", "label": "/visual-task-check<ENTER>", "timestamp": "2026-10-29T18:31:48Z"}
+{"event": "input", "label": "/review details<ENTER>", "timestamp": "2026-10-29T18:31:48Z"}
+{"event": "capture", "file": "11-details.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:49Z"}
+{"event": "input", "label": "jjjjjjjjjj", "timestamp": "2026-10-29T18:31:49Z"}
+{"event": "capture", "file": "12-details-scrolled.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:50Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:31:50Z"}
+{"event": "input", "label": "<ALT-B>", "timestamp": "2026-10-29T18:31:51Z"}
+{"event": "capture", "file": "13-same-pr-before-retry.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:51Z"}
+{"event": "input", "label": "s", "timestamp": "2026-10-29T18:31:51Z"}
+{"event": "capture", "file": "14-after-retry.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:52Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:31:52Z"}
+{"event": "input", "label": "/review details<ENTER>", "timestamp": "2026-10-29T18:31:53Z"}
+{"event": "capture", "file": "15-details-after-retry.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:53Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:31:54Z"}
+{"event": "input", "label": "/review status<ENTER>", "timestamp": "2026-10-29T18:31:54Z"}
+{"event": "capture", "file": "16-status-after-retry.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:55Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:31:55Z"}
+{"event": "input", "label": "/review <TAB>", "timestamp": "2026-10-29T18:31:56Z"}
+{"event": "capture", "file": "17-command-completion.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:31:56Z"}
