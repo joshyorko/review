@@ -467,8 +467,9 @@ default_env_file="$entrypoint_tmp/default.env"
 default_args="$(env -u REVIEW_INHERIT_OMP_CONFIG -u RTK_DISABLED -u RTK_TELEMETRY_DISABLED REVIEW_CONTRACT_CWD_FILE="$coordinator_cwd_file" REVIEW_CONTRACT_ENV_FILE="$default_env_file" LUNA_FACTORY_ENABLED=0 HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'review-appliance' <<<"$default_args" ||
   fail "the appliance entrypoint did not select its isolated profile"
-grep -Fqx -- '--config' <<<"$default_args" && grep -Fqx -- '/usr/share/review/appliance-config.yml' <<<"$default_args" ||
+if ! grep -Fqx -- '--config' <<<"$default_args" || ! grep -Fqx -- '/usr/share/review/appliance-config.yml' <<<"$default_args"; then
   fail "the packaged OMP config was not passed to the normal invocation"
+fi
 grep -Fxq 'RTK_DISABLED=1' "$default_env_file" ||
   fail "RTK rewriting was not disabled by default"
 grep -Fxq 'RTK_TELEMETRY_DISABLED=1' "$default_env_file" ||
@@ -491,8 +492,9 @@ inherited_before="$(sha256sum "$entrypoint_tmp/home/.omp/profiles/review/setting
 inherited_args="$(REVIEW_INHERIT_OMP_CONFIG=1 LUNA_FACTORY_ENABLED=0 HOME="$entrypoint_tmp/home" PATH="$entrypoint_tmp:$PATH" image/appliance/entrypoint.sh --version)"
 grep -qx 'review' <<<"$inherited_args" ||
   fail "the explicit host omp configuration opt-in did not select the review profile"
-grep -Fqx -- '--config' <<<"$inherited_args" && grep -Fqx -- '/usr/share/review/appliance-config.yml' <<<"$inherited_args" ||
+if ! grep -Fqx -- '--config' <<<"$inherited_args" || ! grep -Fqx -- '/usr/share/review/appliance-config.yml' <<<"$inherited_args"; then
   fail "the explicit host-profile setup dropped the packaged OMP config"
+fi
 [[ "$(sha256sum "$entrypoint_tmp/home/.omp/profiles/review/settings.json")" == "$inherited_before" ]] ||
   fail "the inherited OMP profile changed during appliance startup"
 enabled_env_file="$entrypoint_tmp/enabled.env"
