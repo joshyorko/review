@@ -8,7 +8,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
-import { createNativeToastWidget, createReviewNoticeComponent } from "./notice.ts";
+import { createNativeToastWidget, createReviewNoticeComponent, wrapNoticeText } from "./notice.ts";
 import { safePreview } from "./safe-output.ts";
 import { loadWave, saveWave } from "./wave-store.ts";
 import type { CiEvidenceSource, QueueItem } from "./github.ts";
@@ -309,7 +309,7 @@ export interface ReviewExtensionHost {
 	getFlag(name: string): string | boolean | undefined;
 	getAllTools?(): readonly unknown[];
 	registerTool(definition: unknown): void;
-	registerCommand?(name: string, definition: { description?: string; getArgumentCompletions?(argumentPrefix: string): ReviewAutocompleteItem[] | null; handler(args: string, ctx: CtxLike): unknown }): void;
+	registerCommand?(name: string, definition: { description?: string; getArgumentCompletions?(argumentPrefix: string): ReviewAutocompleteItem[] | null; handler(args: string, ctx: CtxLike): void | Promise<void> }): void;
 	appendEntry(customType: string, data?: unknown): void;
 	sendUserMessage(content: string, options?: { deliverAs?: string; waveId?: string }): void;
 	sendMessage?(message: { customType: string; content: string; display?: boolean; details?: unknown }, options?: { triggerTurn?: boolean }): void;
@@ -1339,7 +1339,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			notifyNotice(ctx, "error", "review-queue-refresh", {
 				title: "Couldn’t refresh the review list",
 				outcome: "The list on screen may be out of date.",
-				action: "Press Alt+U to try the refresh again.",
+			action: "Refresh the list again.",
+			steps: ["In the Review workbench, press r to refresh again.", "From the message box, press Alt+U."],
 			}, result.error);
 		}
 		syncStatus(ctx);
@@ -2019,22 +2020,24 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return `Fresh session opened and handoff ${recap.id} submitted without triggering a model turn; delivery acknowledgement is unavailable. Export: ${exportPath}`;
 	};
 
-	const showReadOnlyRecap = async (ctx: CtxLike, id: string, text: string): Promise<void> => {
+	const showReadOnlyRecap = async (ctx: CtxLike, id: string, text: string, heading = "Review recap"): Promise<void> => {
 		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
 			const painter = theme as { fg(color: string, value: string): string; bold(value: string): string };
 			let scroll = 0;
-			const lines = text.split("\n");
+			const sourceLines = text.split("\n");
+			let lines = sourceLines;
 			const screenHeight = isRecord(tui) && typeof tui.height === "number" ? tui.height : 24;
 			const requestRender = (): void => {
 				if (isRecord(tui) && typeof tui.requestRender === "function") (tui.requestRender as () => void).call(tui);
 			};
 			return {
 				render(width: number): readonly string[] {
+					lines = sourceLines.flatMap((line) => wrapNoticeText(line, width));
 					const bodyHeight = Math.max(1, Math.min(18, screenHeight - 4));
-					const content = lines.slice(scroll, scroll + bodyHeight).map((line) => truncateToWidth(painter.fg("text", line), width));
+					const content = lines.slice(scroll, scroll + bodyHeight).map((line) => painter.fg("text", line));
 					while (content.length < bodyHeight) content.push("");
 					return [
-						truncateToWidth(painter.bold(painter.fg("accent", `Review recap ${id} · read only`)), width),
+						truncateToWidth(painter.bold(painter.fg("accent", `${heading}${id ? ` ${id}` : ""} · read only`)), width),
 						truncateToWidth(painter.fg("border", "─".repeat(width)), width),
 						...content,
 						truncateToWidth(painter.fg("dim", `${scroll + 1}-${Math.min(lines.length, scroll + bodyHeight)} of ${lines.length} · j/k scroll · q/Esc close`), width),
@@ -2127,10 +2130,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					action: saved.action,
 					steps: Array.isArray(saved.steps) && saved.steps.every((step) => typeof step === "string") ? saved.steps : [saved.action],
 					details: saved.details,
+					resolution: typeof saved.resolution === "string" ? saved.resolution : undefined,
 				}
 				: undefined;
 			return notice
-				? `${notice.title}\n${notice.outcome}\nNext steps:\n${notice.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\nDiagnostic (read only):\n${notice.details}`
+				? `${notice.resolution ? `Resolved: ${notice.resolution}\n\n` : ""}${notice.title}\n${notice.outcome}\nNext steps:\n${notice.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\nDiagnostic (read only):\n${notice.details}`
 				: "No saved Review diagnostic is available in this session";
 		}
 		if (args === "policy" || args.startsWith("policy ")) {
@@ -2242,14 +2246,38 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.registerCommand?.("review", {
 		description: "Inspect or recover an interrupted Review repository wave",
 		getArgumentCompletions: getReviewArgumentCompletions,
-		handler: async (args, ctx) => {
+		handler: async (args, ctx): Promise<void> => {
 			try {
+				const command = args.trim().toLowerCase();
+				const acknowledged = command === "" || command === "status" ? nativeNotices.current : undefined;
 				const message = await reviewCommand(args, ctx);
-				return message;
+				if (command === "details") {
+					if (ctx.hasUI) await showReadOnlyRecap(ctx, "", message, "Review details");
+					else ctx.ui.notify(message, "info");
+				} else if (command === "" || command === "status") {
+					const ownedClaims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:")).length;
+					const savedRuns = recoveryBatches.size;
+					const statusLines = [
+						...(acknowledged ? [
+							acknowledged.level === "error" ? "Notice dismissed; the issue remains unresolved." : "Notice dismissed; Review status is unchanged.",
+							"Next steps:",
+							...acknowledged.steps.map((step, index) => `${index + 1}. ${step}`),
+							"Use /review details to read the saved diagnostic.",
+						] : []),
+						activeBatch ? "A Review wave is active." : "No active Review wave.",
+						...(savedRuns > 0 ? [`${savedRuns} saved Review run${savedRuns === 1 ? " needs" : "s need"} attention.`] : []),
+						ownedClaims > 0 ? `${ownedClaims} Review mutation claim${ownedClaims === 1 ? " is" : "s are"} retained.` : "No Review mutation claims are retained.",
+					];
+					const statusText = statusLines.join("\n");
+					if (ctx.hasUI) await showReadOnlyRecap(ctx, "", statusText, "Review status");
+					else ctx.ui.notify(statusText, "info");
+				} else if (!["slay", "re-slay"].includes(command)) {
+					ctx.ui.notify(message, "info");
+				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				if (ctx.hasUI) notifyUser(ctx, message, "error");
-				return ctx.hasUI ? "Review could not finish this command. Use /review details to inspect the saved diagnostic." : message;
+				else ctx.ui.notify(safePreview(message, 1_200, "head").text, "error");
 			}
 		},
 	});
@@ -2567,15 +2595,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const reviewerBlocker = reviewerCapabilityBlocker(kind, items);
 		if (reviewerBlocker) {
 			const subject = items.find((item) => item.type === "pr");
+			const retryKey = kind === "fix" ? "f" : "s";
+			const retryAction = kind === "fix" ? "fix this PR" : "review this PR";
 			notifyNotice(ctx, "error", `review-structured-task:${subject?.repo ?? "unknown"}#${subject?.id ?? 0}`, {
 				title: "Review couldn’t start this item",
 				outcome: `No new work was started for ${subject ? `${subject.repo}#${subject.id}` : "this item"}.`,
-				action: "Enable Structured Task Results and retry this PR.",
+				action: `Enable Structured Task Results and ${retryAction}.`,
 				steps: [
 					"If the dashboard is open, press q to close it.",
 					"If the editor has unsent text, save a copy and leave the box empty.",
 					"In the editor, run /settings. Under Tasks → Subagents, turn on Structured Task Results; it applies now.",
-					"Press Esc, then Alt+B; select this PR and press s to retry it.",
+					`Press Esc, then Alt+B; select this PR and press ${retryKey} to retry the ${kind}.`,
 				],
 			}, reviewerBlocker);
 			return { kind: "blocked", message: reviewerBlocker };
@@ -2669,6 +2699,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		persistBatch(ctx, { ...batch, waves: runnableWaves, skippedItems });
 		await dispatchCurrentWave(ctx, undefined, true);
 		if (activeBatch?.state === "running" && activeBatch.waveIdentity) {
+			const resolvedSetup = items
+				.filter((item) => item.type === "pr")
+				.map((item) => `review-structured-task:${item.repo}#${item.id}`)
+				.find((id) => nativeNotices.current?.id === id);
+			if (resolvedSetup) {
+				const resolution = nativeNotices.resolveCurrent(resolvedSetup, "Review admitted the same pull request after Structured Task Results was enabled.");
+				if (resolution) {
+					pi.appendEntry(NOTICE_ENTRY, resolution);
+					clearNativeNoticeWidget(ctx);
+					tui?.requestRender();
+				}
+			}
 			if (skippedCi.length > 0 || (selection.excludedItems?.length ?? 0) > 0) notifySelectionOmissions(ctx, skippedCi, selection.excludedItems ?? []);
 			return { kind: "admitted", message: `Review ${kind} admitted for ${runnableWaves[0]!.repo}` };
 		}
@@ -3537,7 +3579,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			notifyNotice(ctx, "error", "review-startup", {
 				title: "Review couldn’t open the workbench",
 				outcome: "The review list may not be current.",
-				action: "Open /review to try again, or use /review details to inspect the saved error.",
+				action: "Try reopening the Review workbench.",
+				steps: ["Press Alt+B to reopen the Review workbench.", "If it still won’t open, run /review details for the error."],
 			}, error);
 		});
 	});

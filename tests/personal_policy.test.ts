@@ -164,14 +164,20 @@ function fakeHost() {
 
 async function assertErrorDetails(pi: ReturnType<typeof fakeHost>, ctx: ReturnType<typeof fakeCtx>, expected: RegExp): Promise<void> {
 	assert.ok(pi.entries.some((entry) => entry.customType === NOTICE_ENTRY && /Review couldn’t complete this step/.test(entry.data.title)), "the operator sees the persistent human notice");
-	assert.match(await pi.commands.get("review").handler("details", ctx), expected);
+	await pi.commands.get("review").handler("details", ctx);
+	const wrappedExpected = new RegExp(expected.source.replace(/ /g, "\\s+"), expected.flags);
+	assert.match(ctx.modalOutputs.at(-1) ?? "", wrappedExpected);
 }
 
 function fakeCtx() {
 	const notifications: Array<{ message: string; level: string }> = [];
+	const overlays: any[] = [];
+	const modalOutputs: string[] = [];
 	return {
 		hasUI: true,
 		notifications,
+		overlays,
+		modalOutputs,
 		ui: {
 			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text },
 			notify: (message: string, level: string) => notifications.push({ message, level }),
@@ -183,7 +189,13 @@ function fakeCtx() {
 			editor: async () => undefined,
 			confirm: async () => true,
 			custom(factory: any) {
-				factory({ requestRender() {} }, this.theme, {}, () => {});
+				const view = factory({ requestRender() {} }, this.theme, {}, () => {});
+				overlays.push(view);
+				const header = view.render?.(100)?.[0] ?? "";
+				if (/^Review details · read only/.test(header)) {
+					modalOutputs.push(view.render(100).join("\n"));
+					view.handleInput("q");
+				}
 				return Promise.resolve();
 			},
 		},

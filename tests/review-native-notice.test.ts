@@ -94,7 +94,7 @@ test("banner presents a styled, numbered recovery card without diagnostics and c
 	const narrow = renderNoticeBanner(notice.current, { fg: (_role, text) => text, bold: (text) => text }, 14);
 	assert.ok(narrow.every((line) => visibleWidth(line) <= 14), "very narrow terminals wrap instead of clipping the card");
 	assert.ok(banner.every((line) => !line.includes("PRIVATE TECHNICAL DETAIL")));
-	assert.ok(banner.some((line) => line.includes("Details:")));
+	assert.ok(banner.some((line) => line.includes("Message box:")));
 	assert.ok(banner.some((line) => line.includes("/review details")));
 	assert.deepEqual(renderNoticeBanner(undefined, { fg: (_role, text) => text, bold: (text) => text }), []);
 });

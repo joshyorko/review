@@ -116,9 +116,15 @@ function nativeTaskParameters(structured = true) {
 		toJsonSchema: () => ({
 			type: "object",
 			properties: {
-				agent: { type: "string" },
-				task: { type: "string" },
-				...(structured ? { outputSchema: { type: ["object", "boolean", "string", "null"] }, schemaMode: { enum: ["permissive", "strict"] } } : {}),
+				context: { type: "string" },
+				tasks: {
+					type: "array",
+					items: { type: "object", properties: {
+						agent: { type: "string" },
+						task: { type: "string" },
+						...(structured ? { outputSchema: { type: ["object", "boolean", "string", "null"] }, schemaMode: { enum: ["permissive", "strict"] } } : {}),
+					} },
+				},
 			},
 		}),
 	});
@@ -623,6 +629,7 @@ function fakeCtx() {
 	const statuses = new Map();
 	const widgets = new Map();
 	const overlays = [];
+	const modalOutputs = [];
 	const pasted = [];
 	const confirmations = [];
 	const editorResponses = [];
@@ -639,6 +646,7 @@ function fakeCtx() {
 		statuses,
 		widgets,
 		overlays,
+		modalOutputs,
 		pasted,
 		confirmations,
 		editorResponses,
@@ -675,7 +683,13 @@ function fakeCtx() {
 			},
 			custom(factory) {
 				const { promise, resolve } = Promise.withResolvers();
-				overlays.push(factory({ requestRender: () => { renderRequests++; } }, this.theme, {}, resolve));
+				const view = factory({ requestRender: () => { renderRequests++; } }, this.theme, {}, resolve);
+				overlays.push(view);
+				const header = view.render?.(100)?.[0] ?? "";
+				if (/^Review (?:details|status) · read only/.test(header)) {
+					modalOutputs.push(view.render(100).join("\n"));
+					view.handleInput("q");
+				}
 				return promise;
 			},
 			theme: { fg: (_c, t) => t, bold: (t) => t, inverse: (t) => t },
@@ -686,6 +700,14 @@ function fakeCtx() {
 		sessionManager: { getBranch: () => [], getSessionId() { return ctx.sessionId; } },
 	};
 	return ctx;
+}
+
+async function runReviewCommand(pi, ctx, args, width = 100) {
+	void width;
+	const before = ctx.modalOutputs?.length ?? 0;
+	await pi.commands.get("review").handler(args, ctx);
+	if ((ctx.modalOutputs?.length ?? 0) > before) return ctx.modalOutputs.at(-1);
+	return ctx.notifications.at(-1)?.message ?? "";
 }
 
 // ---------------------------------------------------------------- vocabulary
@@ -3039,31 +3061,45 @@ test("Review blocks PR mutation admission when the effective OMP task schema omi
 	pi.toolInfo[0].parameters = nativeTaskParameters(false);
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;
-	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: hiveBackedFetch([
+		queueItem({ ciStatus: "success" }),
+		queueItem({ id: 7, repo: "projectbluefin/other", ciStatus: "success" }),
+	]), env: ISOLATED_ENV });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 	await pi.commands.get("review").handler("slay", ctx);
 	assert.equal(pi.messages.length, 0);
 	assert.match(savedReviewNoticeText(pi), /Review couldn’t start this item/);
 	assert.doesNotMatch(ctx.notifications.map((notice) => notice.message).join("\n"), /task\.structured|outputSchema|schemaMode/);
-	assert.match(ctx.overlays[0].render(80).join("\n"), /No new work was started for projectbluefin\/review#42/);
+	assert.match(ctx.overlays[0].render(80).join("\n"), /No new work was started for projectbluefin\/other#7/);
 	const recoveryCard = ctx.overlays[0].render(80).join("\n");
 	assert.match(recoveryCard, /turn on Structured/);
 	assert.match(recoveryCard, /Task Results/);
 	const narrowDashboard = ctx.overlays[0].render(80).join("\n");
-	assert.match(narrowDashboard, /Review couldn’t start this item[\s\S]*No new work was started[\s\S]*1\.[\s\S]*Details: \/review details/);
+	assert.match(narrowDashboard, /Review couldn’t start this item[\s\S]*No new work was started[\s\S]*1\.[\s\S]*Message box: \/review details/);
 	const narrowRows = ctx.overlays[0].render(80);
 	assert.ok(narrowRows.length <= ctx.overlays[0].rows, "the notice is included in the dashboard's actual row budget");
-	const secondItemRow = narrowRows.findIndex((line) => /merge #7/.test(line));
-	assert.ok(secondItemRow >= 0, "the selected queue remains visible below the notice");
-	ctx.overlays[0].handleClick(4, secondItemRow);
-	assert.equal(ctx.overlays[0].mode.selected()?.id, 7, "mouse row mapping accounts for the same notice rows as render");
-	const details = await pi.commands.get("review").handler("details", ctx);
+	const otherVisibleRow = narrowRows.findIndex((line) => /#42/.test(line));
+	assert.ok(otherVisibleRow >= 0, "the focused PR stays visible below the notice");
+	ctx.overlays[0].handleClick(4, otherVisibleRow);
+	assert.equal(ctx.overlays[0].mode.selected()?.id, 42, "mouse row mapping accounts for the same notice rows as render");
+	ctx.overlays[0].handleInput("k");
+	assert.equal(ctx.overlays[0].mode.selected()?.id, 7, "retry returns to the PR named in the setup notice");
+	const details = await runReviewCommand(pi, ctx, "details");
+	assert.match(details, /Review details · read only[\s\S]*q\/Esc close/);
 	assert.match(details, /Diagnostic \(read only\):/);
 	assert.match(details, /outputSchema and schemaMode/);
-	assert.match(details, /No new work was started for projectbluefin\/review#42/);
+	assert.match(details, /No new work was started for projectbluefin\/other#7/);
 	assert.ok(pi.entries.some((entry) => entry.customType === NOTICE_ENTRY && entry.data?.details?.includes("outputSchema")), "bounded diagnostics are saved to the session journal");
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0, "failed capability preflight creates no admitted wave");
+
+	pi.toolInfo[0].parameters = nativeTaskParameters(true);
+	ctx.overlays[0].handleInput("s");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 1, `the same selected PR is admitted after effective structured output becomes available: ${savedReviewNoticeText(pi)}`);
+	assert.doesNotMatch(ctx.overlays[0].render(80).join("\n"), /Review couldn’t start this item/, "the obsolete setup card clears after successful admission");
+	assert.match(await runReviewCommand(pi, ctx, "details"), /Resolved: Review admitted the same pull request/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /outputSchema and schemaMode/, "resolving the card keeps its diagnostic history");
 });
 
 test("structured reviewer capability reads OMP ArkType batch schemas through its wire conversion", () => {
@@ -3087,8 +3123,8 @@ test("Review Slay records all-CI-skipped selections as no-work, not completed wo
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: hiveBackedFetch([item]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	const result = await pi.commands.get("review").handler("slay", ctx);
-	assert.match(result, /No work admitted/);
+	await pi.commands.get("review").handler("slay", ctx);
+	assert.match(savedReviewNoticeText(pi), /No work admitted/);
 	assert.equal(pi.messages.length, 0);
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(batch.state, "blocked");
@@ -3097,8 +3133,8 @@ test("Review Slay records all-CI-skipped selections as no-work, not completed wo
 	assert.equal(batch.skippedItems[0].number, item.id);
 	assert.match(batch.error, /no work was completed/i);
 	assert.match(savedReviewNoticeText(pi), /No work was started/);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /No work admitted.*no work was completed/i);
-	const reconciliation = await pi.commands.get("review").handler("reconcile", ctx);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /No work admitted[\s\S]*no work was completed/i);
+	const reconciliation = await runReviewCommand(pi, ctx, "reconcile");
 	assert.match(reconciliation, /no work was admitted or completed/);
 	assert.equal(pi.messages.length, 0, "no-work reconciliation never dispatches or retries a worker");
 });
@@ -3110,9 +3146,9 @@ test("Review Slay reports an empty eligible selection without claiming admission
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	const result = await pi.commands.get("review").handler("slay", ctx);
-	assert.match(result, /No eligible work/);
-	assert.doesNotMatch(result, /requested|admitted|complete/i);
+	await pi.commands.get("review").handler("slay", ctx);
+	assert.match(savedReviewNoticeText(pi), /No items are ready to review/);
+	assert.doesNotMatch(savedReviewNoticeText(pi), /admitted|complete/i);
 	assert.equal(pi.messages.length, 0);
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0);
 });
@@ -3175,11 +3211,14 @@ test("dashboard reports unexpected custom-UI rejection and Alt+B can reopen it",
 	assert.deepEqual(nativeNotice.describe({ supports: (kind) => kind === "toast" }), {
 		k: "toast", p: { text: "Review couldn’t confirm what finished", sub: "Next: Inspect the error before retrying.", ttl: 2400 },
 	});
-	const status = await pi.commands.get("review").handler("status", ctx);
-	assert.match(status, /Notice dismissed; the issue is still open/);
+	const status = await runReviewCommand(pi, ctx, "status");
+	assert.match(status, /Review status · read only[\s\S]*q\/Esc close/);
+	assert.match(status, /Notice dismissed; the issue remains unresolved[\s\S]*Next steps:[\s\S]*Run \/review details/);
 	assert.doesNotMatch(ctx.overlays[0].render(100).join("\n"), /Review couldn’t confirm what finished/, "reading status acknowledges and clears the persistent notice");
 	assert.equal(ctx.widgets.get("review-native-notice"), undefined, "status acknowledgement removes the native widget too");
-	assert.match(await pi.commands.get("review").handler("details", ctx), /dashboard renderer failed/, "the diagnostic remains available after acknowledgement");
+	const details = await runReviewCommand(pi, ctx, "details");
+	assert.match(details, /Review details · read only[\s\S]*dashboard renderer failed/);
+	assert.match(details, /dashboard renderer failed/, "the diagnostic remains available after acknowledgement");
 	const next = fakeCtx();
 	next.sessionId = "session-2";
 	pi.events.get("session_switch")({}, next);
@@ -3207,7 +3246,7 @@ test("/review details recovers older saved notices without numbered steps", asyn
 	try {
 		await pi.events.get("session_start")({}, ctx);
 		await review.whenStarted();
-		const details = await pi.commands.get("review").handler("details", ctx);
+		const details = await runReviewCommand(pi, ctx, "details");
 		assert.match(details, /Next steps:\n1\. Run \/review status before retrying\./);
 		assert.match(details, /saved diagnostic/);
 	} finally {
@@ -3253,7 +3292,7 @@ test("dashboard browser launch exceptions preserve a copyable URL and human reco
 	assert.match(browserCard, /Couldn’t open the pull request in your browser/);
 	assert.match(browserCard, /link is in your draft/);
 	assert.doesNotMatch(ctx.notifications.at(-1)?.message ?? "", /browser launch failed/);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /browser launch failed/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /browser launch failed/);
 });
 
 test("dashboard browser failure names an issue accurately", async () => {
@@ -3275,7 +3314,7 @@ test("dashboard browser failure names an issue accurately", async () => {
 	assert.match(ctx.overlays[0].render(100).join("\n"), /Couldn’t open the issue in your browser/);
 	assert.doesNotMatch(savedReviewNoticeText(pi), /Couldn’t open the pull request/);
 	assert.match(ctx.pasted.at(-1) ?? "", /https:\/\/github\.com\/projectbluefin\/review\/issues\/43/);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /browser launch failed/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /browser launch failed/);
 });
 
 test("dashboard releases its open slot before a closed dialog finishes its action", async () => {
@@ -3445,7 +3484,7 @@ test("ordinary PR slay blocks failed CI before reviewer dispatch", async () => {
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 0);
 	assert.match(savedReviewNoticeText(pi), /No work was started/);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /#42: failure checks/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /#42: failure checks/);
 });
 
 test("slay skips known red and pending ordinary PRs without blocking eligible waves or repairs", async () => {
@@ -3506,12 +3545,11 @@ test("slay skips known red and pending ordinary PRs without blocking eligible wa
 	]);
 	assert.ok(batch.skippedItems.every((item) => Number.isFinite(item.observedAt)));
 	assert.match(savedReviewNoticeText(pi), /2 selected items were left out/);
-	const details = await pi.commands.get("review").handler("details", ctx);
+	const details = await runReviewCommand(pi, ctx, "details");
 	assert.match(details, /#41: failure checks \(statusCheckRollup\)/);
 	assert.match(details, /#44: pending checks \(checkSuites\)/);
-	const status = await pi.commands.get("review").handler("status", ctx);
-	assert.match(status, /Skipped CI: projectbluefin\/review#41 head=1{40} ci=failure source=statusCheckRollup observedAt=/);
-	assert.match(status, /Skipped CI: projectbluefin\/other#44 head=4{40} ci=pending source=checkSuites observedAt=/);
+	const status = await runReviewCommand(pi, ctx, "status");
+	assert.match(status, /Review status · read only[\s\S]*A Review wave is active[\s\S]*Review mutation claims are retained/);
 });
 
 test("slay blocks an auto-merge state without a recorded exact-head landing attempt", async () => {
@@ -3572,7 +3610,7 @@ test("slay blocks an auto-merge state without a recorded exact-head landing atte
 	assert.equal(batch.completedItems, 0);
 	assert.equal(batch.totalItems, 2);
 	assert.deepEqual(batch.skippedItems, [], "a later pending wave is not read past an unverified landing effect");
-	assert.match(await pi.commands.get("review").handler("details", ctx), /unverified|reconcile/i);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /unverified|reconcile/i);
 });
 
 test("all known red and pending selections persist a terminal skipped-only batch", async () => {
@@ -3824,10 +3862,10 @@ test("slay reports incomplete-file candidates separately while preserving select
 	assert.ok(Number.isFinite(batch.excludedItems[0].observedAt));
 	assert.match(savedReviewNoticeText(pi), /1 selected item was left out/);
 	assert.equal(ctx.notifications.some((notification) => /#84.*CI is/i.test(notification.message)), false);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /projectbluefin\/incomplete#84: incomplete changed-file list/);
-	const status = await pi.commands.get("review").handler("status", ctx);
-	assert.match(status, /Excluded candidate: projectbluefin\/incomplete#84 head=b{40} reason=incomplete changed-file list observedAt=/);
-	assert.doesNotMatch(status, /Skipped CI: projectbluefin\/incomplete#84/);
+	const details = await runReviewCommand(pi, ctx, "details");
+	assert.match(details, /projectbluefin\/incomplete#84: incomplete changed-file list/);
+	const status = await runReviewCommand(pi, ctx, "status");
+	assert.match(status, /Review status · read only[\s\S]*A Review wave is active/);
 });
 
 test("slay retains incomplete-file exclusions when every remaining selected issue is already submitted", async () => {
@@ -3919,9 +3957,11 @@ test("slay retains incomplete-file exclusions when every remaining selected issu
 		{ number: incompletePr.id, reason: "incomplete changed-file list", detail: undefined },
 		{ number: submittedIssue.id, reason: "pull request already submitted", detail: submittedIssue.submittedPrs.join(", ") },
 	]);
-	const status = await pi.commands.get("review").handler("status", ctx);
-	assert.match(status, /Excluded candidate: projectbluefin\/incomplete#86 head=d{40} reason=incomplete changed-file list observedAt=/);
-	assert.match(status, /Excluded candidate: projectbluefin\/already-submitted#87 reason=pull request already submitted detail=projectbluefin\/already-submitted#10 observedAt=/);
+	const status = await runReviewCommand(pi, ctx, "status");
+	assert.match(status, /1 saved Review run needs attention/);
+	const details = await runReviewCommand(pi, ctx, "details");
+	assert.match(details, /projectbluefin\/incomplete#86: incomplete changed-file list/);
+	assert.match(details, /projectbluefin\/already-submitted#87: pull request already submitted\s+\(projectbluefin\/already-submitted#10\)/);
 });
 
 test("slay durably accounts for workflow-file candidates when no work is dispatched", async () => {
@@ -4059,8 +4099,8 @@ for (const [actionKey, actionName] of [["s", "Slay"], ["f", "fix"]] as const) te
 	]);
 	assert.equal(receipt.state, "blocked", "all-excluded work is not recorded as completed");
 	assert.match(receipt.error, /No work admitted/);
-	const status = await pi.commands.get("review").handler("status", ctx);
-	assert.match(status, new RegExp(`Active Review wave: ${active.id} `));
+	const status = await runReviewCommand(pi, ctx, "status");
+	assert.match(status, /A Review wave is active/);
 	assert.notEqual(receipt.id, active.id);
 });
 
@@ -4229,7 +4269,7 @@ test("self-hosted slay and fix dispatch workflow pull requests while incomplete 
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 0, "stale workflow head must not dispatch a fixer");
 	assert.match(savedReviewNoticeText(pi), /Review couldn’t complete this step/);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /pull request head changed/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /pull request head changed/);
 
 });
 
@@ -4284,14 +4324,14 @@ test("generic PR fix revalidates every selected head and live workflow classific
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 0, "a newly workflow-changing live PR is blocked by managed policy");
 	assert.match(savedReviewNoticeText(pi), /Review couldn’t complete this step/);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /changes \.github\/workflows\/deploy\.yml/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /changes \.github\/workflows\/deploy\.yml/);
 
 	liveHead = "b".repeat(40);
 	ctx.notifications.length = 0;
 	ctx.overlays[0].handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 0, "a stale generic-fix head never dispatches");
-	assert.match(await pi.commands.get("review").handler("details", ctx), /pull request head changed/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /pull request head changed/);
 });
 
 test("generic workflow fix rejects push-only permission", async () => {
@@ -4338,7 +4378,7 @@ test("generic workflow fix rejects push-only permission", async () => {
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 0);
 	assert.match(savedReviewNoticeText(pi), /Review couldn’t complete this step/);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /workflow\/Actions write permission could not be verified/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /workflow\/Actions write permission could not\s+be verified/);
 });
 test("active slay blocks privileged and credential-bearing bash mutations", async () => {
 	const target = queueItem({ id: 7, repo: "projectbluefin/other", headSha: "7".repeat(40), reviewState: "approved", ciStatus: "success", labels: [] });
@@ -4453,16 +4493,16 @@ for (const scenario of [
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, { org: "example", fetchImpl: landingGuardFetch([target]), env, humanReviewObserver: observer });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	const changed = await pi.commands.get("review").handler(`policy example/solo ${scenario.mode}`, ctx);
+	const changed = await runReviewCommand(pi, ctx, `policy example/solo ${scenario.mode}`);
 	assert.match(changed, /Starts no work/);
 	assert.equal(pi.messages.length, 0, "policy selection does not dispatch work");
-	const read = await pi.commands.get("review").handler("policy example/solo", ctx);
+	const read = await runReviewCommand(pi, ctx, "policy example/solo");
 	assert.match(read, new RegExp(`${scenario.mode} \\(explicit\\)`));
 	const restarted = fakeHost();
 	const restartedCtx = fakeCtx(); restartedCtx.ui.parent = restartedCtx;
 	const restartedReview = createReviewExtension(restarted, { org: "example", fetchImpl: landingGuardFetch([target]), env, humanReviewObserver: observer });
 	await restarted.events.get("session_start")({}, restartedCtx); await restartedReview.whenStarted();
-	const persistedRead = await restarted.commands.get("review").handler("policy example/solo", restartedCtx);
+	const persistedRead = await runReviewCommand(restarted, restartedCtx, "policy example/solo");
 	assert.match(persistedRead, new RegExp(`${scenario.mode} \\(explicit\\)`), "policy survives extension restart");
 	ctx.overlays[0].handleInput("s"); await new Promise((resolve) => setImmediate(resolve));
 	await completeReviewTask(pi, ctx, 1, { deliver: scenario.expected !== "undelivered" });
@@ -4906,7 +4946,7 @@ test("a slay wave blocks when review jobs leave pull requests open", async () =>
 	assert.equal(batch.state, "blocked");
 	assert.match(batch.error, /projectbluefin\/review#42/);
 	assert.match(savedReviewNoticeText(pi), /Review couldn’t complete this step/);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /remain open without auto-merge/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /remain open without auto-merge/);
 });
 
 
@@ -4981,7 +5021,7 @@ test("restart blocks interrupted slays and never replays confirmed comments", as
 	assert.equal(pi.execCalls.length, 0, "confirmed comments are never replayed after restart");
 	assert.equal(pi.messages.length, 0, "interrupted repository waves are never replayed");
 	assert.match(savedReviewNoticeText(pi), /A planned comment was not posted/);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /interrupted comment plan was not replayed/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /interrupted comment plan was not replayed/);
 	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(recovered.state, "blocked");
 	assert.match(recovered.error, /session ended/);
@@ -5041,7 +5081,7 @@ test("pre-tool coordinator failure is durable evidence for explicit recovery wit
 	await restored.whenStarted();
 	assert.equal(restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "blocked");
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2, "restart leaves pre-tool recovery for explicit operator action");
-	await restarted.commands.get("review").handler("reconcile", next);
+	await runReviewCommand(restarted, next, "reconcile");
 
 	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
 	assert.equal(claims.list().length, 0);
@@ -5099,7 +5139,7 @@ test("retrying a claimed pre-tool failure preserves its original recovery proof"
 		assert.deepEqual(claims.list(), before);
 		assert.equal(fixture.pi.messages.length, 1);
 	}
-	await fixture.pi.commands.get("review").handler("reconcile", fixture.ctx);
+	await runReviewCommand(fixture.pi, fixture.ctx, "reconcile");
 	assert.equal(claims.list().length, 0, "the original proof still permits explicit reconciliation");
 	assert.equal(loadWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, owner).state, "cancelled");
 });
@@ -5126,7 +5166,7 @@ test("a live admission blocker on retry preserves the claimed dispatch evidence"
 	assert.deepEqual(loadWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, owner), saved);
 	assert.equal(fixture.pi.messages.length, 1);
 	assert.match(savedReviewNoticeText(fixture.pi), /Review couldn’t complete this step/);
-	assert.match(await fixture.pi.commands.get("review").handler("details", fixture.ctx), /pull request already submitted/);
+	assert.match(await runReviewCommand(fixture.pi, fixture.ctx, "details"), /pull request already submitted/);
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
 
@@ -5199,7 +5239,8 @@ test("a started job without terminal evidence remains an unaccounted UNKNOWN wor
 	assert.deepEqual(blocked.waveJobIds, ["job-1"]);
 	assert.deepEqual(blocked.waveTerminalJobStatuses, {});
 	assert.equal(blocked.state, "blocked");
-	const cancelled = await fixture.pi.commands.get("review").handler("cancel", fixture.ctx);
+	await fixture.pi.commands.get("review").handler("cancel", fixture.ctx);
+	const cancelled = fixture.ctx.notifications.at(-1)?.message ?? "";
 	assert.match(cancelled, /unaccounted worker/i);
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
@@ -5300,7 +5341,7 @@ test("a pre-tool proof does not release claims after an observed external effect
 	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(fixture.states), env: fixture.env });
 	await restarted.events.get("session_start")({}, next);
 	await restored.whenStarted();
-	await restarted.commands.get("review").handler("reconcile", next);
+	await runReviewCommand(restarted, next, "reconcile");
 
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
@@ -5323,7 +5364,7 @@ test("two submitted pull requests also keep a pre-tool wave UNKNOWN", async () =
 	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(fixture.states), env: fixture.env });
 	await restarted.events.get("session_start")({}, next);
 	await restored.whenStarted();
-	await restarted.commands.get("review").handler("reconcile", next);
+	await runReviewCommand(restarted, next, "reconcile");
 
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
@@ -5348,7 +5389,7 @@ test("a forged pre-tool marker with worker evidence remains fenced", async () =>
 	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(fixture.states), env: fixture.env });
 	await restarted.events.get("session_start")({}, next);
 	await restored.whenStarted();
-	await restarted.commands.get("review").handler("reconcile", next);
+	await runReviewCommand(restarted, next, "reconcile");
 
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
@@ -5371,7 +5412,7 @@ test("removing a captured submitted pull request remains an external-effect mism
 	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(fixture.states), env: fixture.env });
 	await restarted.events.get("session_start")({}, next);
 	await restored.whenStarted();
-	await restarted.commands.get("review").handler("reconcile", next);
+	await runReviewCommand(restarted, next, "reconcile");
 
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
@@ -5454,7 +5495,7 @@ test("later reconciliation never completes a previously cancelled wave", async (
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "cancelled");
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 	fixture.states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
-	await pi.commands.get("review").handler("reconcile", ctx);
+	await runReviewCommand(pi, ctx, "reconcile");
 
 	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(recovered.state, "cancelled");
@@ -5466,7 +5507,7 @@ test("post-dispatch running work prevents pre-tool claim release", async () => {
 	const fixture = await preToolFailureFixture();
 	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
 	fixture.ctx.asyncJobs.running = [{ id: "contradictory-job", status: "running", startTime: Date.now() }];
-	await fixture.pi.commands.get("review").handler("reconcile", fixture.ctx);
+	await runReviewCommand(fixture.pi, fixture.ctx, "reconcile");
 
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
@@ -5475,7 +5516,7 @@ test("an unavailable async snapshot cannot release pre-tool claims", async () =>
 	const fixture = await preToolFailureFixture();
 	await fixture.pi.events.get("agent_end")({ messages: [fixture.userMessage, fixture.assistantError] }, fixture.ctx);
 	fixture.ctx.getAsyncJobSnapshot = () => undefined;
-	await fixture.pi.commands.get("review").handler("reconcile", fixture.ctx);
+	await runReviewCommand(fixture.pi, fixture.ctx, "reconcile");
 
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
@@ -5495,7 +5536,7 @@ test("a non-hex 64-character prompt digest cannot release pre-tool claims", asyn
 	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(fixture.states), env: fixture.env });
 	await restarted.events.get("session_start")({}, next);
 	await restored.whenStarted();
-	await restarted.commands.get("review").handler("reconcile", next);
+	await runReviewCommand(restarted, next, "reconcile");
 
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
@@ -5733,7 +5774,7 @@ test("Slay landing recovery explains pending repaired head and settles only afte
 	assert.doesNotMatch(batch.error, /required CI|GitHub.*reject|resume once/i);
 	const claims = () => new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list();
 	effects[350].ciState = "SUCCESS";
-	const reconciliation = await pi.commands.get("review").handler("reconcile", ctx);
+	const reconciliation = await runReviewCommand(pi, ctx, "reconcile");
 	assert.deepEqual(claims().map((claim) => claim.resource).sort(), ["item:projectbluefin/review#350", "repo:projectbluefin/review"]);
 	const warning = reconciliation;
 	assert.match(warning, /still open|not.*merged/i);
@@ -5742,7 +5783,7 @@ test("Slay landing recovery explains pending repaired head and settles only afte
 	assert.equal(pi.messages.length, 1, "reconcile does not dispatch another worker or attempt a merge");
 	effects[350].state = "MERGED";
 	effects[350].merged = true;
-	await pi.commands.get("review").handler("reconcile", ctx);
+	await runReviewCommand(pi, ctx, "reconcile");
 	assert.equal(claims().length, 0);
 	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(recovered.state, "complete");
@@ -5759,7 +5800,7 @@ async function reconcileBlockedPrSlayWave(prepare, options = {}, beforeReconcile
 	ctx.sessionManager = { getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects, options), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	const reconciliation = await pi.commands.get("review").handler("reconcile", ctx);
+	const reconciliation = await runReviewCommand(pi, ctx, "reconcile");
 	return {
 		batch,
 		recovered: pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data ?? batch,
@@ -5778,7 +5819,7 @@ test("/review reconcile recovers a merged three-PR Slay wave and admits the next
 	ctx.sessionManager = { getSessionId: () => ctx.sessionId, getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	const firstReconcile = await pi.commands.get("review").handler("reconcile", ctx);
+	const firstReconcile = await runReviewCommand(pi, ctx, "reconcile");
 	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(recovered.state, "complete");
 	assert.equal(recovered.completedItems, 3);
@@ -5808,7 +5849,7 @@ test("#79 solo merge acknowledgement loss reconciles the recorded reviewed heads
 	};
 	createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects), env, humanReviewObserver });
 	await pi.events.get("session_start")({}, ctx);
-	await pi.commands.get("review").handler("reconcile", ctx);
+	await runReviewCommand(pi, ctx, "reconcile");
 	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(recovered.state, "complete");
 	assert.equal(recovered.completedItems, 3);
@@ -5852,7 +5893,7 @@ test("stopped new-policy Slay retains claims when GitHub merged an unreviewed fo
 		env,
 	});
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	await pi.commands.get("review").handler("reconcile", ctx);
+	await runReviewCommand(pi, ctx, "reconcile");
 	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list();
 	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
 	assert.equal(recovered.state, "blocked");
@@ -6057,7 +6098,7 @@ test("Review recovers a consumed worker from host evidence without session entri
 	const next = fakeCtx(); next.ui.parent = next;
 	const restored = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await restarted.events.get("session_start")({}, next); await restored.whenStarted();
-	await restarted.commands.get("review").handler("reconcile", next);
+	await runReviewCommand(restarted, next, "reconcile");
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
 	assert.equal(restarted.messages.length, 0);
 });
@@ -6112,7 +6153,7 @@ test("Review reconcile reports orphan UNKNOWN claims without inventing settlemen
 	const pi = fakeHost(); const ctx = fakeCtx(); ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch({}), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	const result = await pi.commands.get("review").handler("reconcile", ctx);
+	const result = await runReviewCommand(pi, ctx, "reconcile");
 	assert.match(result, /UNKNOWN.*orphan.*recovery record/i);
 	assert.equal(claims.list().length, 1);
 });
@@ -6223,7 +6264,7 @@ test("ambiguous submitted PR observations retain UNKNOWN issue-Slay claims", asy
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	const reconciliation = await pi.commands.get("review").handler("reconcile", ctx);
+	const reconciliation = await runReviewCommand(pi, ctx, "reconcile");
 
 	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
 	assert.equal(
@@ -6400,7 +6441,7 @@ test("session_start returns while the queue is still loading", { timeout: 5000 }
 	await review.whenStarted();
 	assert.equal(ctx.overlays.length, 1, "the one workbench opens after the initial queue read");
 	assert.match(savedReviewNoticeText(pi), /Couldn’t refresh the review list/, "a queue failure is described in user language");
-	assert.match(await pi.commands.get("review").handler("details", ctx), /504/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /504/);
 });
 test("refresh cancellation is silent while replacement activity continues", async () => {
 	const pi = fakeHost();
@@ -6651,7 +6692,7 @@ test("a hive-only session with a broken hub still fails visibly and concisely", 
 
 	assert.match(savedReviewNoticeText(pi), /Hive context isn’t available/, `a broken hive is explained, got ${JSON.stringify(ctx.notifications)}`);
 	assert.match(ctx.overlays[0].render(100).join("\n"), /GitHub review queue is still available/);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /502/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /502/);
 });
 
 
@@ -7092,7 +7133,7 @@ test("a Review session that offers the Factory handoff has a registered Factory 
 	assert.match(alone.render(100).join("\n"), /You can still browse the GitHub review queue/);
 	alone.handleInput("F");
 	for (let i = 0; i < 20; i++) await Promise.resolve();
-	assert.match(await pi.commands.get("review").handler("details", ctx), /never registered a controller/, "the diagnostic remains available on request");
+	assert.match(await runReviewCommand(pi, ctx, "details"), /never registered a controller/, "the diagnostic remains available on request");
 	ctx.overlays.at(-1).handleInput("q");
 
 	// Co-load: the real package entry registers the controller in this process.
@@ -7320,7 +7361,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("s");
 		await turn();
 		assert.equal(pi.messages.length, 0, "unadmitted issue slay does not dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /missing explicit admission label/);
 	}
 
 	// 2. No label
@@ -7331,7 +7372,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		await turn();
 		assert.equal(pi.messages.length, 0, "no label -> no dispatch");
 		assert.match(savedReviewNoticeText(pi), /Review couldn’t complete this step/);
-		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /missing explicit admission label/);
 	}
 
 	// 3. Only 3-human-queue
@@ -7342,7 +7383,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		await turn();
 		assert.equal(pi.messages.length, 0, "3-human-queue only -> no dispatch");
 		assert.match(savedReviewNoticeText(pi), /Review couldn’t complete this step/);
-		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /missing explicit admission label/);
 	}
 
 	// 4. Only hive/* or agent/* provenance
@@ -7353,7 +7394,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		await turn();
 		assert.equal(pi.messages.length, 0, "hive/agent labels only -> no dispatch");
 		assert.match(savedReviewNoticeText(pi), /Review couldn’t complete this step/);
-		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /missing explicit admission label/);
 	}
 
 	// 5. hold label present (even if 3-clanker-queue is present)
@@ -7363,7 +7404,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "hold label -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /hold label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /hold label/);
 	}
 
 	// 6. blocked label present (even if 3-clanker-queue is present)
@@ -7373,7 +7414,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "blocked label -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /blocked label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /blocked label/);
 	}
 
 	// 7. closed issue
@@ -7383,7 +7424,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "closed issue -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /issue is closed/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /issue is closed/);
 	}
 
 	// 8. Admission removed between display and dispatch
@@ -7394,7 +7435,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "label removed between display and dispatch -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /missing explicit admission label/);
 	}
 
 	// 9. Request failure (network error / HTTP error / GraphQL partial errors)
@@ -7404,7 +7445,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "network error -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /Admission check failed/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /Admission check failed/);
 	}
 	{
 		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { graphqlErrors: [{ message: "rate limited" }] });
@@ -7412,7 +7453,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "graphql error -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /rate limited/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /rate limited/);
 	}
 
 	// 10. Incomplete label evidence (labelsTruncated)
@@ -7422,7 +7463,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "truncated labels -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /incomplete label evidence/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /incomplete label evidence/);
 	}
 	// Missing freshness evidence fails closed.
 	{
@@ -7434,7 +7475,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "missing open-state evidence -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /issue is closed/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /issue is closed/);
 	}
 	{
 		const { pi, dashboard, ctx, turn } = await setup(
@@ -7445,7 +7486,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "missing label pagination evidence -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /incomplete label evidence/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /incomplete label evidence/);
 	}
 
 	// 11. Wrong returned repository or issue identity
@@ -7455,7 +7496,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "wrong repo returned -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /repository mismatch/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /repository mismatch/);
 	}
 	{
 		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { wrongNumber: true });
@@ -7463,7 +7504,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "wrong issue number returned -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /issue number mismatch/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /issue number mismatch/);
 	}
 
 	// 12. Missing node
@@ -7473,7 +7514,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "missing node -> no dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /not found/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /not found/);
 	}
 
 	// 13. Mixed batch containing one ineligible Review issue: zero dispatches (do not silently shrink)
@@ -7489,7 +7530,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "batch with one ineligible item yields zero dispatches");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /issue has hold label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /issue has hold label/);
 	}
 
 	// 14. Mixed batch containing Review issue and other repo issue: if Review issue is ineligible, zero dispatches
@@ -7504,7 +7545,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "mixed-repo batch with ineligible review issue yields zero dispatches");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /missing explicit admission label/);
 	}
 
 	// 15. Unmanaged repository issue: no admission read needed, still dispatches as before
@@ -7541,7 +7582,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "fix on unadmitted Review issue dispatches zero messages");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /missing explicit admission label/);
 	}
 	// fix on a projectbluefin/review PR is unchanged (no admission read, dispatches)
 	{
@@ -7571,7 +7612,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "review queue label does not admit a documentation issue");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /missing explicit admission label/);
 	}
 	{
 		// A review denied label (blocked) is not in the documentation policy, so it
@@ -7581,7 +7622,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "documentation hold label blocks its own dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /issue has hold label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /issue has hold label/);
 	}
 	{
 		// Negative fixture in the review repository: hold blocks there too.
@@ -7590,7 +7631,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "review hold label blocks its own dispatch");
-		assert.match(await pi.commands.get("review").handler("details", ctx), /issue has hold label/);
+		assert.match(await runReviewCommand(pi, ctx, "details"), /issue has hold label/);
 	}
 
 	// 17. Selection changes during the read: no retargeting
@@ -8427,7 +8468,7 @@ test("Review Fix ownership rejection preserves the saved run without creating an
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(other.messages.length, 0);
 	assert.equal(other.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0);
-	assert.match(await other.commands.get("review").handler("details", next), new RegExp(`review:${original.id}:0`));
+	assert.match(await runReviewCommand(other, next, "details"), new RegExp(`review:${original.id}:0`));
 });
 
 for (const choice of ["Stay", undefined]) test(`Review exit ${choice ?? "dismiss"} preserves wave and claims`, async () => {
@@ -8449,7 +8490,7 @@ for (const jobs of [0, 1, 100]) for (const choice of ["Pause and exit", "Cancel 
 	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
 	const receipt = pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(receipt.waveShutdown.settled, true);
-	await pi.commands.get("review").handler("reconcile", ctx);
+	await runReviewCommand(pi, ctx, "reconcile");
 	const saved = pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(saved.state, choice === "Pause and exit" ? "paused" : "cancelled");
 	assert.equal(saved.completedItems, 0);
@@ -8468,7 +8509,7 @@ test("Review signal exit defaults pause; foreign, premature and duplicate settle
 	const count = pi.entries.length;
 	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
 	assert.equal(pi.entries.length, count);
-	const result = await pi.commands.get("review").handler("reconcile", ctx);
+	const result = await runReviewCommand(pi, ctx, "reconcile");
 	assert.match(result, /missing positive owning-session/);
 });
 
@@ -8477,10 +8518,10 @@ test("Review stopped worker receipt retains changed GitHub effect claims", async
 	pi.events.get("session_shutdown")({}, ctx);
 	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
 	states["projectbluefin/review#77"].submittedPrs.push("https://github.com/projectbluefin/review/pull/99", "https://github.com/projectbluefin/review/pull/100");
-	const result = await pi.commands.get("review").handler("reconcile", ctx);
+	const result = await runReviewCommand(pi, ctx, "reconcile");
 	assert.match(result, /execution stopped; GitHub effect proof/);
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
-	await pi.commands.get("review").handler("resume", ctx);
+	await runReviewCommand(pi, ctx, "resume");
 	assert.equal(pi.messages.length, 1);
 });
 
@@ -8491,7 +8532,7 @@ test("Review paused Slay resumes after an observed current-head approval without
 	effects[item.id].reviews = [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: item.headSha } }];
 	pi.events.get("session_shutdown")({}, ctx);
 	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
-	await pi.commands.get("review").handler("reconcile", ctx);
+	await runReviewCommand(pi, ctx, "reconcile");
 	const paused = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(paused.state, "paused");
 	assert.equal(paused.completedItems, 0, "settled approval effects do not complete the landing objective");
@@ -8518,7 +8559,7 @@ test("Review live queue refresh cannot replace the admitted Slay head or release
 	assert.equal(batch.waves[0].items.find((item) => item.id === items[0].id).headSha, items[0].headSha, "queue reconciliation preserves the captured subject");
 	pi.events.get("session_shutdown")({}, ctx);
 	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
-	await pi.commands.get("review").handler("reconcile", ctx);
+	await runReviewCommand(pi, ctx, "reconcile");
 	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list();
 	assert.ok(claims.some((claim) => claim.resource === `item:${items[0].repo}#${items[0].id}`));
 	assert.ok(claims.some((claim) => claim.resource === `repo:${items[0].repo}`));
@@ -8533,11 +8574,11 @@ for (const scenario of ["incomplete-reviews", "changed-head", "stale-review", "s
 	effects[item.id].reviews = [{ state: "APPROVED", submittedAt: new Date(Date.now() + 100).toISOString(), author: { login: "maintainer" }, commit: { oid: scenario === "stale-review" ? "e".repeat(40) : effects[item.id].headSha } }];
 	pi.events.get("session_shutdown")({}, ctx);
 	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: scenario !== "shutdown-unsettled", pendingJobIds: scenario === "shutdown-unsettled" ? ["pending-mutation"] : [] }, ctx);
-	await pi.commands.get("review").handler("reconcile", ctx);
+	await runReviewCommand(pi, ctx, "reconcile");
 	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list();
 	assert.ok(claims.some((claim) => claim.resource === `item:${items[0].repo}#${items[0].id}`));
 	assert.ok(claims.some((claim) => claim.resource === `repo:${items[0].repo}`));
-	await pi.commands.get("review").handler("resume", ctx);
+	await runReviewCommand(pi, ctx, "resume");
 	assert.equal(pi.messages.length, 1, "unresolved effects cannot dispatch replacement workers");
 });
 
@@ -8549,7 +8590,7 @@ test("Review resumed stopped work uses a fresh claim owner and prompt after curr
 	ctx.sessionId = "new-session";
 	ctx.sessionManager.getBranch = () => pi.entries.map((entry) => ({ type: "custom", ...entry }));
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	await pi.commands.get("review").handler("resume", ctx);
+	await runReviewCommand(pi, ctx, "resume");
 	const current = pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data;
 	assert.notEqual(current.id, old.id);
 	assert.equal(current.waveSessionId, "new-session");
@@ -8581,7 +8622,7 @@ test("Review missing native lifecycle capability blocks mutation before claims",
 	assert.equal(pi.messages.length, 0);
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
 	assert.match(savedReviewNoticeText(pi), /Review couldn’t complete this step/);
-	assert.match(await pi.commands.get("review").handler("details", ctx), /upgrade to the packaged Review OMP/);
+	assert.match(await runReviewCommand(pi, ctx, "details"), /upgrade to\s+the packaged Review OMP/);
 });
 
 test("headless Review retains bounded diagnostics when a persistent notice card cannot render", async () => {
@@ -8616,7 +8657,7 @@ test("Review restart offers saved paused work and preserves stop proof across un
 	assert.equal(restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "paused");
 	restarted.events.get("tool_call")({ toolCallId: "unrelated-later-tool", toolName: "bash", input: { command: "pwd" } }, next);
 	await restarted.events.get("agent_end")({ messages: [{ role: "assistant", stopReason: "error" }] }, next);
-	await restarted.commands.get("review").handler("reconcile", next);
+	await runReviewCommand(restarted, next, "reconcile");
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
 	assert.equal(restarted.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "paused");
 	assert.equal(restarted.messages.length, 0);
@@ -8627,13 +8668,13 @@ test("Review stopped issue with one linked PR releases claims and resume never d
 	pi.events.get("session_shutdown")({}, ctx);
 	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
 	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#99"];
-	await pi.commands.get("review").handler("reconcile", ctx);
+	await runReviewCommand(pi, ctx, "reconcile");
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.completedItems, 0);
 	ctx.sessionId = "session-2";
 	ctx.sessionManager.getBranch = () => pi.entries.map((entry) => ({ type: "custom", ...entry }));
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	const resumed = await pi.commands.get("review").handler("resume", ctx);
+	const resumed = await runReviewCommand(pi, ctx, "resume");
 	assert.equal(pi.messages.length, 1);
 	assert.match(resumed, /already has submitted PRs/);
 });
@@ -8645,7 +8686,7 @@ test("Review late same-owner tool contradicts settlement and duplicate receipt c
 	pi.events.get("session_shutdown_settled")(event, ctx);
 	pi.events.get("tool_call")({ toolCallId: "late", toolName: "bash", input: { command: "pwd" } }, ctx);
 	pi.events.get("session_shutdown_settled")(event, ctx);
-	await pi.commands.get("review").handler("reconcile", ctx);
+	await runReviewCommand(pi, ctx, "reconcile");
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.waveShutdown.settled, false);
 });
@@ -8748,12 +8789,12 @@ test("Review failed resume capability check retains saved paused selection", asy
 	const { pi, ctx, review } = await exitFixture();
 	pi.events.get("session_shutdown")({}, ctx);
 	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
-	await pi.commands.get("review").handler("reconcile", ctx);
+	await runReviewCommand(pi, ctx, "reconcile");
 	const saved = pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data;
 	ctx.sessionManager.getBranch = () => pi.entries.map((entry) => ({ type: "custom", ...entry }));
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
 	pi.sessionShutdownLifecycleVersion = undefined;
-	await pi.commands.get("review").handler("resume", ctx);
+	await runReviewCommand(pi, ctx, "resume");
 	assert.equal(pi.messages.length, 1);
 	assert.equal(pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.id, saved.id);
 	assert.equal(pi.entries.filter((e) => e.customType === BATCH_ENTRY).at(-1).data.state, "paused");

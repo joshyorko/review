@@ -13,6 +13,7 @@ export interface ReviewNotice {
 	readonly action: string;
 	readonly steps: readonly string[];
 	readonly details: string;
+	readonly resolution?: string;
 }
 
 export interface NoticePainter {
@@ -95,6 +96,10 @@ function wrap(text: string, width: number, indent = ""): string[] {
 	return lines.length ? lines : [indent];
 }
 
+export function wrapNoticeText(text: string, width: number): string[] {
+	return wrap(text, width);
+}
+
 /** Compact themed card: severity title, truthful outcome, then the next action. */
 export function renderNoticeBanner(notice: ReviewNotice | undefined, painter: NoticePainter, width = 100): string[] {
 	if (!notice) return [];
@@ -114,7 +119,7 @@ export function renderNoticeBanner(notice: ReviewNotice | undefined, painter: No
 			lines.push(`${left} ${number} ${paintControls(content, painter)}`);
 		}
 	}
-	for (const line of wrap("Details: /review details", columns - 2, "  ")) {
+	for (const line of wrap("Message box: /review details", columns - 2, "  ")) {
 		lines.push(`${left} ${paintControls(line.trimStart(), painter)}`);
 	}
 	return lines;
@@ -194,6 +199,14 @@ export function createReviewNoticeComponent(host?: NoticeHost) {
 		acknowledge(): void {
 			if (state.current) state.delivered.delete(`${state.current.sessionId}\u0000${state.current.id}`);
 			state.current = undefined;
+		},
+		resolveCurrent(id: string, resolution: string): ReviewNotice | undefined {
+			if (!state.current || state.current.id !== id) return undefined;
+			const resolved = { ...state.current, resolution: safeText(resolution, 240) };
+			state.current = undefined;
+			state.latestDetails = resolved;
+			state.delivered.delete(`${resolved.sessionId}\u0000${resolved.id}`);
+			return resolved;
 		},
 		clear(): void {
 			state.current = undefined;
