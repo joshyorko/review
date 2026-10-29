@@ -76,6 +76,18 @@ test("same event ID refreshes its saved diagnostic when the cause changes", () =
 	}), false, "unchanged repeated diagnostics remain deduplicated");
 });
 
+test("successful recovery marks an acknowledged setup notice resolved without discarding its diagnostic", () => {
+	const notice = createReviewNoticeComponent();
+	notice.sessionChanged("session-resolved-notice");
+	notice.publish({ id: "review-structured-task:fixture/repo#42", sessionId: "session-resolved-notice", level: "error", content });
+	notice.acknowledge();
+	assert.equal(notice.current, undefined);
+	const resolved = notice.resolveCurrent("review-structured-task:fixture/repo#42", "The same pull request was admitted.");
+	assert.equal(resolved?.resolution, "The same pull request was admitted.");
+	assert.equal(notice.current, undefined, "resolved history does not revive the card");
+	assert.match(notice.latestDetails?.details ?? "", /structured task results/);
+});
+
 test("banner presents a styled, numbered recovery card without diagnostics and caps at 80 columns", () => {
 	const notice = createReviewNoticeComponent();
 	notice.sessionChanged("session-banner");

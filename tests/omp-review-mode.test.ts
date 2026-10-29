@@ -3549,7 +3549,8 @@ test("slay skips known red and pending ordinary PRs without blocking eligible wa
 	assert.match(details, /#41: failure checks \(statusCheckRollup\)/);
 	assert.match(details, /#44: pending checks \(checkSuites\)/);
 	const status = await runReviewCommand(pi, ctx, "status");
-	assert.match(status, /Review status · read only[\s\S]*A Review wave is active[\s\S]*Review mutation claims are retained/);
+	assert.match(status, /Review status · read only[\s\S]*Active slay run /);
+	assert.match(status, /Claim repo:projectbluefin\/review:[\s\S]*held by[\s\S]*review:/);
 });
 
 test("slay blocks an auto-merge state without a recorded exact-head landing attempt", async () => {
@@ -3865,7 +3866,7 @@ test("slay reports incomplete-file candidates separately while preserving select
 	const details = await runReviewCommand(pi, ctx, "details");
 	assert.match(details, /projectbluefin\/incomplete#84: incomplete changed-file list/);
 	const status = await runReviewCommand(pi, ctx, "status");
-	assert.match(status, /Review status · read only[\s\S]*A Review wave is active/);
+	assert.match(status, /Review status · read only[\s\S]*Active slay run /);
 });
 
 test("slay retains incomplete-file exclusions when every remaining selected issue is already submitted", async () => {
@@ -3958,7 +3959,7 @@ test("slay retains incomplete-file exclusions when every remaining selected issu
 		{ number: submittedIssue.id, reason: "pull request already submitted", detail: submittedIssue.submittedPrs.join(", ") },
 	]);
 	const status = await runReviewCommand(pi, ctx, "status");
-	assert.match(status, /1 saved Review run needs attention/);
+	assert.match(status, /Saved slay run .*: blocked/);
 	const details = await runReviewCommand(pi, ctx, "details");
 	assert.match(details, /projectbluefin\/incomplete#86: incomplete changed-file list/);
 	assert.match(details, /projectbluefin\/already-submitted#87: pull request already submitted\s+\(projectbluefin\/already-submitted#10\)/);
@@ -4100,7 +4101,7 @@ for (const [actionKey, actionName] of [["s", "Slay"], ["f", "fix"]] as const) te
 	assert.equal(receipt.state, "blocked", "all-excluded work is not recorded as completed");
 	assert.match(receipt.error, /No work admitted/);
 	const status = await runReviewCommand(pi, ctx, "status");
-	assert.match(status, /A Review wave is active/);
+	assert.match(status, new RegExp(`Active ${actionKey === "s" ? "slay" : "fix"} run `));
 	assert.notEqual(receipt.id, active.id);
 });
 

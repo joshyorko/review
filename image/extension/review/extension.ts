@@ -838,11 +838,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		tui?.requestRender();
 	};
 	const resolveStructuredSetupNotice = (ctx: CtxLike, admittedItems: readonly QueueItem[]): void => {
-		const current = nativeNotices.current;
-		if (!current?.id.startsWith("review-structured-task:")) return;
-		const admitted = admittedItems.find((item) => item.type === "pr" && current.id === `review-structured-task:${item.repo}#${item.id}`);
+		const notice = nativeNotices.current?.id.startsWith("review-structured-task:")
+			? nativeNotices.current
+			: nativeNotices.latestDetails?.id.startsWith("review-structured-task:") ? nativeNotices.latestDetails : undefined;
+		if (!notice) return;
+		const admitted = admittedItems.find((item) => item.type === "pr" && notice.id === `review-structured-task:${item.repo}#${item.id}`);
 		if (!admitted) return;
-		const resolution = nativeNotices.resolveCurrent(current.id, `Review admitted the same pull request (${admitted.repo}#${admitted.id}) after Structured Task Results was enabled.`);
+		const resolution = nativeNotices.resolveCurrent(notice.id, `Review admitted the same pull request (${admitted.repo}#${admitted.id}) after Structured Task Results was enabled.`);
 		if (!resolution) return;
 		pi.appendEntry(NOTICE_ENTRY, resolution);
 		clearNativeNoticeWidget(ctx);
@@ -2266,8 +2268,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					if (ctx.hasUI) await showReadOnlyRecap(ctx, "", message, "Review details");
 					else ctx.ui.notify(message, "info");
 				} else if (command === "" || command === "status") {
-					const ownedClaims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:")).length;
-					const savedRuns = recoveryBatches.size;
+					const allClaims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:"));
+					const ownedClaims = allClaims.slice(0, 8);
+					const savedRuns = [...recoveryBatches.values()].slice(0, 5);
 					const statusLines = [
 						...(acknowledged ? [
 							acknowledged.level === "error" ? "Notice dismissed; the issue remains unresolved." : "Notice dismissed; Review status is unchanged.",
@@ -2275,9 +2278,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 							...acknowledged.steps.map((step, index) => `${index + 1}. ${step}`),
 							"Use /review details to read the saved diagnostic.",
 						] : []),
-						activeBatch ? "A Review wave is active." : "No active Review wave.",
-						...(savedRuns > 0 ? [`${savedRuns} saved Review run${savedRuns === 1 ? " needs" : "s need"} attention.`] : []),
-						ownedClaims > 0 ? `${ownedClaims} Review mutation claim${ownedClaims === 1 ? " is" : "s are"} retained.` : "No Review mutation claims are retained.",
+						activeBatch ? `Active ${activeBatch.kind} run ${activeBatch.id}: ${activeBatch.state}.` : "No active Review wave.",
+						...savedRuns.map((batch) => `Saved ${batch.kind} run ${batch.id}: ${batch.state}.`),
+						...(recoveryBatches.size > savedRuns.length ? [`${recoveryBatches.size - savedRuns.length} additional saved runs not shown.`] : []),
+						...(ownedClaims.length > 0 ? ownedClaims.map((claim) => `Claim ${claim.resource}: held by ${claim.owner} (${claim.status}).`) : ["No Review mutation claims are retained."]),
+						...(allClaims.length > ownedClaims.length ? ["Additional retained claims not shown."] : []),
 					];
 					const statusText = statusLines.join("\n");
 					if (ctx.hasUI) await showReadOnlyRecap(ctx, "", statusText, "Review status");

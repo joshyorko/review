@@ -201,9 +201,10 @@ export function createReviewNoticeComponent(host?: NoticeHost) {
 			state.current = undefined;
 		},
 		resolveCurrent(id: string, resolution: string): ReviewNotice | undefined {
-			if (!state.current || state.current.id !== id) return undefined;
-			const resolved = { ...state.current, resolution: safeText(resolution, 240) };
-			state.current = undefined;
+			const source = state.current?.id === id ? state.current : state.latestDetails?.id === id ? state.latestDetails : undefined;
+			if (!source) return undefined;
+			const resolved = { ...source, resolution: safeText(resolution, 240) };
+			if (state.current?.id === id) state.current = undefined;
 			state.latestDetails = resolved;
 			state.delivered.delete(`${resolved.sessionId}\u0000${resolved.id}`);
 			return resolved;
