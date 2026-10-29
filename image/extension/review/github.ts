@@ -666,13 +666,16 @@ async function completePrFileList(
 	if (!firstPage || !Array.isArray(firstPage.nodes) || typeof firstPage.pageInfo?.hasNextPage !== "boolean") {
 		return { error: "GitHub returned incomplete changed-file metadata" };
 	}
+	if (!Number.isSafeInteger(node.changedFiles) || node.changedFiles! < 0) {
+		return { error: "GitHub returned an invalid or missing changed-file count" };
+	}
 	const paths: string[] = [];
 	const seenPaths = new Set<string>();
 	let pathBytes = 0;
 	const encoder = new TextEncoder();
-	const addPaths = (pagePaths: Array<{ path?: string }>): string | undefined => {
+	const addPaths = (pagePaths: unknown[]): string | undefined => {
 		for (const file of pagePaths) {
-			if (typeof file.path !== "string" || file.path.length === 0) return "GitHub returned a changed file without a path";
+			if (!isRecord(file) || typeof file.path !== "string" || file.path.length === 0) return "GitHub returned a changed file without a path";
 			if (seenPaths.has(file.path)) return "GitHub returned duplicate changed-file paths";
 			seenPaths.add(file.path);
 			pathBytes += encoder.encode(file.path).byteLength;
@@ -687,12 +690,12 @@ async function completePrFileList(
 	const firstPathError = addPaths(firstPage.nodes);
 	if (firstPathError) return { ...incompleteFiles(), error: firstPathError };
 	if (firstPage.pageInfo.hasNextPage === false) {
-		if (node.changedFiles !== undefined && paths.length !== node.changedFiles) {
+		if (paths.length !== node.changedFiles) {
 			return { ...incompleteFiles(), error: "GitHub changed-file count did not match the complete file list" };
 		}
 		return { files: firstPage };
 	}
-	if (!Number.isSafeInteger(node.changedFiles) || !node.headRefOid || !node.baseRefOid || node.closed !== false) {
+	if (!node.headRefOid || !node.baseRefOid || node.closed !== false) {
 		return incompleteFiles();
 	}
 	if (paths.length > node.changedFiles!) {
@@ -831,7 +834,7 @@ export async function fetchItemsByKey(
 					itemNode = {
 						...node,
 						files: {
-							nodes: node.files?.nodes ?? [],
+							nodes: completeFiles.files?.nodes ?? [],
 							pageInfo: { hasNextPage: true },
 						},
 					};

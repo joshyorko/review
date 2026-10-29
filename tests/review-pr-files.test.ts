@@ -68,6 +68,11 @@ function response(payload: unknown, status = 200): Response {
 	return new Response(JSON.stringify(payload), { status, statusText: status === 200 ? "OK" : "Unavailable" });
 }
 
+function initialWith(overrides: Record<string, unknown>) {
+	const payload = initialPayload();
+	return { data: { w0: { issueOrPullRequest: { ...payload.data.w0.issueOrPullRequest, ...overrides } } } };
+}
+
 test("named PR read paginates every changed path and sees a later workflow file", async () => {
 	const requests: string[] = [];
 	const result = await fetchItemsByKey(["joshyorko/job-hunt-tracker#35"], "prs", {
@@ -168,5 +173,132 @@ test("named PR read keeps file-page response bytes bounded", async () => {
 	});
 
 	assert.match(result.error ?? "", /byte limit/);
+	assert.equal(result.items[0]?.changedFilesComplete, false);
+});
+
+test("named PR read requires a valid total even when the first page is terminal", async (t) => {
+	for (const count of [undefined, null, -1, 1.5, "1"]) {
+		await t.test(`count ${String(count)}`, async () => {
+			const result = await fetchItemsByKey(["joshyorko/job-hunt-tracker#35"], "prs", {
+				token: "test-token",
+				fetchImpl: async () => response(initialWith({
+					changedFiles: count,
+					files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] },
+				})),
+			});
+			assert.equal(result.items[0]?.changedFilesComplete, false);
+			assert.match(result.error ?? "", /changed-file count/);
+		});
+	}
+});
+
+test("partial named responses preserve readable items without certifying missing file evidence", async () => {
+	const payload = initialWith({ changedFiles: undefined, files: { pageInfo: { hasNextPage: false }, nodes: [] } });
+	const result = await fetchItemsByKey(["joshyorko/job-hunt-tracker#35", "other/repo#7"], "prs", {
+		token: "test-token",
+		fetchImpl: async () => response({
+			data: { ...payload.data, w1: null },
+			errors: [{ message: "changedFiles unavailable", path: ["w0", "issueOrPullRequest", "changedFiles"] }],
+		}),
+	});
+	assert.equal(result.items.length, 1);
+	assert.equal(result.items[0]?.changedFilesComplete, false);
+	assert.match(result.error ?? "", /changedFiles unavailable/);
+});
+
+test("malformed first-page paths do not discard another readable named PR", async () => {
+	const bad = initialWith({ files: { pageInfo: { hasNextPage: false }, nodes: [null] } });
+	const good = initialWith({
+		number: 36, changedFiles: 1,
+		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] },
+	}).data.w0;
+	const result = await fetchItemsByKey(["joshyorko/job-hunt-tracker#35", "joshyorko/job-hunt-tracker#36"], "prs", {
+		token: "test-token",
+		fetchImpl: async () => response({ data: { ...bad.data, w1: good } }),
+	});
+	assert.equal(result.items.find((item) => item.id === 35)?.changedFilesComplete, false);
+	assert.equal(result.items.find((item) => item.id === 36)?.changedFilesComplete, true);
+	assert.match(result.error ?? "", /without a path/);
+});
+
+test("named PR read rejects continuation identity, state, and count changes", async (t) => {
+	for (const [name, overrides, expected] of [
+		["number", { number: 36 }, /identity or open state changed/],
+		["closed", { closed: true }, /identity or open state changed/],
+		["count", { changedFiles: 529 }, /count changed/],
+	] as const) {
+		await t.test(name, async () => {
+			let requests = 0;
+			const page = continuationPayload(100, "cursor-2");
+			Object.assign(page.data.w0.pullRequest, overrides);
+			const result = await fetchItemsByKey(["joshyorko/job-hunt-tracker#35"], "prs", {
+				token: "test-token",
+				fetchImpl: async () => response(++requests === 1 ? initialPayload() : page),
+			});
+			assert.equal(result.items[0]?.changedFilesComplete, false);
+			assert.match(result.error ?? "", expected);
+		});
+	}
+});
+
+test("named PR read rejects a continuation from another repository", async () => {
+	let requests = 0;
+	const page = continuationPayload(100, "cursor-2");
+	page.data.w0.nameWithOwner = "other/repository";
+	const result = await fetchItemsByKey(["joshyorko/job-hunt-tracker#35"], "prs", {
+		token: "test-token",
+		fetchImpl: async () => response(++requests === 1 ? initialPayload() : page),
+	});
+	assert.equal(result.items[0]?.changedFilesComplete, false);
+	assert.match(result.error ?? "", /no longer identifies/);
+});
+
+test("partial GraphQL continuation data never completes the file list", async () => {
+	let requests = 0;
+	const result = await fetchItemsByKey(["joshyorko/job-hunt-tracker#35"], "prs", {
+		token: "test-token",
+		fetchImpl: async () => response(++requests === 1 ? initialPayload() : {
+			...continuationPayload(100, "cursor-2"),
+			errors: [{ message: "file page unavailable" }],
+		}),
+	});
+	assert.equal(result.items[0]?.changedFilesComplete, false);
+	assert.match(result.error ?? "", /file page unavailable/);
+});
+
+test("missing and cycling continuation cursors stop within a bounded number of requests", async (t) => {
+	for (const cursor of [undefined, "", "cursor-1"]) {
+		await t.test(`cursor ${String(cursor)}`, async () => {
+			let requests = 0;
+			const page = continuationPayload(100, "cursor-2");
+			Object.assign(page.data.w0.pullRequest.files.pageInfo, { endCursor: cursor });
+			const result = await fetchItemsByKey(["joshyorko/job-hunt-tracker#35"], "prs", {
+				token: "test-token",
+				fetchImpl: async () => response(++requests === 1 ? initialPayload() : page),
+			});
+			assert.equal(requests, 2);
+			assert.equal(result.items[0]?.changedFilesComplete, false);
+			assert.match(result.error ?? "", /cursor did not advance/);
+		});
+	}
+});
+
+test("named PR read leaves more than thirty file pages incomplete", async () => {
+	let requests = 0;
+	const result = await fetchItemsByKey(["joshyorko/job-hunt-tracker#35"], "prs", {
+		token: "test-token",
+		fetchImpl: async () => {
+			const start = requests++ * 100;
+			const files = {
+				pageInfo: { hasNextPage: true, endCursor: `cursor-${requests}` },
+				nodes: Array.from({ length: 100 }, (_, i) => ({ path: `src/file-${start + i}.ts` })),
+			};
+			if (requests === 1) return response(initialWith({ changedFiles: 3001, files }));
+			const page = continuationPayload(start, `cursor-${requests}`);
+			Object.assign(page.data.w0.pullRequest, { changedFiles: 3001, files });
+			return response(page);
+		},
+	});
+	assert.equal(requests, 30);
 	assert.equal(result.items[0]?.changedFilesComplete, false);
 });

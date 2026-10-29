@@ -298,7 +298,7 @@ test("returned workflow repair fails closed without named file evidence", async 
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	await assertErrorDetails(pi, ctx, /complete changed-file list unavailable/);
+	await assertErrorDetails(pi, ctx, /Live pull-request check failed: example\/repo#42: GitHub returned incomplete changed-file metadata/);
 });
 
 test("personal workflow dispatch reports missing workflow write permission", async (t) => {
@@ -354,7 +354,7 @@ test("personal workflow dispatch fails closed when changed-file evidence is unav
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	await assertErrorDetails(pi, ctx, /complete changed-file list unavailable/);
+	await assertErrorDetails(pi, ctx, /Live pull-request check failed: example\/repo#42: GitHub returned incomplete changed-file metadata/);
 });
 
 test("Issue s and Alt-S dispatch issue implementation, while d requests issue evidence", () => {

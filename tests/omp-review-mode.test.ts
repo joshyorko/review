@@ -158,6 +158,7 @@ function fakeFetch(calls, known = {}) {
 							mergeable: "MERGEABLE",
 							reviewDecision: "REVIEW_REQUIRED",
 							headRefOid: "4".repeat(40),
+							changedFiles: 0,
 							author: { login: "jorge" },
 							repository: { nameWithOwner: "projectbluefin/review" },
 							labels: { nodes: [{ name: "launcher" }] },
@@ -177,6 +178,7 @@ function fakeFetch(calls, known = {}) {
 								mergeable: "MERGEABLE",
 								reviewDecision: "APPROVED",
 								headRefOid: "7".repeat(40),
+								changedFiles: 0,
 								author: { login: "ada" },
 								repository: { nameWithOwner: "projectbluefin/other" },
 								labels: { nodes: [] },
@@ -267,7 +269,7 @@ function hiveBackedFetch(items, calls = []) {
 		mergeable: "MERGEABLE",
 		reviewDecision: "REVIEW_REQUIRED",
 		headRefOid: item.headSha ?? String(item.id).padStart(40, "0"),
-		changedFiles: item.changedFiles,
+		changedFiles: item.changedFiles ?? 1,
 		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] },
 		autoMergeRequest: item.autoMergeEnabled ? { enabledAt: new Date(NOW).toISOString() } : null,
 		author: { login: "reviewer" },
@@ -1268,6 +1270,7 @@ test("direct requested users govern fetched Review and Slay order, not teams or 
 		reviewDecision: "REVIEW_REQUIRED",
 		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
 		files: { pageInfo: { hasNextPage: false }, nodes: [] },
+		changedFiles: 0,
 		reviewRequests,
 	});
 	const nodes = [
@@ -1368,6 +1371,7 @@ test("bounded named PR reads carry expensive evidence after lightweight discover
 								number: 1,
 								repository: { nameWithOwner: "owner/repo" },
 								headRefOid: "a".repeat(40),
+								changedFiles: 1,
 								files: { pageInfo: { hasNextPage: false }, nodes: [{ path: ".github/workflows/ci.yml" }] },
 								commits: { nodes: [{ commit: {
 									statusCheckRollup: null,
@@ -4397,6 +4401,58 @@ test("generic workflow fix rejects push-only permission", async () => {
 	assert.match(savedReviewNoticeText(pi), /Review couldn’t complete this step/);
 	assert.match(await runReviewCommand(pi, ctx, "details"), /workflow\/Actions write permission could not\s+be verified/);
 });
+
+test("Fix detects a later-page workflow before checking live workflow permission", async () => {
+	const head = "a".repeat(40);
+	const firstPaths = Array.from({ length: 100 }, (_, i) => ({ path: `src/file-${i}.ts` }));
+	const node = {
+		number: 10, closed: false, title: "workflow on the second page",
+		url: "https://github.com/example/review/pull/10", updatedAt: new Date(NOW).toISOString(),
+		isDraft: false, mergeable: "MERGEABLE", reviewDecision: "REVIEW_REQUIRED",
+		headRefOid: head, baseRefOid: "b".repeat(40), changedFiles: 101,
+		author: { login: "contributor" }, repository: { nameWithOwner: "example/review" },
+		labels: { nodes: [] },
+		files: { pageInfo: { hasNextPage: true, endCursor: "page-1" }, nodes: firstPaths },
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+	};
+	let filePages = 0;
+	const fetchImpl = async (url, init) => {
+		const target = String(url);
+		if (target === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => null }, json: async () => ({}) };
+		}
+		if (!target.includes("/graphql")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ permissions: { push: true } }) };
+		}
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		let data;
+		if (body.variables?.search !== undefined) {
+			data = { viewer: { login: "maintainer" }, search: { pageInfo: { hasNextPage: false }, nodes: [{ ...node, files: undefined }] } };
+		} else if (body.query.includes("pullRequest(number: 10)")) {
+			filePages++;
+			data = { w0: { nameWithOwner: "example/review", pullRequest: {
+				...node, files: { pageInfo: { hasNextPage: false }, nodes: [{ path: ".github/workflows/late.yml" }] },
+			} } };
+		} else {
+			data = { w0: { issueOrPullRequest: node } };
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+	};
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, {
+		org: "example", fetchImpl, env: ISOLATED_ENV, policy: GENERIC_WORKBENCH_POLICY,
+	});
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("f");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(filePages, 1, await runReviewCommand(pi, ctx, "details"));
+	assert.equal(pi.messages.length, 0, "push permission alone cannot admit this workflow Fix");
+	assert.match(await runReviewCommand(pi, ctx, "details"), /workflow\/Actions write permission could not\s+be\s+verified/);
+});
+
 test("active slay blocks privileged and credential-bearing bash mutations", async () => {
 	const target = queueItem({ id: 7, repo: "projectbluefin/other", headSha: "7".repeat(40), reviewState: "approved", ciStatus: "success", labels: [] });
 	const pi = fakeHost();
