@@ -2096,7 +2096,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if ((kind !== "slay" && kind !== "fix") || !items.some((item) => item.type === "pr")) return undefined;
 		const taskTool = pi.getAllTools?.()?.find((tool) => isRecord(tool) && tool.name === "task");
 		if (isRecord(taskTool) && taskSchemaSupportsStructuredOutput(taskTool.parameters)) return undefined;
-		return "Cannot admit Review mutation: the effective OMP task tool does not expose outputSchema and schemaMode. Enable task.structured: true in the packaged Review config, then reopen the Review session before retrying.";
+		const subject = items.find((item) => item.type === "pr");
+		if (!subject) return undefined;
+		return `Cannot admit ${kind} for ${subject.repo}#${subject.id}: the effective OMP task tool does not expose outputSchema and schemaMode. Enable task.structured: true in the packaged Review config, then reopen the Review session before retrying.`;
 	};
 
 	const reviewCommand = async (rawArgs: string, ctx: CtxLike): Promise<string> => {

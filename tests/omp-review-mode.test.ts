@@ -3035,7 +3035,10 @@ test("Review blocks PR mutation admission when the effective OMP task schema omi
 	await review.whenStarted();
 	await pi.commands.get("review").handler("slay", ctx);
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some(({ message, level }) => level === "error" && /task\.structured: true/.test(message) && /reopen the Review session/.test(message)));
+	assert.ok(ctx.notifications.some(({ message, level }) => level === "error"
+		&& /Cannot admit slay for projectbluefin\/review#42/.test(message)
+		&& /task\.structured: true/.test(message)
+		&& /reopen the Review session/.test(message)));
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0, "failed capability preflight creates no admitted wave");
 });
 
