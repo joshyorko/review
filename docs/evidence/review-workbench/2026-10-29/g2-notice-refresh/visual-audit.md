@@ -1,5 +1,9 @@
 # Review notice UX refresh: normal-width checkpoint
 
+This is a historical report for `516b289`, not a current Product Design PASS.
+The actual current-source 100×32, 80×24, and native TSP reviews remain pending
+or blocked. See [the cloud continuation report](../cloud-continuation/README.md).
+
 ## Source and capture
 
 - Source commit: `516b28987a492fffba6040bc3a4bbcc83817ef4c`

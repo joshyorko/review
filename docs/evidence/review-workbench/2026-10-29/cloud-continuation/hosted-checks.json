@@ -1,0 +1,65 @@
+{
+  "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+  "observed_at": "2026-10-29 17:44:55 UTC",
+  "runs": [
+    {
+      "id": 40923282332,
+      "name": "validate",
+      "status": "in_progress",
+      "conclusion": null,
+      "run_number": 194,
+      "jobs_url": "https://api.github.com/repos/joshyorko/review/actions/runs/40923282332/jobs",
+      "logs_url": "https://api.github.com/repos/joshyorko/review/actions/runs/40923282332/logs",
+      "workflow_id": 395171493
+    },
+    {
+      "id": 40923282412,
+      "name": "pr-title",
+      "status": "completed",
+      "conclusion": "success",
+      "run_number": 103,
+      "jobs_url": "https://api.github.com/repos/joshyorko/review/actions/runs/40923282412/jobs",
+      "logs_url": "https://api.github.com/repos/joshyorko/review/actions/runs/40923282412/logs",
+      "workflow_id": 395171490
+    },
+    {
+      "id": 40923282337,
+      "name": "luna-factory-dogfood",
+      "status": "completed",
+      "conclusion": "success",
+      "run_number": 78,
+      "jobs_url": "https://api.github.com/repos/joshyorko/review/actions/runs/40923282337/jobs",
+      "logs_url": "https://api.github.com/repos/joshyorko/review/actions/runs/40923282337/logs",
+      "workflow_id": 395171489
+    }
+  ],
+  "final_documentation_head": "Not yet created at this observation. Requery the current PR head; source results do not certify later documentation commits.",
+  "reruns_requested": false,
+  "latest_job_observation": {
+    "observed_at": "2026-10-29T17:46:19.446871+00:00",
+    "run_id": 40923282332,
+    "job_id": 123621959511,
+    "subject_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+    "status": "in_progress",
+    "completed_success_steps": [
+      "Static hygiene",
+      "Commit message CI-skip guard contract",
+      "Skill frontmatter valid and generated index fresh",
+      "Skill generator rejects unsafe manifest paths",
+      "Review package contract",
+      "Install just",
+      "Justfile parses",
+      "Guided onboarding behavior",
+      "Recipe bodies are valid bash",
+      "Test registry is complete",
+      "Launcher post-exit diagnostics and signal delivery",
+      "Review mode and pin updater contracts",
+      "Pinned OMP SDK type compatibility",
+      "Pinned OMP source regressions",
+      "Appliance pin contract",
+      "Packaged runtime capability report",
+      "Interactive launcher docs and shell stay aligned"
+    ],
+    "in_progress_step": "Build and execute Review appliance"
+  }
+}
