@@ -82,10 +82,21 @@ test("successful recovery marks an acknowledged setup notice resolved without di
 	notice.publish({ id: "review-structured-task:fixture/repo#42", sessionId: "session-resolved-notice", level: "error", content });
 	notice.acknowledge();
 	assert.equal(notice.current, undefined);
-	const resolved = notice.resolveCurrent("review-structured-task:fixture/repo#42", "The same pull request was admitted.");
-	assert.equal(resolved?.resolution, "The same pull request was admitted.");
+	const resolved = notice.resolveCurrent("review-structured-task:fixture/repo#42", "The same pull request was admitted.", "session-resolved-notice");
+	assert.equal(resolved?.resolution, "The same pull request was admitted.", "session-resolved-notice");
 	assert.equal(notice.current, undefined, "resolved history does not revive the card");
 	assert.match(notice.latestDetails?.details ?? "", /structured task results/);
+});
+
+test("a late recovery from another session cannot resolve the current session's matching notice", () => {
+	const notice = createReviewNoticeComponent();
+	notice.sessionChanged("old-session");
+	notice.publish({ id: "same-queue", sessionId: "old-session", level: "error", content });
+	notice.sessionChanged("new-session");
+	notice.publish({ id: "same-queue", sessionId: "new-session", level: "error", content });
+	assert.equal(notice.resolveCurrent("same-queue", "old request succeeded", "old-session"), undefined);
+	assert.equal(notice.current?.sessionId, "new-session");
+	assert.equal(notice.latestDetails?.resolution, undefined);
 });
 
 test("banner presents a styled, numbered recovery card without diagnostics and caps at 80 columns", () => {

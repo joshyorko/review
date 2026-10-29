@@ -844,7 +844,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (!notice) return;
 		const admitted = admittedItems.find((item) => item.type === "pr" && notice.id === `review-structured-task:${item.repo}#${item.id}`);
 		if (!admitted) return;
-		const resolution = nativeNotices.resolveCurrent(notice.id, `Review admitted the same pull request (${admitted.repo}#${admitted.id}) after Structured Task Results was enabled.`);
+		const resolution = nativeNotices.resolveCurrent(notice.id, `Review admitted the same pull request (${admitted.repo}#${admitted.id}) after Structured Task Results was enabled.`, noticeSessionId(ctx));
 		if (!resolution) return;
 		pi.appendEntry(NOTICE_ENTRY, resolution);
 		clearNativeNoticeWidget(ctx);
@@ -1346,6 +1346,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 
 	const refreshQueue = async (ctx: CtxLike) => {
+		const refreshSessionId = noticeSessionId(ctx);
 		const queueScope = `${mode.scope.kind}:${mode.scope.value}`;
 		const queueKind = mode.queueMode;
 		const noticeId = `review-queue-refresh:${queueScope}:${queueKind}`;
@@ -1360,7 +1361,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}, result.error);
 		} else if (!result.error && !result.cancelled && !result.truncated) {
 			const resolution = nativeNotices.resolveCurrent(noticeId,
-				`Review refreshed the ${queueKind === "prs" ? "pull request" : "issue"} list for ${queueScope}.`);
+				`Review refreshed the ${queueKind === "prs" ? "pull request" : "issue"} list for ${queueScope}.`, refreshSessionId);
 			if (resolution) {
 				pi.appendEntry(NOTICE_ENTRY, resolution);
 				if (!nativeNotices.current) clearNativeNoticeWidget(ctx);

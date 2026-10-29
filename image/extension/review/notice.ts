@@ -200,9 +200,10 @@ export function createReviewNoticeComponent(host?: NoticeHost) {
 			if (state.current) state.delivered.delete(`${state.current.sessionId}\u0000${state.current.id}`);
 			state.current = undefined;
 		},
-		resolveCurrent(id: string, resolution: string): ReviewNotice | undefined {
+		resolveCurrent(id: string, resolution: string, sessionId: string): ReviewNotice | undefined {
+			if (sessionId !== state.sessionId) return undefined;
 			const source = state.current?.id === id ? state.current : state.latestDetails?.id === id ? state.latestDetails : undefined;
-			if (!source) return undefined;
+			if (!source || source.sessionId !== sessionId) return undefined;
 			const resolved = { ...source, resolution: safeText(resolution, 240) };
 			if (state.current?.id === id) state.current = undefined;
 			state.latestDetails = resolved;
