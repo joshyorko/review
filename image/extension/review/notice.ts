@@ -203,7 +203,7 @@ export function createReviewNoticeComponent(host?: NoticeHost) {
 		resolveCurrent(id: string, resolution: string, sessionId: string): ReviewNotice | undefined {
 			if (sessionId !== state.sessionId) return undefined;
 			const source = state.current?.id === id ? state.current : state.latestDetails?.id === id ? state.latestDetails : undefined;
-			if (!source || source.sessionId !== sessionId) return undefined;
+			if (!source || source.sessionId !== sessionId || source.resolution) return undefined;
 			const resolved = { ...source, resolution: safeText(resolution, 240) };
 			if (state.current?.id === id) state.current = undefined;
 			state.latestDetails = resolved;

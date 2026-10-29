@@ -6561,6 +6561,9 @@ test("successful queue refresh resolves its notice, keeps diagnostics, and permi
 	const saved = pi.entries.filter((e) => e.customType === NOTICE_ENTRY && e.data?.resolution).at(-1)?.data;
 	assert.match(saved?.outcome ?? "", /list on screen may be out of date/);
 	assert.equal(pi.messages.length, 0, "read recovery must not start work");
+	const savedCount = pi.entries.filter((e) => e.customType === NOTICE_ENTRY).length;
+	pi.shortcuts.get("alt+u").handler(ctx); await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.entries.filter((e) => e.customType === NOTICE_ENTRY).length, savedCount, "another healthy refresh must not append duplicate resolution history");
 	fail = true;
 	pi.shortcuts.get("alt+u").handler(ctx);
 	await new Promise((resolve) => setImmediate(resolve));

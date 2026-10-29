@@ -83,7 +83,8 @@ test("successful recovery marks an acknowledged setup notice resolved without di
 	notice.acknowledge();
 	assert.equal(notice.current, undefined);
 	const resolved = notice.resolveCurrent("review-structured-task:fixture/repo#42", "The same pull request was admitted.", "session-resolved-notice");
-	assert.equal(resolved?.resolution, "The same pull request was admitted.", "session-resolved-notice");
+	assert.equal(resolved?.resolution, "The same pull request was admitted.");
+	assert.equal(notice.resolveCurrent("review-structured-task:fixture/repo#42", "The same pull request was admitted.", "session-resolved-notice"), undefined, "repeated healthy reads must not rewrite resolved history");
 	assert.equal(notice.current, undefined, "resolved history does not revive the card");
 	assert.match(notice.latestDetails?.details ?? "", /structured task results/);
 });
