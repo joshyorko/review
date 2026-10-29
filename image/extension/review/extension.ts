@@ -2995,9 +2995,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			const itemName = action.item.type === "pr" ? "pull request" : "issue";
 			const browserNotice = {
 				title: `Couldn’t open the ${itemName} in your browser`,
-				outcome: "The review item is still available, and its link is in your draft.",
-				action: "Open the review link from your draft.",
-				steps: ["Open the review link from your draft.", "If it still won’t open, check your browser and try again."],
+				outcome: "The review item is still available. Its full link is saved with the diagnostic.",
+				action: "See the link and retry steps in /review details.",
+				steps: [
+					"Press q twice to close the reader and dashboard.",
+					"If the message box has an unsent draft, save a copy elsewhere, then clear the box.",
+					"In the message box, run /review details to read the full link.",
+					"Press q, then Alt+B; select the same item and press v, then o to retry.",
+				],
 			};
 			try {
 				const result = await pi.exec(
@@ -3010,11 +3015,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					return;
 				}
 				const reason = result.killed ? "browser launch timed out" : result.stderr.trim() || `gh exited with code ${result.code}`;
-				ctx.ui.pasteToEditor(action.item.url);
-				notifyNotice(ctx, "warning", `review-browser:${action.item.repo}#${action.item.id}`, browserNotice, `${reason}; ${action.item.url}`);
+				notifyNotice(ctx, "warning", `review-browser:${action.item.repo}#${action.item.id}`, browserNotice, `${action.item.url}\n\n${reason}`);
 			} catch (error) {
-				ctx.ui.pasteToEditor(action.item.url);
-				notifyNotice(ctx, "warning", `review-browser:${action.item.repo}#${action.item.id}`, browserNotice, `${errorMessage(error)}; ${action.item.url}`);
+				notifyNotice(ctx, "warning", `review-browser:${action.item.repo}#${action.item.id}`, browserNotice, `${action.item.url}\n\n${errorMessage(error)}`);
 			}
 			return;
 		}

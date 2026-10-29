@@ -3276,7 +3276,7 @@ test("dashboard treats an AbortError as cancellation and remains reopenable", as
 	ctx.overlays[0].handleInput("q");
 });
 
-test("dashboard browser launch exceptions preserve a copyable URL and human recovery card", async () => {
+test("dashboard browser launch exceptions preserve the draft and expose the full link through Details", async () => {
 	const pi = fakeHost();
 	pi.exec = async () => { throw new Error("browser launch failed"); };
 	const ctx = fakeCtx();
@@ -3287,12 +3287,15 @@ test("dashboard browser launch exceptions preserve a copyable URL and human reco
 	ctx.overlays[0].handleInput("v");
 	ctx.overlays[0].handleInput("o");
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.match(ctx.pasted.at(-1) ?? "", /https:\/\/github\.com\/projectbluefin\/review\/pull\/42/);
+	assert.equal(ctx.pasted.length, 0, "browser failure does not change an existing editor draft");
 	const browserCard = ctx.overlays[0].render(100).join("\n");
 	assert.match(browserCard, /Couldn’t open the pull request in your browser/);
-	assert.match(browserCard, /link is in your draft/);
+	assert.match(browserCard, /Press q twice to close the reader and dashboard/);
+	assert.match(browserCard, /save a copy elsewhere, then clear[\s\S]*box/);
 	assert.doesNotMatch(ctx.notifications.at(-1)?.message ?? "", /browser launch failed/);
-	assert.match(await runReviewCommand(pi, ctx, "details"), /browser launch failed/);
+	const details = await runReviewCommand(pi, ctx, "details");
+	assert.match(details, /https:\/\/github\.com\/projectbluefin\/review\/pull\/42/);
+	assert.match(details, /browser launch failed/);
 });
 
 test("dashboard browser failure names an issue accurately", async () => {
@@ -3313,8 +3316,10 @@ test("dashboard browser failure names an issue accurately", async () => {
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.match(ctx.overlays[0].render(100).join("\n"), /Couldn’t open the issue in your browser/);
 	assert.doesNotMatch(savedReviewNoticeText(pi), /Couldn’t open the pull request/);
-	assert.match(ctx.pasted.at(-1) ?? "", /https:\/\/github\.com\/projectbluefin\/review\/issues\/43/);
-	assert.match(await runReviewCommand(pi, ctx, "details"), /browser launch failed/);
+	assert.equal(ctx.pasted.length, 0, "issue browser failure does not alter draft text");
+	const details = await runReviewCommand(pi, ctx, "details");
+	assert.match(details, /https:\/\/github\.com\/projectbluefin\/review\/issues\/43/);
+	assert.match(details, /browser launch failed/);
 });
 
 test("dashboard releases its open slot before a closed dialog finishes its action", async () => {
