@@ -1,5 +1,7 @@
 # Cloud ANSI visual evidence — 2026-10-29
 
+> Historical source-`369957e` checkpoint. The [refresh recovery follow-up](../cloud-refresh-recovery/README.md) fixes the persistent notice and provides new exact-source captures. The remaining native TSP and packaged-restart gates are recorded there.
+
 **Limited ANSI inspection accepted for the recovery and browser flows below. Full Product Design sign-off remains BLOCKED/PENDING, including native TSP.** These are fresh, unedited screenshots of real GTK4/VTE windows running the actual OMP source CLI and Review implementation, not generated terminal illustrations or protocol snapshots.
 
 ## Source and runtime

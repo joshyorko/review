@@ -1,0 +1,31 @@
+{"action": "capture", "name": "00-ready-check.png"}
+{"action": "capture", "name": "01-baseline.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3Zpc3VhbC1hcm0tcmVmcmVzaC1mYWlsdXJlDQ==", "label": "/visual-arm-refresh-failure<ENTER>"}
+{"action": "input", "data": "RFJBRlQgS0VFUCBFWEFDVExZIC0gcmVmcmVzaCBub3RlcyBhd2FpdGluZyBodW1hbiBhcHByb3ZhbC4=", "label": "DRAFT KEEP EXACTLY - refresh notes awaiting human approval."}
+{"action": "capture", "name": "02-draft-before.png"}
+{"action": "input", "data": "G2I=", "label": "<ALT-B>"}
+{"action": "input", "data": "cg==", "label": "r"}
+{"action": "capture", "name": "03-refresh-failed.png"}
+{"action": "input", "data": "cg==", "label": "r"}
+{"action": "capture", "name": "04-refresh-recovered.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "capture", "name": "05-draft-after.png"}
+{"action": "input", "data": "FQ==", "label": "audit draft saved in actions receipt; clear only to enter read-only command"}
+{"action": "input", "data": "L3JldmlldyBkZXRhaWxzDQ==", "label": "/review details<ENTER>"}
+{"action": "capture", "name": "06-resolved-details.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3JldmlldyBzdGF0dXMN", "label": "/review status<ENTER>"}
+{"action": "capture", "name": "07-status-after-recovery.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3Zpc3VhbC1hcm0tcmVmcmVzaC1mYWlsdXJlDQ==", "label": "/visual-arm-refresh-failure<ENTER>"}
+{"action": "input", "data": "G2I=", "label": "<ALT-B>"}
+{"action": "input", "data": "cg==", "label": "r"}
+{"action": "capture", "name": "08-new-identical-failure.png"}
+{"action": "input", "data": "cg==", "label": "r"}
+{"action": "capture", "name": "09-second-recovery.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3JldmlldyBkZXRhaWxzDQ==", "label": "/review details<ENTER>"}
+{"action": "capture", "name": "10-second-resolved-details.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "quit"}

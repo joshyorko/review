@@ -1,0 +1,11 @@
+{
+  "source": "Cloud Environment environment_status during packaged build attempt",
+  "mode": "restricted",
+  "state": "enforced",
+  "presets": [
+    "package_managers"
+  ],
+  "required_host": "registry.fedoraproject.org",
+  "required_host_in_effective_allowlist": false,
+  "configured_outbound_identity_count": 0
+}
