@@ -68,8 +68,8 @@ test("banner presents a styled, numbered recovery card without diagnostics and c
 	}, 80);
 	assert.match(banner[0]!, /<border>│<\/border> \*\*<error>Review couldn’t start this item/);
 	assert.match(banner[1]!, /No new work was started for fixture\/review#42/);
-	assert.match(banner[2]!, /Next steps/);
-	assert.ok(banner.some((line) => line.includes("1.")));
+	assert.match(banner[2]!, /1\./);
+	assert.ok(banner.some((line) => line.includes("2.")));
 	assert.ok(banner.some((line) => line.includes("<accent>\/settings<\/accent>")));
 	const plain = renderNoticeBanner(notice.current, { fg: (_role, text) => text, bold: (text) => text }, 100);
 	assert.ok(plain.every((line) => visibleWidth(line) <= 80), "wide terminals retain a readable card width");

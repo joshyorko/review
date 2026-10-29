@@ -2568,10 +2568,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				action: "Enable Structured Task Results and retry this PR.",
 				steps: [
 					"If the dashboard is open, press q to close it.",
-					"If the editor has an unfinished draft, save a copy, then leave the message box empty before /settings.",
+					"If the editor has unsent text, save a copy and leave the box empty.",
 					"In the editor, run /settings. Under Tasks → Subagents, turn on Structured Task Results; it applies now.",
-					"Press Esc, then Alt+B to reopen Review.",
-					"Select this PR and press s to retry it.",
+					"Press Esc, then Alt+B; select this PR and press s to retry it.",
 				],
 			}, reviewerBlocker);
 			return { kind: "blocked", message: reviewerBlocker };

@@ -3045,6 +3045,14 @@ test("Review blocks PR mutation admission when the effective OMP task schema omi
 	const recoveryCard = ctx.overlays[0].render(80).join("\n");
 	assert.match(recoveryCard, /turn on Structured/);
 	assert.match(recoveryCard, /Task Results/);
+	const narrowDashboard = ctx.overlays[0].render(80).join("\n");
+	assert.match(narrowDashboard, /Review couldn’t start this item[\s\S]*No new work was started[\s\S]*1\.[\s\S]*Details: \/review details/);
+	const narrowRows = ctx.overlays[0].render(80);
+	assert.ok(narrowRows.length <= ctx.overlays[0].rows, "the notice is included in the dashboard's actual row budget");
+	const secondItemRow = narrowRows.findIndex((line) => /merge #7/.test(line));
+	assert.ok(secondItemRow >= 0, "the selected queue remains visible below the notice");
+	ctx.overlays[0].handleClick(4, secondItemRow);
+	assert.equal(ctx.overlays[0].mode.selected()?.id, 7, "mouse row mapping accounts for the same notice rows as render");
 	const details = await pi.commands.get("review").handler("details", ctx);
 	assert.match(details, /Diagnostic \(read only\):/);
 	assert.match(details, /outputSchema and schemaMode/);
@@ -3154,7 +3162,7 @@ test("dashboard reports unexpected custom-UI rejection and Alt+B can reopen it",
 	assert.match(dashboardNotice, /Review couldn’t confirm what finished/, "the latest unresolved failure remains visible as a compact summary");
 	assert.match(dashboardNotice, /Don’t retry the selected item yet/);
 	assert.doesNotMatch(dashboardNotice, /dashboard renderer failed/, "long diagnostic details stay in the transcript instead of repeating in the banner");
-	assert.match(dashboardNotice, /Next steps[\s\S]*1\. Run \/review details to inspect the error[\s\S]*2\. Check the current Review status before retrying/);
+	assert.match(dashboardNotice, /1\. Run \/review details to inspect the error[\s\S]*2\. Check the current Review status before retrying/);
 	assert.equal(ctx.notifications.filter(({ message }) => /dashboard renderer failed/.test(message)).length, 0, "technical diagnostics stay out of the transcript");
 	const nativeNoticeFactory = ctx.widgets.get("review-native-notice");
 	assert.equal(typeof nativeNoticeFactory, "function", "the persistent failure also registers a passive native widget");

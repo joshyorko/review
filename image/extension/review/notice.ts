@@ -105,7 +105,6 @@ export function renderNoticeBanner(notice: ReviewNotice | undefined, painter: No
 	const lines = [
 		...wrap(title, columns - 2, "  ").map((line) => `${left} ${painter.bold(painter.fg(notice.level, line.trimStart()))}`),
 		...wrap(outcome, columns - 2, "  ").map((line) => `${left} ${painter.fg("text", line.trimStart())}`),
-		`${left} ${painter.fg("dim", "Next steps")}`,
 	];
 	for (const [index, step] of notice.steps.entries()) {
 		const wrapped = wrap(step, columns - 2, "    ");
