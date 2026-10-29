@@ -1,0 +1,215 @@
+{
+  "source_commit": "b350c596b47e4cbb5492a9a6658bbf5fc223e41d",
+  "screenshots": [
+    {
+      "path": "screenshots/01-dashboard-baseline.png",
+      "sha256": "4baa7289b6fe0cb12ccec4dbb1db542eb60998c4cf696fa2a13215508d80f2ae",
+      "width": 1280,
+      "height": 720,
+      "bytes": 49469
+    },
+    {
+      "path": "screenshots/02-dashboard-group-selected.png",
+      "sha256": "db54faae4b19ce11a9608ab3d33fde08f690fe1e195f52516cbb66429cd9bb72",
+      "width": 1280,
+      "height": 720,
+      "bytes": 50329
+    },
+    {
+      "path": "screenshots/03-slay-error-editor.png",
+      "sha256": "bd271ea3a728700eb8963250b6fded5a432d9d136ea5a342ceb3122b65cb1d59",
+      "width": 1280,
+      "height": 720,
+      "bytes": 47230
+    },
+    {
+      "path": "screenshots/04-slay-error-dashboard.png",
+      "sha256": "7e3314b483d1afe953c68129d3ba0b97ffcaa3a914135e00a2d2875d4c55112f",
+      "width": 1280,
+      "height": 720,
+      "bytes": 58459
+    },
+    {
+      "path": "screenshots/05-reader-before-warning.png",
+      "sha256": "6eabfd917461aeaa5b295f689ae9e79341997f9549ddeac2ac5ff31dddf87296",
+      "width": 1280,
+      "height": 720,
+      "bytes": 58211
+    },
+    {
+      "path": "screenshots/06-warning-early.png",
+      "sha256": "b782d476a744a99b8b9138dfef993db3398a87cb77dde880dd7ff59aa8d77460",
+      "width": 1280,
+      "height": 720,
+      "bytes": 70852
+    },
+    {
+      "path": "screenshots/07-error-retained-after-warning.png",
+      "sha256": "f6db19512fc152de558714e6fdffd31ad9aedf6cade3d2f52f1c1dd02fc2d98e",
+      "width": 1280,
+      "height": 720,
+      "bytes": 70860
+    },
+    {
+      "path": "screenshots/08-error-dashboard-after-reader.png",
+      "sha256": "19bdac2b71d836aa312c334792f5b2125b270f082d5b37841f23284a643a19da",
+      "width": 1280,
+      "height": 720,
+      "bytes": 71168
+    },
+    {
+      "path": "screenshots/09-error-persists-after-info.png",
+      "sha256": "ef2e289ddb47ec4301eae66574fe197ba1116be344d24517915fe5f850a31da0",
+      "width": 1280,
+      "height": 720,
+      "bytes": 61653
+    },
+    {
+      "path": "screenshots/10-status-ack.png",
+      "sha256": "7159a65c60b9fdb5601433dfe5ece787de2d473ee104495cf3520d2b6e04c379",
+      "width": 1280,
+      "height": 720,
+      "bytes": 57228
+    },
+    {
+      "path": "screenshots/11-review-completion.png",
+      "sha256": "a62a6770fe3a816056de75480caaa9bb2ab40d8afa7727a03d002a55eee2bbd6",
+      "width": 1280,
+      "height": 720,
+      "bytes": 79788
+    },
+    {
+      "path": "screenshots/12-draft-before-refresh-error.png",
+      "sha256": "2f0735c7bb7f5c98901b2cd175b7beb2ca703917cc6203a9d473719364b01441",
+      "width": 1280,
+      "height": 720,
+      "bytes": 58346
+    },
+    {
+      "path": "screenshots/13-refresh-error-early.png",
+      "sha256": "83cbdf6f6a67cf653c5de3f01ecadb167f637bf22d753345bfe6109434da9878",
+      "width": 1280,
+      "height": 720,
+      "bytes": 74662
+    },
+    {
+      "path": "screenshots/14-refresh-error-during-draft.png",
+      "sha256": "83cbdf6f6a67cf653c5de3f01ecadb167f637bf22d753345bfe6109434da9878",
+      "width": 1280,
+      "height": 720,
+      "bytes": 74662
+    },
+    {
+      "path": "screenshots/15-draft-continued.png",
+      "sha256": "d0818be0c0f81f91f49069a6dc3813d79ff5401315dcd71d5c3f5a0567f967e3",
+      "width": 1280,
+      "height": 720,
+      "bytes": 74774
+    },
+    {
+      "path": "screenshots/narrow-01-dashboard-baseline.png",
+      "sha256": "fc6547b12e5a0aea1712c60c95b58c35c1a50735281bfbf8a1e9b9d900015974",
+      "width": 680,
+      "height": 460,
+      "bytes": 56823
+    },
+    {
+      "path": "screenshots/narrow-02-dashboard-group-selected.png",
+      "sha256": "5318ff58614937f235d2e1de9831976162949020c3978dbca160722397b6e09c",
+      "width": 680,
+      "height": 460,
+      "bytes": 57942
+    },
+    {
+      "path": "screenshots/narrow-03-slay-error-editor.png",
+      "sha256": "6d93841563daefb288b1821a9717088bcfbe74b88f95d2dbccc90fc577e1eec4",
+      "width": 680,
+      "height": 460,
+      "bytes": 61479
+    },
+    {
+      "path": "screenshots/narrow-04-slay-error-dashboard.png",
+      "sha256": "d92299f5de4cdba039437632d01773a12d0623a149d96134cfd137aad2993283",
+      "width": 680,
+      "height": 460,
+      "bytes": 71247
+    },
+    {
+      "path": "screenshots/narrow-05-reader-before-warning.png",
+      "sha256": "be40c0b782262f22642c00e125f0afd6c89fdc329c3b71351d1a330c5a9a8fce",
+      "width": 680,
+      "height": 460,
+      "bytes": 67635
+    },
+    {
+      "path": "screenshots/narrow-06-warning-early.png",
+      "sha256": "f1065f3765992a6e1619bf8080527eca4e9c6e9b73edd6eec8458f9bba2f46fc",
+      "width": 680,
+      "height": 460,
+      "bytes": 70604
+    },
+    {
+      "path": "screenshots/narrow-07-error-retained-after-warning.png",
+      "sha256": "8c84e0b7eec7d49048483863a306cbfd8149945dd13d849fb15323a2525a300a",
+      "width": 680,
+      "height": 460,
+      "bytes": 70520
+    },
+    {
+      "path": "screenshots/narrow-08-error-dashboard-after-reader.png",
+      "sha256": "99e1e335d109c2c62f8df130f400475726a30a5418332e1ddd6774a4fa96fd74",
+      "width": 680,
+      "height": 460,
+      "bytes": 80096
+    },
+    {
+      "path": "screenshots/narrow-09-error-persists-after-info.png",
+      "sha256": "dd0a5c07796fe54fab210176dc09a766772c4085fe6420d9d0b8fb27173cb3c7",
+      "width": 680,
+      "height": 460,
+      "bytes": 76732
+    },
+    {
+      "path": "screenshots/narrow-10-status-ack.png",
+      "sha256": "8bd8b77d50cf294c605d644803d304f1835c6f1a21fc2e53442764d30f6f7461",
+      "width": 680,
+      "height": 460,
+      "bytes": 70790
+    },
+    {
+      "path": "screenshots/narrow-11-review-completion.png",
+      "sha256": "1da4812d4dbb737ad49cdc16a9b33714895590009b6d1cac1287e94b6be51128",
+      "width": 680,
+      "height": 460,
+      "bytes": 76899
+    },
+    {
+      "path": "screenshots/narrow-12-draft-before-refresh-error.png",
+      "sha256": "f44f7b92c1c9088e351e99714e78b3ce113d57fd27a1eb881f2e47b12f911efb",
+      "width": 680,
+      "height": 460,
+      "bytes": 72214
+    },
+    {
+      "path": "screenshots/narrow-13-refresh-error-early.png",
+      "sha256": "0879a54e7d224bfcc034b3027ad141816a3afee28ca666f3c694fde988e2a3f3",
+      "width": 680,
+      "height": 460,
+      "bytes": 74978
+    },
+    {
+      "path": "screenshots/narrow-14-refresh-error-during-draft.png",
+      "sha256": "0879a54e7d224bfcc034b3027ad141816a3afee28ca666f3c694fde988e2a3f3",
+      "width": 680,
+      "height": 460,
+      "bytes": 74978
+    },
+    {
+      "path": "screenshots/narrow-15-draft-continued.png",
+      "sha256": "ea8d82a38135805bae2c644328c2f3341e58b37caf5b121f2a449779431a592c",
+      "width": 680,
+      "height": 460,
+      "bytes": 75096
+    }
+  ]
+}
