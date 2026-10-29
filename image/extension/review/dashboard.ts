@@ -315,13 +315,16 @@ export class ReviewDashboard {
 		}
 
 		const width = this.lastWidth || 120;
-		const noticeRows = renderNoticeBanner(this.currentNotice(), {
+		const currentNotice = this.currentNotice();
+		const highPriorityNotice = currentNotice?.level === "error";
+		const noticeRows = renderNoticeBanner(currentNotice, {
 			fg: (role, text) => this.painter.fg(role === "info" ? "accent" : role, text),
 			bold: (text) => this.painter.bold(text),
 		}, width).length;
 		const reservedFilterRow = this.filtering || this.mode.filter ? 1 : 0;
-		const minimumBodyHeight = noticeRows > 0 ? 1 : 4;
-		const bodyHeight = Math.max(minimumBodyHeight, this.rows - 4 - noticeRows - reservedFilterRow);
+		const minimumBodyHeight = highPriorityNotice ? 2 : 4;
+		const chromeRows = highPriorityNotice ? 3 : 4;
+		const bodyHeight = Math.max(minimumBodyHeight, this.rows - chromeRows - noticeRows - reservedFilterRow);
 		const bodyStart = 2 + noticeRows;
 		const isSplit = width >= SPLIT_MIN_WIDTH;
 		const leftWidth = isSplit ? Math.floor((width - 3) / 2) : width;
@@ -1357,8 +1360,11 @@ export class ReviewDashboard {
 			return lines;
 		}
 		const reservedFilterRow = this.filtering || this.mode.filter ? 1 : 0;
-		const minimumBodyHeight = notice.length > 0 ? 1 : 4;
-		const bodyHeight = Math.max(minimumBodyHeight, this.rows - 4 - notice.length - reservedFilterRow);
+		const currentNotice = this.currentNotice();
+		const highPriorityNotice = currentNotice?.level === "error";
+		const minimumBodyHeight = highPriorityNotice ? 2 : 4;
+		const chromeRows = highPriorityNotice ? 3 : 4;
+		const bodyHeight = Math.max(minimumBodyHeight, this.rows - chromeRows - notice.length - reservedFilterRow);
 		const item = this.mode.selected();
 
 		if (this.showReader && item) {
@@ -1413,7 +1419,7 @@ export class ReviewDashboard {
 				const rightCell = right[i] ?? "";
 				lines.push(truncateToWidth(`${leftCell} ${separator} ${rightCell}`, width));
 			}
-		} else if (notice.length > 0 && bodyHeight < 7) {
+		} else if (highPriorityNotice && bodyHeight < 7) {
 			const queueTitle = this.mode.selectedKeys.size > 0
 				? `QUEUE ${this.mode.position()} (${this.mode.selectedKeys.size} selected)`
 				: `QUEUE ${this.mode.position()}`;
@@ -1437,7 +1443,7 @@ export class ReviewDashboard {
 			lines.push(truncateToWidth(this.painter.fg("dim", `filter: ${this.mode.filter}  (/ to search · esc/clear to reset)`), width));
 		}
 		lines.push(keymapBar(this.painter, this.dashboardKeys(), width));
-		lines.push(workbenchProgressBar(this.mode, this.painter, width));
+		if (!highPriorityNotice) lines.push(workbenchProgressBar(this.mode, this.painter, width));
 		return lines;
 	}
 
