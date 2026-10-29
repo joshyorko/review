@@ -696,10 +696,14 @@ run_review() {
           for arg in XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME CONTAINER_HOST CONTAINER_CONNECTION CONTAINERS_CONF CONTAINERS_STORAGE_CONF; do
             [[ -v "$arg" ]] && diagnostic_env+=("$arg=${!arg}")
           done
+          # Keep the background observer outside the foreground terminal
+          # process group before its own ignored-signal trap is installed.
+          if [[ -t 0 ]]; then set -m; fi
           env -i "${diagnostic_env[@]}" "$repo_root/bin/review-diagnostic-collector" \
             "$$" "$diagnostic_starttime" "$diagnostic_owner" "$diagnostic_root" \
             "$diagnostic_dir" "$diagnostic_proc_root" "$diagnostic_start" \
             </dev/null >/dev/null &
+          if [[ -t 0 ]]; then set +m; fi
         else
           (umask 077; set -C; \
             printf 'collector_pid=unavailable launcher_pid=%s launcher_start=%s owner=%s\n' \
