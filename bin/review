@@ -660,7 +660,7 @@ run_review() {
     fi
     [[ -z "$REVIEW_OMP_CONFIG_VOLUME" ]] ||
       podman_args+=(--volume "$REVIEW_OMP_CONFIG_VOLUME")
-    local diagnostic_root="" diagnostic_dir="" diagnostic_owner diagnostic_start diagnostic_starttime
+    local diagnostic_root="" diagnostic_dir="" diagnostic_owner diagnostic_start diagnostic_starttime diagnostic_monitor_enabled=0
     local diagnostic_proc_root="${REVIEW_TEST_PROC_ROOT:-/proc}"
     if [[ -d "$root" && ! -L "$root" && -O "$root" ]]; then
       diagnostic_root="$(cd -- "$root" 2>/dev/null && pwd -P)/diagnostics"
@@ -698,12 +698,15 @@ run_review() {
           done
           # Keep the background observer outside the foreground terminal
           # process group before its own ignored-signal trap is installed.
-          if [[ -t 0 ]]; then set -m; fi
+          if [[ -t 0 && "$-" != *m* ]]; then
+            set -m
+            diagnostic_monitor_enabled=1
+          fi
           env -i "${diagnostic_env[@]}" "$repo_root/bin/review-diagnostic-collector" \
             "$$" "$diagnostic_starttime" "$diagnostic_owner" "$diagnostic_root" \
             "$diagnostic_dir" "$diagnostic_proc_root" "$diagnostic_start" \
             </dev/null >/dev/null &
-          if [[ -t 0 ]]; then set +m; fi
+          if ((diagnostic_monitor_enabled)); then set +m; fi
         else
           (umask 077; set -C; \
             printf 'collector_pid=unavailable launcher_pid=%s launcher_start=%s owner=%s\n' \
