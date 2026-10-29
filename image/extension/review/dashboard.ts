@@ -1088,7 +1088,7 @@ export class ReviewDashboard {
 			this.painter.fg("dim", GLYPH.dot),
 			this.painter.fg(
 				this.mode.queueError ? "error" : "dim",
-				this.mode.queueError ??
+				(this.mode.queueError ? "refresh failed" : undefined) ??
 					(this.mode.loading
 						? `${this.painter.fg("warning", statusIcon("running", this.frame))} ${this.painter.fg("warning", "refreshing…")}`
 						: `${formatDuration(Math.max(0, now - this.mode.fetchedAt))} ago`),

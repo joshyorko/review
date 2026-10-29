@@ -2099,11 +2099,23 @@ test("rail renders the queue, OMP activity, and keymap within width", () => {
 
 });
 
-test("rail explains an empty queue instead of pretending to load forever", () => {
+test("queue failures use human summaries while preserving diagnostics for Details", () => {
 	const mode = new ReviewMode({ org: "projectbluefin" });
-	mode.queueError = "GitHub GraphQL 401 Unauthorized";
-	const rows = renderRail(mode, PLAIN_PAINTER, 80, NOW, 0, []);
-	assert.match(rows[0], /401/);
+	mode.queueError = "GitHub GraphQL 503 fixture schemaMode outputSchema bookkeeping";
+	for (const width of [80, 100]) {
+		const rows = renderRail(mode, PLAIN_PAINTER, width, NOW, 0, []);
+		assert.match(rows[0], /list unavailable/);
+		assert.doesNotMatch(rows.join("\n"), /GraphQL|503|schemaMode|outputSchema/);
+		assert.match(statusSegment(mode, PLAIN_PAINTER, NOW), /unavailable/);
+		mode.items = [queueItem()];
+		const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+		const frame = dashboard.render(width);
+		dashboard.dispose();
+		assert.match(frame[0], /refresh/);
+		assert.doesNotMatch(frame.join("\n"), /GraphQL|503|schemaMode|outputSchema/);
+		mode.items = [];
+	}
+	assert.match(mode.queueError, /GraphQL 503 fixture schemaMode outputSchema/, "presentation does not discard the original diagnostic");
 });
 
 test("rail and dashboard clarify an explicitly enabled empty Hive-only filter", () => {

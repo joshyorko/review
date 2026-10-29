@@ -184,7 +184,7 @@ export function renderRail(
 			reasonText = `no Hive-ranked ${mode.queueMode} (${mode.items.length} unranked open — H shows all)`;
 		}
 		const reason = mode.queueError
-			? painter.fg("error", `${statusIcon("failure")} ${mode.queueError}`)
+			? painter.fg("error", `${statusIcon("failure")} list unavailable`)
 			: mode.loading
 				? `${spinner} ${painter.fg("warning", reasonText)}`
 				: painter.fg("dim", `${statusIcon("pending")} ${reasonText}`);
@@ -324,7 +324,7 @@ export function statusSegment(mode: ReviewMode, painter: Painter, now: number): 
 	const label = painter.fg("accent", `${GLYPH.hex} ${modeLabel}`);
 	const position = painter.fg("dim", mode.position());
 	if (!item) {
-		const state = mode.queueError ? painter.fg("error", "auth") : painter.fg("dim", mode.loading ? "…" : "empty");
+		const state = mode.queueError ? painter.fg("error", "unavailable") : painter.fg("dim", mode.loading ? "…" : "empty");
 		return `${label} ${position} ${state}`;
 	}
 	const ci = ciGlyph(item.ciStatus);
