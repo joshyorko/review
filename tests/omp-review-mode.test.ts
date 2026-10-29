@@ -6536,6 +6536,87 @@ test("session_start returns while the queue is still loading", { timeout: 5000 }
 	assert.match(savedReviewNoticeText(pi), /Couldn’t refresh the review list/, "a queue failure is described in user language");
 	assert.match(await runReviewCommand(pi, ctx, "details"), /504/);
 });
+test("successful queue refresh resolves its notice, keeps diagnostics, and permits a later identical failure", async () => {
+	const pi = fakeHost();
+	let fail = true;
+	const healthy = fakeFetch([]);
+	const review = createReviewExtension(pi, { org: "projectbluefin", env: { ...ISOLATED_ENV, REVIEW_MODE: "review" },
+		fetchImpl: (url, init) => fail
+			? Promise.resolve(new Response("{}", { status: 503, statusText: "fixture queue unavailable" }))
+			: healthy(url, init),
+	});
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	assert.match(ctx.overlays[0].render(80).join("\n"), /Couldn’t refresh the review list/);
+	fail = false;
+	pi.shortcuts.get("alt+u").handler(ctx);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.doesNotMatch(ctx.overlays[0].render(80).join("\n"), /Couldn’t refresh|list on screen may be out of date/);
+	assert.equal(ctx.widgets.get("review-native-notice"), undefined);
+	const details = await runReviewCommand(pi, ctx, "details");
+	assert.match(details, /Resolved: Review refreshed the pull request list for org:projectbluefin/);
+	assert.match(details, /Saved diagnostic from the earlier attempt \(read only\):/);
+	assert.match(details, /503 fixture queue unavailable/);
+	assert.doesNotMatch(details, /Next steps:/);
+	const saved = pi.entries.filter((e) => e.customType === NOTICE_ENTRY && e.data?.resolution).at(-1)?.data;
+	assert.match(saved?.outcome ?? "", /list on screen may be out of date/);
+	assert.equal(pi.messages.length, 0, "read recovery must not start work");
+	fail = true;
+	pi.shortcuts.get("alt+u").handler(ctx);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.match(ctx.overlays[0].render(100).join("\n"), /Couldn’t refresh the review list/, "a fresh identical failure must not be suppressed by old delivery history");
+});
+
+test("partial, truncated and cancelled refreshes cannot resolve a saved queue failure", async () => {
+	const pi = fakeHost();
+	let phase = "fail";
+	const replacement = Promise.withResolvers();
+	const stalledStarted = Promise.withResolvers();
+	let partialPage = 0;
+	const healthy = fakeFetch([]);
+	const review = createReviewExtension(pi, { org: "projectbluefin", env: { ...ISOLATED_ENV, REVIEW_MODE: "review" },
+		fetchImpl: async (url, init) => {
+			if (phase === "fail" || (phase === "partial" && ++partialPage > 1)) return new Response("{}", { status: 503, statusText: "fixture queue unavailable" });
+			if (phase === "partial" || phase === "truncated") {
+				const response = await healthy(url, init); const body = await response.json();
+				if (phase === "truncated") body.data.search.nodes = Array.from({ length: 150 }, (_, index) => ({ ...body.data.search.nodes[0], number: index + 1 }));
+				body.data.search.pageInfo = { hasNextPage: true, endCursor: "next" };
+				return new Response(JSON.stringify(body));
+			}
+			if (phase === "stalled") {
+				stalledStarted.resolve();
+				return new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }));
+			}
+			return replacement.promise;
+		},
+	});
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	phase = "partial"; pi.shortcuts.get("alt+u").handler(ctx); await new Promise((resolve) => setImmediate(resolve));
+	assert.doesNotMatch(await runReviewCommand(pi, ctx, "details"), /Resolved:/, "readable partial pages do not prove recovery");
+	phase = "truncated"; pi.shortcuts.get("alt+u").handler(ctx); await new Promise((resolve) => setImmediate(resolve));
+	assert.doesNotMatch(await runReviewCommand(pi, ctx, "details"), /Resolved:/, "a queue prefix must not resolve the earlier failure as a complete read");
+	phase = "stalled"; pi.shortcuts.get("alt+u").handler(ctx); await stalledStarted.promise;
+	phase = "replacement"; pi.shortcuts.get("alt+u").handler(ctx); await new Promise((resolve) => setImmediate(resolve));
+	assert.doesNotMatch(await runReviewCommand(pi, ctx, "details"), /Resolved:/, "cancelling the old read cannot claim the pending replacement succeeded");
+	replacement.resolve(new Response(JSON.stringify({ data: { search: { nodes: [], pageInfo: { hasNextPage: false } } } })));
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.match(await runReviewCommand(pi, ctx, "details"), /Resolved: Review refreshed/, "a complete empty queue is a valid successful read");
+	assert.equal(pi.messages.length, 0);
+});
+
+test("successful queue refresh must not dismiss an unrelated active failure", async () => {
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	const notices = createReviewNoticeComponent();
+	notices.publish({ id: "unrelated-result", sessionId: ctx.sessionId, level: "error", content: { title: "Uncertain result", outcome: "Do not retry", action: "Inspect Details", details: "unrelated diagnostic" } });
+	pi.shortcuts.get("alt+u").handler(ctx); await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(notices.current?.id, "unrelated-result");
+	assert.doesNotMatch(await runReviewCommand(pi, ctx, "details"), /Resolved:/);
+});
+
 test("refresh cancellation is silent while replacement activity continues", async () => {
 	const pi = fakeHost();
 	const firstStarted = Promise.withResolvers();

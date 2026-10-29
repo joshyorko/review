@@ -1346,15 +1346,26 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 
 	const refreshQueue = async (ctx: CtxLike) => {
+		const queueScope = `${mode.scope.kind}:${mode.scope.value}`;
+		const queueKind = mode.queueMode;
+		const noticeId = `review-queue-refresh:${queueScope}:${queueKind}`;
 		syncStatus(ctx);
 		const result = await mode.refreshQueue();
 		if (result.error && !result.cancelled && result.items.length === 0 && ctx.hasUI) {
-			notifyNotice(ctx, "error", "review-queue-refresh", {
+			notifyNotice(ctx, "error", noticeId, {
 				title: "Couldn’t refresh the review list",
 				outcome: "The list on screen may be out of date.",
 			action: "Refresh the list again.",
 			steps: ["In the Review workbench, press r to refresh again.", "From the message box, press Alt+U."],
 			}, result.error);
+		} else if (!result.error && !result.cancelled && !result.truncated) {
+			const resolution = nativeNotices.resolveCurrent(noticeId,
+				`Review refreshed the ${queueKind === "prs" ? "pull request" : "issue"} list for ${queueScope}.`);
+			if (resolution) {
+				pi.appendEntry(NOTICE_ENTRY, resolution);
+				if (!nativeNotices.current) clearNativeNoticeWidget(ctx);
+				tui?.requestRender();
+			}
 		}
 		syncStatus(ctx);
 		return result;
