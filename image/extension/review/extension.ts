@@ -827,7 +827,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(message, level);
 			const current = nativeNotices.current;
 			if (current?.id === noticeId) {
-				void showNativeToast(ctx, current.summary, current.level, nativeNotices.beginWidgetDelivery(), sessionId);
+				void showNativeToast(ctx, current.summary, level, nativeNotices.beginWidgetDelivery(), sessionId);
 			}
 		}
 		tui?.requestRender();
