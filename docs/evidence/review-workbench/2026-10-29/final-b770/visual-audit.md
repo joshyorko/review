@@ -17,7 +17,7 @@
 
 ## Normal and narrow evidence
 
-All screenshots are in `screenshots/`.
+Error, navigation, warning precedence, and acknowledgement screenshots are in `screenshots/`. Fresh completion/focus screenshots for the public empty-render widget are in `screenshots/`.
 
 | Step | Normal | Narrow | Health |
 |---|---|---|---|
@@ -27,6 +27,8 @@ All screenshots are in `screenshots/`.
 | Dashboard with persistent banner | `04-error-dashboard-100x32.png` | `narrow-04-error-dashboard-80x24.png` | Pass; the recovery row remains visible. |
 | Lower-severity warning does not replace error | `05-error-after-warning-100x32.png` | `narrow-05-error-after-warning-80x24.png` | Pass; error summary/action remain. |
 | `/review status` acknowledgement | `06-ack-100x32.png` | `narrow-06-ack-80x24.png` | Pass; the persistent banner clears. |
+| Native `/review` completion with public widget attached | `07-completion-after-notice-100x32.png` | `narrow-07-completion-after-notice-80x24.png` | Pass; completion menu remains legible with the ANSI widget render empty. |
+| Draft continuation after refresh error with public widget attached | `08-draft-after-notice-100x32.png` | `narrow-08-draft-after-notice-80x24.png` | Pass; typing continues and the recovery row remains visible. |
 
 Exact screenshot paths:
 
@@ -43,7 +45,17 @@ Exact screenshot paths:
 - `screenshots/narrow-05-error-after-warning-80x24.png`
 - `screenshots/narrow-06-ack-80x24.png`
 
-The dashboard reader and warning state are also shown in the normal screenshots. At 80×24, the full warning wraps, but the dashboard row and recovery action remain visible. The green `RUNNING` footer label is a nonblocking clarity ambiguity: it is paired with `no active slay`, while the red banner says `Cannot admit slay`. `rail.ts:154-162` defines the former as admission being unpaused and the latter as batch progress being absent.
+The dashboard reader and warning state are also shown in the normal screenshots. At 80×24, the full warning wraps, but the dashboard row and recovery action remain visible. The public widget’s `render(80)` returns `[]`; the fresh completion and typing captures show it adds no ANSI row or focus interruption. The green `RUNNING` footer label is a nonblocking clarity ambiguity: it is paired with `no active slay`, while the red banner says `Cannot admit slay`. `rail.ts:154-162` defines the former as admission being unpaused and the latter as batch progress being absent.
+
+The previous 30 screenshots at `docs/evidence/review-workbench/2026-10-29/screenshots/` are source-bound to commit `b350c596…` with UI manifest `abf557…`; they are historical context only and are not evidence for the current b770 completion/focus claims. The two new b770 captures below provide those states.
+
+
+Supplemental b770 screenshot paths:
+
+- `screenshots/07-completion-after-notice-100x32.png`
+- `screenshots/08-draft-after-notice-100x32.png`
+- `screenshots/narrow-07-completion-after-notice-80x24.png`
+- `screenshots/narrow-08-draft-after-notice-80x24.png`
 
 ## Public TSP node evidence
 
