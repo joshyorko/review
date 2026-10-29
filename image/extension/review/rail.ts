@@ -13,6 +13,7 @@ import { type ReviewMode, ciGlyph } from "./mode.ts";
 import type { Priority, PriorityCategory } from "./priority.ts";
 import { spanDuration } from "./trace.ts";
 import { truncateToWidth, visibleWidth } from "./width.ts";
+import { renderNoticeBanner, type ReviewNotice } from "./notice.ts";
 export interface RailKey {
 	chord: string;
 	label: string;
@@ -252,13 +253,15 @@ export class ReviewRail {
 	private readonly mode: ReviewMode;
 	private readonly keys: readonly RailKey[];
 	private readonly isHidden?: () => boolean;
+	private readonly currentNotice?: () => ReviewNotice | undefined;
 
-	constructor(tui: TuiLike, painter: Painter, mode: ReviewMode, keys: readonly RailKey[], isHidden?: () => boolean) {
+	constructor(tui: TuiLike, painter: Painter, mode: ReviewMode, keys: readonly RailKey[], isHidden?: () => boolean, currentNotice?: () => ReviewNotice | undefined) {
 		this.tui = tui;
 		this.painter = painter;
 		this.mode = mode;
 		this.keys = keys;
 		this.isHidden = isHidden;
+		this.currentNotice = currentNotice;
 	}
 
 	private shouldAnimate(): boolean {
@@ -290,6 +293,11 @@ export class ReviewRail {
 		this.syncTimer();
 		const now = Date.now();
 		const rows = renderRail(this.mode, this.painter, width, now, this.frame, this.keys);
+		const notice = renderNoticeBanner(this.currentNotice?.(), {
+			fg: (role, text) => this.painter.fg(role === "info" ? "accent" : role, text),
+			bold: (text) => this.painter.bold(text),
+		});
+		rows.push(...notice.map((line) => truncateToWidth(line, width)));
 		// pi-tui skips work when a component returns the same array reference.
 		const key = `${width}:${rows.join("\u0000")}`;
 		if (key === this.cacheKey) return this.cache;

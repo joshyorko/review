@@ -16,6 +16,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 test_files=(
   tests/omp-review-mode.test.ts
+  tests/review-native-notice.test.ts
   tests/session-trace.test.ts
   tests/review-recap.test.ts
   tests/pr_reader.test.ts

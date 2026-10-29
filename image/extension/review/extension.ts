@@ -8,6 +8,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
+import { createReviewNoticeComponent } from "./notice.ts";
 import { loadWave, saveWave } from "./wave-store.ts";
 import type { CiEvidenceSource, QueueItem } from "./github.ts";
 import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, isForwardHead, orgScope, parseScope, resolveToken } from "./github.ts";
@@ -61,6 +62,11 @@ const RECAP_BRANCH_ENTRY_LIMIT = 512;
 
 export type RepositoryBatchKind = "slay" | "fix" | "diff";
 export type RepositoryBatchState = "running" | "paused" | "blocked" | "complete" | "cancelled";
+type ReviewActionOutcome =
+	| { readonly kind: "admitted"; readonly message: string }
+	| { readonly kind: "blocked"; readonly message: string }
+	| { readonly kind: "cancelled"; readonly message: string }
+	| { readonly kind: "no-eligible"; readonly message: string };
 type CiSkippedItem = {
 	readonly item: QueueItem;
 	readonly status: "failure" | "pending";
@@ -301,7 +307,7 @@ export interface ReviewExtensionHost {
 	getFlag(name: string): string | boolean | undefined;
 	getAllTools?(): readonly unknown[];
 	registerTool(definition: unknown): void;
-	registerCommand?(name: string, definition: { description?: string; handler(args: string, ctx: CtxLike): unknown }): void;
+	registerCommand?(name: string, definition: { description?: string; getArgumentCompletions?(argumentPrefix: string): ReviewAutocompleteItem[] | null; handler(args: string, ctx: CtxLike): unknown }): void;
 	appendEntry(customType: string, data?: unknown): void;
 	sendUserMessage(content: string, options?: { deliverAs?: string; waveId?: string }): void;
 	sendMessage?(message: { customType: string; content: string; display?: boolean; details?: unknown }, options?: { triggerTurn?: boolean }): void;
@@ -444,6 +450,54 @@ export function observeReviewWaveWorkers(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function isUiCancellation(error: unknown): boolean {
+	return isRecord(error) && error.name === "AbortError";
+}
+
+function propertiesOf(value: unknown): Record<string, unknown> | undefined {
+	return isRecord(value) && isRecord(value.properties) ? value.properties : undefined;
+}
+
+function hasStructuredTaskFields(properties: Record<string, unknown> | undefined): boolean {
+	if (!properties) return false;
+	const keys = new Set(Object.keys(properties));
+	return (keys.has("outputSchema") || keys.has("outputSchema?"))
+		&& (keys.has("schemaMode") || keys.has("schemaMode?"));
+}
+
+/** Mirrors OMP's ArkType wire conversion for the effective native task tool schema. */
+export function taskSchemaSupportsStructuredOutput(parameters: unknown): boolean {
+	let schema = parameters;
+	if ((typeof parameters === "function" || isRecord(parameters)) && typeof Reflect.get(parameters, "toJsonSchema") === "function") {
+		try {
+			const toJsonSchema = Reflect.get(parameters, "toJsonSchema");
+			if (typeof toJsonSchema === "function") {
+				schema = toJsonSchema.call(parameters, {
+					target: "draft-2020-12",
+					fallback: (context: unknown) => isRecord(context) && isRecord(context.base) ? context.base : {},
+				});
+			}
+		} catch {
+			return false;
+		}
+	}
+	const properties = propertiesOf(schema);
+	if (hasStructuredTaskFields(properties)) return true;
+	const tasks = properties?.tasks;
+	if (!isRecord(tasks)) return false;
+	return hasStructuredTaskFields(propertiesOf(tasks.items));
+}
+
+interface ReviewAutocompleteItem {
+	readonly value: string;
+	readonly label: string;
+	readonly description?: string;
 }
 
 function promptDigest(prompt: string): string {
@@ -720,9 +774,64 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	let tui: { requestRender(): void } | undefined;
 	const timers: Array<() => void> = [];
+	const nativeNotices = createReviewNoticeComponent();
 	let dashboardOpen = false;
 	let activeDashboard: ReviewDashboard | undefined;
 	let activeCtx: CtxLike | undefined;
+	const noticeSessionId = (ctx: CtxLike): string => ctx.sessionManager?.getSessionId?.() ?? "unknown-session";
+	const clearNativeToast = (ctx: CtxLike): void => {
+		nativeNotices.invalidateWidgetDelivery();
+		ctx.ui.setWidget("review-native-notice", undefined, { placement: "belowEditor" });
+		tui?.requestRender();
+	};
+	const updateNoticeSession = (ctx: CtxLike): void => {
+		if (!nativeNotices.sessionChanged(noticeSessionId(ctx))) return;
+		if (ctx.hasUI) clearNativeToast(ctx);
+		else nativeNotices.invalidateWidgetDelivery();
+	};
+	const acknowledgeNotice = (ctx: CtxLike): void => {
+		nativeNotices.clear();
+		clearNativeToast(ctx);
+	};
+	const showNativeToast = async (ctx: CtxLike, message: string, level: "warning" | "error", generation: number, sessionId: string): Promise<void> => {
+		try {
+			const { StatusNotice } = await import("@oh-my-pi/pi-tui/chrome/status-notice");
+			if (!nativeNotices.isCurrentWidgetDelivery(generation, sessionId) || sessionId !== noticeSessionId(ctx)) return;
+			ctx.ui.setWidget(
+				"review-native-notice",
+				() => new StatusNotice(message, { styleFn: (text) => ctx.ui.theme.fg(level, text), toast: true }),
+				{ placement: "belowEditor" },
+			);
+		} catch {
+			// The host-native toast module is optional in source tests and ANSI-only OMP builds.
+		}
+	};
+	const notifyUser = (ctx: CtxLike, message: string, level: "info" | "warning" | "error" = "info", action?: string, summary?: string): void => {
+		if (!ctx.hasUI) {
+			ctx.ui.notify(message, level);
+			return;
+		}
+		if (level === "info") {
+			ctx.ui.notify(message, level);
+			return;
+		}
+		const recoveryAction = action
+			?? (message.includes("/review reconcile") ? "/review reconcile"
+				: message.includes("/review revise") ? "/review revise"
+					: message.includes("/review resume") ? "/review resume" : "/review status");
+		const recoverySummary = summary ?? message.slice(0, 100);
+		const sessionId = noticeSessionId(ctx);
+		const noticeId = `${level}:${message}`;
+		const accepted = nativeNotices.publish({ id: noticeId, sessionId, level, message, summary: recoverySummary, action: recoveryAction });
+		if (accepted) {
+			ctx.ui.notify(message, level);
+			const current = nativeNotices.current;
+			if (current?.id === noticeId) {
+				void showNativeToast(ctx, current.summary, current.level, nativeNotices.beginWidgetDelivery(), sessionId);
+			}
+		}
+		tui?.requestRender();
+	};
 	let reviewerTrustFailure: ReturnType<typeof reviewerDefinitionTrusted> | undefined;
 	const reviewerTrust = () => {
 		if (reviewerTrustFailure) return reviewerTrustFailure;
@@ -1222,7 +1331,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		syncStatus(ctx);
 		const result = await mode.refreshQueue();
 		if (result.error && !result.cancelled && result.items.length === 0 && ctx.hasUI) {
-			ctx.ui.notify(`${mode.isReviewMode() ? "Review" : "Hive"} workbench queue: ${result.error}`, "error");
+			notifyUser(ctx, `${mode.isReviewMode() ? "Review" : "Hive"} workbench queue: ${result.error}`, "error");
 		}
 		syncStatus(ctx);
 		return result;
@@ -1591,7 +1700,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				waveEffectResources: undefined,
 			waveOperatorPolicy: undefined, waveReviewerReceipts: undefined, waveWriterAgents: undefined, waveLandingHeads: undefined,
 			});
-			if (ctx.hasUI) ctx.ui.notify(`Recovered ${batch.id} without replaying its external effect${evidence}`, "info");
+			if (ctx.hasUI) notifyUser(ctx, `Recovered ${batch.id} without replaying its external effect${evidence}`, "info");
 			return;
 		}
 		persistBatch(ctx, {
@@ -1612,7 +1721,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			waveEffectResources: undefined,
 			waveOperatorPolicy: undefined, waveReviewerReceipts: undefined, waveWriterAgents: undefined, waveLandingHeads: undefined,
 		});
-		if (ctx.hasUI) ctx.ui.notify(`Recovered ${batch.id} without replaying its external effect${evidence}`, "info");
+		if (ctx.hasUI) notifyUser(ctx, `Recovered ${batch.id} without replaying its external effect${evidence}`, "info");
 		if (!mode.paused) await dispatchCurrentWave(ctx, "followUp");
 	};
 
@@ -1704,7 +1813,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			? await reconcileBatchClaims(ctx, batch)
 			: { settled: [], unknown: [], submittedPrs: [] };
 		const message = archiveCancelledBatch(ctx, batch, "cancel", result);
-		if (ctx.hasUI) ctx.ui.notify(message, result.unknown.length > 0 ? "warning" : "info");
+		if (ctx.hasUI) notifyUser(ctx, message, result.unknown.length > 0 ? "warning" : "info");
 	};
 
 	const cancelBlockedBatch = async (ctx: CtxLike, action: "cancel" | "revise"): Promise<string> => {
@@ -1731,6 +1840,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			? await reconcileBatchClaims(ctx, batch)
 			: { settled: [], unknown: [], submittedPrs: [] };
 		return archiveCancelledBatch(ctx, batch, action, result);
+	};
+
+	const drainBatch = (ctx: CtxLike): string => {
+		const batch = activeBatch;
+		if (!batch) return "No Review wave is active to drain";
+		if (batch.state === "running" && batch.waveIdentity) {
+			mode.setPaused(true);
+			persist();
+			persistBatch(ctx, { ...batch, state: "running", cancelRequested: undefined, error: undefined });
+			return `Drain requested for ${batch.id}; the current wave will settle, then later admission will pause`;
+		}
+		if (batch.state === "paused") return `Run ${batch.id} is already paused; no cancellation was requested`;
+		if (batch.state === "blocked") return `Run ${batch.id} is blocked; use /review reconcile to inspect its current wave before resuming or cancelling`;
+		return `No active Review wave is available to drain (${batch.state})`;
 	};
 
 	const buildRecap = (ctx: CtxLike) => {
@@ -1921,6 +2044,61 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}, { overlay: true, overlayOptions: { fullscreen: true, width: "100%", maxHeight: "100%", anchor: "center" } });
 	};
 
+	const supportedReviewCommands: readonly ReviewAutocompleteItem[] = [
+		{ value: "status", label: "status", description: "Inspect active Review waves and claims" },
+		{ value: "recap", label: "recap", description: "Open a bounded read-only session recap" },
+		{ value: "handoff", label: "handoff", description: "Export a bounded read-only handoff" },
+		{ value: "reconcile", label: "reconcile", description: "Reconcile worker and GitHub evidence" },
+		{ value: "recover", label: "recover", description: "Alias for reconcile" },
+		{ value: "resume", label: "resume", description: "Resume revalidated paused work" },
+		{ value: "drain", label: "drain", description: "Settle the current wave, then pause admission" },
+		{ value: "cancel", label: "cancel", description: "Cancel after the current wave drains" },
+		{ value: "revise", label: "revise", description: "Safely stop a blocked wave before revising selection" },
+		{ value: "slay", label: "slay", description: "Start a fresh bounded Slay" },
+		{ value: "re-slay", label: "re-slay", description: "Start a fresh bounded Slay" },
+		{ value: "policy", label: "policy", description: "Read or set a repository human-review preset" },
+	];
+	const getReviewArgumentCompletions = (argumentPrefix: string): ReviewAutocompleteItem[] | null => {
+		const leading = argumentPrefix.match(/^\s*/)?.[0] ?? "";
+		const input = argumentPrefix.slice(leading.length);
+		if (!input.trim()) return [...supportedReviewCommands];
+		const trailingSpace = /\s$/.test(input);
+		const tokens = input.trim().split(/\s+/);
+		if (tokens.length === 1 && !trailingSpace) {
+			const prefix = tokens[0]!.toLowerCase();
+			return supportedReviewCommands.filter((item) => item.value.startsWith(prefix));
+		}
+		if (tokens[0] !== "policy") return null;
+		const prior = trailingSpace ? tokens : tokens.slice(0, -1);
+		const current = trailingSpace ? "" : tokens.at(-1) ?? "";
+		const repositories = [...new Set(mode.items.map((item) => item.repo))].sort((left, right) => left.localeCompare(right));
+		const explicitRepository = /^[\w.-]+\/[\w.-]+$/.test(current) ? current : undefined;
+		const selectedRepository = prior[1] ?? explicitRepository;
+		const policyModes: readonly ReviewAutocompleteItem[] = [
+			{ value: "solo", label: "solo", description: "Allow sole-operator landing when GitHub permits" },
+			{ value: "team", label: "team", description: "Require an eligible non-author approval" },
+		];
+		if (selectedRepository && (/^[\w.-]+\/[\w.-]+$/.test(selectedRepository) || repositories.includes(selectedRepository))) {
+			const preserved = ["policy", selectedRepository].join(" ");
+			const modePrefix = prior[1] === selectedRepository || trailingSpace ? current : "";
+			return policyModes
+				.filter((item) => item.value.startsWith(modePrefix.toLowerCase()))
+				.map((item) => ({ ...item, value: `${preserved} ${item.value}` }));
+		}
+		const repositoryPrefix = prior.length > 1 ? prior[1]! : current;
+		const prefix = repositoryPrefix.toLowerCase();
+		return repositories
+			.filter((repository) => repository.toLowerCase().startsWith(prefix))
+			.map((repository) => ({ value: `policy ${repository}`, label: repository, description: "Use a repository alias already present in the Review queue" }));
+	};
+
+	const reviewerCapabilityBlocker = (kind: RepositoryBatchKind, items: readonly QueueItem[]): string | undefined => {
+		if ((kind !== "slay" && kind !== "fix") || !items.some((item) => item.type === "pr")) return undefined;
+		const taskTool = pi.getAllTools?.()?.find((tool) => isRecord(tool) && tool.name === "task");
+		if (isRecord(taskTool) && taskSchemaSupportsStructuredOutput(taskTool.parameters)) return undefined;
+		return "Cannot admit Review mutation: the effective OMP task tool does not expose outputSchema and schemaMode. Enable task.structured: true in the packaged Review config, then reopen the Review session before retrying.";
+	};
+
 	const reviewCommand = async (rawArgs: string, ctx: CtxLike): Promise<string> => {
 		const args = rawArgs.trim().toLowerCase();
 		if (args === "policy" || args.startsWith("policy ")) {
@@ -1940,10 +2118,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (args === "resume") return resumeStoppedBatch(ctx);
 		if (args === "slay" || args === "re-slay") {
 			activeCtx = ctx;
-			await startSlay(ctx, mode.slayableItems(BATCH_LIMIT));
-			return "Review Slay requested";
+			return (await startSlay(ctx, mode.slayableItems(BATCH_LIMIT))).message;
 		}
-		if (args === "cancel" || args === "drain" || args === "revise") {
+		if (args === "drain") return drainBatch(ctx);
+		if (args === "cancel" || args === "revise") {
 			if (activeBatch?.waveExit && sessionStopped(activeBatch)) {
 				persistBatch(ctx, { ...activeBatch, waveExit: { ...activeBatch.waveExit, choice: "cancel" } });
 				const batch = activeBatch;
@@ -1961,6 +2139,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (candidates.length === 0 && missing.length === 0) return "No interrupted or blocked Review waves need reconciliation";
 			const lines: string[] = missing.map((owner) => `Retained UNKNOWN claims for ${owner}: missing or invalid durable recovery record; worker and external-effect evidence required`);
 			for (const batch of candidates) {
+				if (batch.error?.startsWith("No work admitted:") && !batch.waveIdentity && batch.waves.length === 0) {
+					lines.push(`${batch.id}: no work was admitted or completed; candidate exclusions are retained and no wave claims were created`);
+					continue;
+				}
 				const result = await reconcileBatchClaims(ctx, batch);
 				if (result.settled.length > 0) lines.push(`Reconciled ${result.settled.join(", ")} for ${batch.id}`);
 				if (result.nonSuccessItems?.length) lines.push(`Slay did not satisfy its terminal outcome for ${[...new Set(result.nonSuccessItems)].sort().join(", ")}`);
@@ -1990,6 +2172,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return lines.length > 0 ? lines.join("; ") : "No Review claims were released";
 		}
 		if (args === "" || args === "status") {
+			// Reading Review status is the explicit acknowledgement for the latest
+			// persistent banner; the read does not release claims or resume work.
+			acknowledgeNotice(ctx);
 			restoreClaimWaves();
 			const claims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:"));
 			const skippedSummary = (batch: PersistedRepositoryBatch): string => {
@@ -2017,12 +2202,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 	pi.registerCommand?.("review", {
 		description: "Inspect or recover an interrupted Review repository wave",
+		getArgumentCompletions: getReviewArgumentCompletions,
 		handler: async (args, ctx) => {
 			try {
 				const message = await reviewCommand(args, ctx);
-				if (ctx.hasUI) ctx.ui.notify(message, /UNKNOWN|unaccounted|No blocked/.test(message) ? "warning" : "info");
+			if (ctx.hasUI && !["slay", "re-slay"].includes(args.trim().toLowerCase())) {
+				notifyUser(ctx, message, /UNKNOWN|unaccounted|No blocked|No work admitted|No eligible work/.test(message) ? "warning" : "info");
+			}
+				return message;
 			} catch (error) {
-				if (ctx.hasUI) ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				const message = error instanceof Error ? error.message : String(error);
+				if (ctx.hasUI) notifyUser(ctx, message, "error");
+				return message;
 			}
 		},
 	});
@@ -2212,7 +2403,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		let wave = activeBatch.waves[activeBatch.currentWave];
 		if (!wave) {
 			persistBatch(ctx, { ...activeBatch, state: "complete" });
-			ctx.ui.notify(activeBatch.kind === "slay" ? "Slay complete" : "Repository run complete", "info");
+			notifyUser(ctx, activeBatch.kind === "slay" ? "Slay complete" : "Repository run complete", "info");
 			return;
 		}
 		if (!prevalidated) {
@@ -2223,11 +2414,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (activeBatch !== dispatchBatch || activeBatch.waveExit || shuttingDownSessionId) return;
 			if (blocker) {
 				if (!retainedClaims) persistBatch(ctx, { ...activeBatch, state: "blocked", error: blocker });
-				ctx.ui.notify(blocker, "error");
+				notifyUser(ctx, blocker, "error");
 				return;
 			}
 			if (retainedClaims) {
-				ctx.ui.notify(`Run ${activeBatch.id} retains mutation claims; use /review reconcile before retrying`, "warning");
+				notifyUser(ctx, `Run ${activeBatch.id} retains mutation claims; use /review reconcile before retrying`, "warning");
 				return;
 			}
 			if (skippedCi.length > 0) {
@@ -2262,7 +2453,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 						state: "complete",
 						error: undefined,
 					});
-					ctx.ui.notify("No eligible PRs remain after current CI checks", "warning");
+					notifyUser(ctx, "No eligible PRs remain after current CI checks", "warning");
 					return;
 				}
 				persistBatch(ctx, { ...activeBatch, ...waveReset, waves, skippedItems });
@@ -2276,7 +2467,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const retryingBlockedWave = activeBatch.state === "blocked";
 		let waveOperatorPolicy: OperatorPolicySnapshot;
 		try { waveOperatorPolicy = readOperatorPolicy(wave.repo, env); }
-		catch (error) { ctx.ui.notify(`Cannot admit Review policy: ${error instanceof Error ? error.message : String(error)}`, "error"); return; }
+		catch (error) { notifyUser(ctx, `Cannot admit Review policy: ${error instanceof Error ? error.message : String(error)}`, "error"); return; }
 		const startedAt = Date.now();
 		const waveAction = {
 			kind: activeBatch.kind,
@@ -2315,12 +2506,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			try { claimItems(wave.items, `review:${activeBatch.id}:${activeBatch.currentWave}`, !retryingBlockedWave); }
 			catch (error) {
 				if (!activeBatch.waveIdentity) persistBatch(ctx, { ...activeBatch, state: "blocked", error: String(error) });
-				ctx.ui.notify(String(error), "error");
+				notifyUser(ctx, String(error), "error");
 				return;
 			}
 		}
 		persistBatch(ctx, { ...activeBatch, state: "running", waveStartedAt: startedAt, error: undefined, cancelRequested: undefined, waveIdentity: `${activeBatch.id}:${activeBatch.currentWave}`, waveSessionId: ctx.sessionManager?.getSessionId?.(), waveExit: undefined, waveShutdown: undefined, wavePromptDigest: promptDigest(prompt), waveToolCallIds: undefined, waveToolInvocationIds: undefined, waveTaskWorkers: undefined, waveJobBaselineIds: baseline, waveJobIds: undefined, waveTerminalJobStatuses: undefined, wavePreToolTerminal: undefined, waveEffectResources: resources, waveOperatorPolicy, waveLandingHeads: undefined, waveReviewerReceipts: createReviewerReceiptState(), waveWriterAgents: undefined });
-		ctx.ui.notify(`Dispatching ${wave.repo} wave ${activeBatch.currentWave + 1}/${activeBatch.waves.length}`, "info");
+		notifyUser(ctx, `Dispatching ${wave.repo} wave ${activeBatch.currentWave + 1}/${activeBatch.waves.length}`, "info");
 		ownedWavePrompts.add(promptDigest(prompt));
 		pi.sendUserMessage(prompt, { ...(deliverAs ? { deliverAs } : {}), waveId: `${activeBatch.id}:${activeBatch.currentWave}` });
 		rememberWaveEvidence(ctx);
@@ -2331,36 +2522,50 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		kind: RepositoryBatchKind,
 		items: readonly QueueItem[],
 		selection: { totalItems?: number; excludedItems?: readonly PersistedCandidateExclusion[] } = {},
-	) => {
+	): Promise<ReviewActionOutcome> => {
 		if (kind !== "diff" && (pi.sessionShutdownLifecycleVersion !== 1 || !ctx.sessionManager?.getSessionId?.())) {
-			ctx.ui.notify("Review mutations require OMP session shutdown lifecycle v1 and a native session identity; upgrade to the packaged Review OMP runtime", "error");
-			return;
+			const message = "Review mutations require OMP session shutdown lifecycle v1 and a native session identity; upgrade to the packaged Review OMP runtime";
+			notifyUser(ctx, message, "error");
+			return { kind: "blocked", message };
+		}
+		const reviewerBlocker = reviewerCapabilityBlocker(kind, items);
+		if (reviewerBlocker) {
+			notifyUser(ctx, reviewerBlocker, "error");
+			return { kind: "blocked", message: reviewerBlocker };
 		}
 		const generation = ++batchRequestGeneration;
 		if (activeBatch?.state === "running" || activeBatch?.state === "paused") {
-			ctx.ui.notify(`Run ${activeBatch.id} is already ${activeBatch.state}`, "warning");
-			return;
+			const message = `Run ${activeBatch.id} is already ${activeBatch.state}`;
+			notifyUser(ctx, message, "warning");
+			return { kind: "blocked", message };
 		}
 		if (activeBatch?.state === "blocked") {
 			const wave = activeBatch.waves[activeBatch.currentWave];
 			const requested = mode.repositoryWaves(items)[0];
 			if (activeBatch.kind !== kind || !wave || !requested || requested.repo !== wave.repo || requested.items.length !== wave.items.length || requested.items.some((item, index) => item.repo !== wave.items[index]!.repo || item.id !== wave.items[index]!.id)) {
-				ctx.ui.notify(`Run ${activeBatch.id} is blocked; inspect/reconcile its claims before dispatching another mutation`, "warning");
-				return;
+				const message = `Run ${activeBatch.id} is blocked; inspect/reconcile its claims before dispatching another mutation`;
+				notifyUser(ctx, message, "warning");
+				return { kind: "blocked", message };
 			}
 			await dispatchCurrentWave(ctx);
-			return;
+			return activeBatch?.state === "running" && activeBatch.waveIdentity
+				? { kind: "admitted", message: `Review ${kind} admitted for ${wave.repo}` }
+				: { kind: "blocked", message: activeBatch?.error ?? `Run ${activeBatch?.id ?? "unknown"} remains blocked; use /review status` };
 		}
 		// Queue refresh mutates queue items; admitted subjects must retain their
 		// captured heads and policy evidence independently of that projection.
 		if (kind === "fix") {
 			for (const item of items) {
 				const conflict = resourceClaims().conflict(`repo:${item.repo.toLowerCase()}`) ?? resourceClaims().conflict(`item:${item.repo.toLowerCase()}#${item.id}`);
-				if (conflict) { ctx.ui.notify(`${conflict}; reopen the owning saved session and use /review resume`, "error"); return; }
+				if (conflict) {
+					const message = `${conflict}; reopen the owning saved session and use /review resume`;
+					notifyUser(ctx, message, "error");
+					return { kind: "blocked", message };
+				}
 			}
 		}
 		const waves = mode.repositoryWaves(structuredClone(items));
-		if (waves.length === 0) return;
+		if (waves.length === 0) return { kind: "no-eligible", message: "No eligible work was admitted; the selection contains no runnable items" };
 		const startedAt = Date.now();
 		const issueSubmittedPrs = Object.fromEntries(
 			items
@@ -2387,12 +2592,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return { blocker, skippedCi };
 		}));
 		const blocker = validations.find((validation) => validation.blocker !== undefined)?.blocker;
-		if (generation !== batchRequestGeneration || shuttingDownSessionId) return;
-		if (activeBatch?.state === "running" || activeBatch?.state === "paused") return;
+		if (generation !== batchRequestGeneration || shuttingDownSessionId) return { kind: "cancelled", message: "Review admission was cancelled before dispatch" };
+		if (activeBatch?.state === "running" || activeBatch?.state === "paused") return { kind: "blocked", message: `Run ${activeBatch.id} is already ${activeBatch.state}` };
 		if (blocker) {
 			persistBatch(ctx, { ...batch, state: "blocked", error: blocker });
-			ctx.ui.notify(blocker, "error");
-			return;
+			notifyUser(ctx, blocker, "error");
+			return { kind: "blocked", message: blocker };
 		}
 		const runnableWaves = waves.flatMap((wave, index) => {
 			const skippedKeys = new Set(validations[index]!.skippedCi.map(({ item }) => `${item.repo.toLowerCase()}#${item.id}`));
@@ -2403,16 +2608,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		for (const skipped of skippedCi) notifyCiSkip(ctx, skipped);
 		const skippedItems = skippedCi.map(persistedCiSkip);
 		if (runnableWaves.length === 0) {
-			mode.clearSelected();
-			persist();
-			persistBatch(ctx, { ...batch, waves: [], skippedItems, state: "complete" });
-			ctx.ui.notify("No selected PRs are eligible for dispatch; no work was started", "warning");
-			return;
+			const message = "No work admitted: every selected PR was excluded by current CI checks. The selection and skip evidence are retained; no work was completed.";
+			persistArchivedBatch(ctx, { ...batch, waves: [], skippedItems, state: "blocked", error: message });
+			return { kind: "no-eligible", message };
 		}
 		mode.clearSelected();
 		persist();
 		persistBatch(ctx, { ...batch, waves: runnableWaves, skippedItems });
 		await dispatchCurrentWave(ctx, undefined, true);
+		if (activeBatch?.state === "running" && activeBatch.waveIdentity) {
+			return { kind: "admitted", message: `Review ${kind} admitted for ${runnableWaves[0]!.repo}` };
+		}
+		return { kind: "blocked", message: activeBatch?.error ?? `Review ${kind} admission did not dispatch; inspect /review status` };
 	};
 	const workflowPermissionBlocker = async (items: readonly QueueItem[]): Promise<string | undefined> => {
 		const workflowItem = items.find((item) => item.type === "pr" && (item.workflowFiles?.length ?? 0) > 0);
@@ -2435,8 +2642,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		observedAt,
 	});
 	const notifyCiSkip = (ctx: CtxLike, skipped: CiSkippedItem): void => {
-		ctx.ui.notify(
-			`Skipping ${skipped.item.repo}#${skipped.item.id} head=${skipped.item.headSha}: CI is ${skipped.status} (source=${skipped.evidenceSource}); ordinary PR review/landing waits for checks`,
+		notifyUser(ctx,			`Skipping ${skipped.item.repo}#${skipped.item.id} head=${skipped.item.headSha}: CI is ${skipped.status} (source=${skipped.evidenceSource}); ordinary PR review/landing waits for checks`,
 			"warning",
 		);
 	};
@@ -2463,7 +2669,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					observedAt: Date.now(),
 				};
 				excludedItems?.push(excluded);
-				ctx.ui.notify(`Skipping ${item.repo}#${item.id}: changes ${excluded.detail}`, "warning");
+				notifyUser(ctx, `Skipping ${item.repo}#${item.id}: changes ${excluded.detail}`, "warning");
 				continue;
 			}
 			if (item.changedFilesComplete === false) {
@@ -2475,7 +2681,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					observedAt: Date.now(),
 				};
 				excludedItems?.push(excluded);
-				ctx.ui.notify(`Skipping ${item.repo}#${item.id}${item.headSha ? ` head=${item.headSha}` : ""}: ${excluded.reason}`, "warning");
+				notifyUser(ctx, `Skipping ${item.repo}#${item.id}${item.headSha ? ` head=${item.headSha}` : ""}: ${excluded.reason}`, "warning");
 				continue;
 			}
 			eligible.push(item);
@@ -2495,8 +2701,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					observedAt: Date.now(),
 				};
 				excludedItems?.push(excluded);
-				ctx.ui.notify(
-					`Skipping ${item.repo}#${item.id}: pull request already submitted (${excluded.detail})`,
+				notifyUser(ctx,					`Skipping ${item.repo}#${item.id}: pull request already submitted (${excluded.detail})`,
 					"warning",
 				);
 				continue;
@@ -2506,18 +2711,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return eligible;
 	};
 
-	const startSlay = async (ctx: CtxLike, candidates: readonly QueueItem[] = mode.slayableItems(BATCH_LIMIT)) => {
+	const startSlay = async (ctx: CtxLike, candidates: readonly QueueItem[] = mode.slayableItems(BATCH_LIMIT)): Promise<ReviewActionOutcome> => {
 		if (candidates.length === 0) {
-			ctx.ui.notify("No queue items available to slay", "warning");
-			return;
+			const message = "No eligible work: the current Review queue has no items to slay";
+			notifyUser(ctx, message, "warning");
+			return { kind: "no-eligible", message };
 		}
 		const excludedItems: PersistedCandidateExclusion[] = [];
 		const persistExcludedSelection = () => {
 			if (excludedItems.length === 0) return;
 			const startedAt = Date.now();
-			mode.clearSelected();
-			persist();
-			persistSelectionReceipt(ctx, {
+			const message = `No work admitted: all ${candidates.length} selected candidate${candidates.length === 1 ? " was" : "s were"} excluded. No work was completed.`;
+			persistArchivedBatch(ctx, {
 				version: 1,
 				id: `batch-${startedAt.toString(36)}`,
 				kind: "slay",
@@ -2525,23 +2730,30 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				currentWave: 0,
 				completedItems: 0,
 				totalItems: candidates.length,
-				state: "complete",
+				state: "blocked",
 				startedAt,
 				waveStartedAt: startedAt,
 				excludedItems,
+				error: message,
 			});
 		};
 		const eligible = filterUnsupportedSlayItems(ctx, candidates, excludedItems);
 		if (eligible.length === 0) {
 			persistExcludedSelection();
-			return;
+			const message = `No work admitted: all ${candidates.length} selected candidates were excluded. No work was completed.`;
+			notifyUser(ctx, message, "warning");
+			return { kind: "no-eligible", message };
 		}
 		const items = filterCompletedIssueSlayItems(ctx, eligible, excludedItems);
 		if (items.length === 0) {
 			persistExcludedSelection();
-			return;
+			const message = `No work admitted: all ${candidates.length} selected candidates were excluded or already submitted. No work was completed.`;
+			notifyUser(ctx, message, "warning");
+			return { kind: "no-eligible", message };
 		}
-		await startRepositoryBatch(ctx, "slay", items, { totalItems: candidates.length, excludedItems });
+		const outcome = await startRepositoryBatch(ctx, "slay", items, { totalItems: candidates.length, excludedItems });
+		if (outcome.kind === "no-eligible" || outcome.kind === "cancelled") notifyUser(ctx, outcome.message, "warning");
+		return outcome;
 	};
 
 	const startAutoslay = async (ctx: CtxLike) => {
@@ -2572,11 +2784,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (answer === undefined || !answer.trim()) return false;
 		const scope = parseScope(answer, mode.org);
 		if (!scope) {
-			ctx.ui.notify(`Not a repository: ${answer.trim()}`, "error");
+			notifyUser(ctx, `Not a repository: ${answer.trim()}`, "error");
 			return false;
 		}
 		mode.setScope(scope);
-		ctx.ui.notify(`Queue scoped to ${mode.scopeLabel()}`, "info");
+		notifyUser(ctx, `Queue scoped to ${mode.scopeLabel()}`, "info");
 		await refreshQueue(ctx);
 		persist();
 		return true;
@@ -2590,7 +2802,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			// but an admitted Factory batch must remain immutable.
 			const capturedItems = mode.factorySelection("inspect");
 			if (!factoryControllerRegistered()) {
-				ctx.ui.notify(`Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
+				notifyUser(ctx, `Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
 				return;
 			}
 			const repositories = new Set(capturedItems.map((item) => item.repo));
@@ -2637,30 +2849,36 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				});
 				if (command.startsWith("start ")) {
 					if (!factoryBatchSubmitterRegistered() || !factoryDashboardOpenerRegistered()) {
-						ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
+						notifyUser(ctx, await factoryCommand(command, factoryCtx), "info");
 						return;
 					}
 					const action = command.slice("start ".length) as "inspect" | "patch" | "pr-ready";
 					const handoff = await submitFactoryBatch(action, factoryCtx, capturedItems.map((item) => ({ ...item, action })));
-					ctx.ui.notify(`Factory batch ${handoff.batchId} submitted`, "info");
+					notifyUser(ctx, `Factory batch ${handoff.batchId} submitted`, "info");
 					factoryHandoffBatchId = handoff.batchId;
 				} else {
-					ctx.ui.notify(await factoryCommand(command, factoryCtx), "info");
+					notifyUser(ctx, await factoryCommand(command, factoryCtx), "info");
 				}
-			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+			} catch (error) { notifyUser(ctx, error instanceof Error ? error.message : String(error), "error"); }
 			return;
 		}
 		if (action.kind === "open_browser") {
-			const result = await pi.exec(
-				"gh",
-				[action.item.type === "pr" ? "pr" : "issue", "view", String(action.item.id), "--repo", action.item.repo, "--web"],
-				{ timeout: 15_000 },
-			);
-			if (result.code === 0 && !result.killed) {
-				ctx.ui.notify(`Opened ${action.item.url}`, "info");
-			} else {
+			try {
+				const result = await pi.exec(
+					"gh",
+					[action.item.type === "pr" ? "pr" : "issue", "view", String(action.item.id), "--repo", action.item.repo, "--web"],
+					{ timeout: 15_000 },
+				);
+				if (result.code === 0 && !result.killed) {
+					notifyUser(ctx, `Opened ${action.item.url}`, "info");
+					return;
+				}
+				const reason = result.killed ? "browser launch timed out" : result.stderr.trim() || `gh exited with code ${result.code}`;
 				ctx.ui.pasteToEditor(action.item.url);
-				ctx.ui.notify(`Browser unavailable; added ${action.item.url} to the prompt`, "warning");
+				notifyUser(ctx, `Browser unavailable for ${action.item.repo}#${action.item.id}: ${reason}; added ${action.item.url} to the prompt`, "warning");
+			} catch (error) {
+				ctx.ui.pasteToEditor(action.item.url);
+				notifyUser(ctx, `Browser unavailable for ${action.item.repo}#${action.item.id}: ${errorMessage(error)}; added ${action.item.url} to the prompt`, "warning");
 			}
 			return;
 		}
@@ -2676,7 +2894,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (action.kind === "reference") {
 			const items = action.items?.length ? action.items : [action.item];
 			ctx.ui.pasteToEditor(items.map((item) => `${item.repo}#${item.id} — ${item.title}\n${item.url}\n`).join("\n"));
-			ctx.ui.notify(`Added ${items.length === 1 ? "item" : `${items.length} items`} to the prompt`, "info");
+			notifyUser(ctx, `Added ${items.length === 1 ? "item" : `${items.length} items`} to the prompt`, "info");
 			return;
 		}
 		const capturedItems = action.items && action.items.length > 0 ? [...action.items] : [action.item];
@@ -2685,7 +2903,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 		if (action.kind === "comment") {
 			if (commentInFlight) {
-				ctx.ui.notify("A comment action is already in progress", "warning");
+				notifyUser(ctx, "A comment action is already in progress", "warning");
 				return;
 			}
 			commentInFlight = true;
@@ -2760,11 +2978,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					uncertain = false;
 				}
 				pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "complete", plan: commentPlan, receipts } satisfies PersistedCommentResult);
-				ctx.ui.notify(`Posted ${receipts.length} GitHub-confirmed comment${receipts.length === 1 ? "" : "s"}`, "info");
+				notifyUser(ctx, `Posted ${receipts.length} GitHub-confirmed comment${receipts.length === 1 ? "" : "s"}`, "info");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				if (commentPlan) pi.appendEntry(COMMENT_ENTRY, { version: 1, state: "failed", plan: commentPlan, receipts, error: message } satisfies PersistedCommentResult);
-				ctx.ui.notify(`Comment action stopped: ${message}`, "error");
+				notifyUser(ctx, `Comment action stopped: ${message}`, "error");
 			} finally {
 				if (claimed && !uncertain) releaseItems(capturedItems, commentOwner);
 				commentInFlight = false;
@@ -2784,9 +3002,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (supported.length === 0) {
 				if (excludedItems.length > 0) {
 					const startedAt = Date.now();
-					mode.clearSelected();
-					persist();
-					persistSelectionReceipt(ctx, {
+					const message = `No work admitted: all ${capturedItems.length} selected candidates were excluded. No work was completed.`;
+					persistArchivedBatch(ctx, {
 						version: 1,
 						id: `batch-${startedAt.toString(36)}`,
 						kind: action.kind,
@@ -2794,11 +3011,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 						currentWave: 0,
 						completedItems: 0,
 						totalItems: capturedItems.length,
-						state: "complete",
+						state: "blocked",
 						startedAt,
 						waveStartedAt: startedAt,
 						excludedItems,
+						error: message,
 					});
+					notifyUser(ctx, message, "warning");
 				}
 				return;
 			}
@@ -2810,12 +3029,25 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			await startRepositoryBatch(ctx, action.kind, capturedItems);
 		}
 	};
+	const reportDashboardFailure = (ctx: CtxLike, error: unknown, action?: DashboardAction): void => {
+		const subject = action && "item" in action ? ` for ${action.item.repo}#${action.item.id}` : "";
+		const recovery = activeBatch?.waveIdentity ? "Use /review status, then /review reconcile before retrying." : "Use /review status to inspect the current operation.";
+		const summary = action && "item" in action ? `Review ${action.kind} failed for ${action.item.repo}#${action.item.id}` : "Review workbench action failed";
+		notifyUser(ctx, `Review workbench action${subject} failed: ${errorMessage(error)}. ${recovery} The workbench can be reopened with Alt+B.`, "error", activeBatch?.waveIdentity ? "/review reconcile" : "/review status", summary);
+	};
+	const dispatchDashboardAction = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
+		try {
+			await dispatch(ctx, action);
+		} catch (error) {
+			reportDashboardFailure(ctx, error, action);
+		}
+	};
 	const openDashboard = async (ctx: CtxLike) => {
 		if (!ctx.hasUI || dashboardOpen) return;
 		dashboardOpen = true;
-		let reopen = false;
+		let action: DashboardAction | undefined;
 		try {
-			const action = await ctx.ui.custom<DashboardAction>(
+			action = await ctx.ui.custom<DashboardAction>(
 				(hostTui, theme, _keybindings, done) => {
 					tui = hostTui as { requestRender(): void };
 					activeDashboard = new ReviewDashboard(
@@ -2830,41 +3062,53 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 							persist();
 							syncStatus(ctx);
 						},
-						(nextAction) => void dispatch(ctx, nextAction),
+						(nextAction) => { void dispatchDashboardAction(ctx, nextAction); },
 						(paused) => {
 							persist();
-							if (!paused && activeBatch?.state === "paused") void dispatchCurrentWave(ctx, "followUp");
+							if (!paused && activeBatch?.state === "paused") {
+								void dispatchCurrentWave(ctx, "followUp").catch((error: unknown) => reportDashboardFailure(ctx, error));
+							}
 							syncBatchProgress(ctx);
 						},
 						// The dashboard advertises the Factory handoff only while a
 						// controller is registered, so "Factory is not loaded" is not
 						// reachable from a key the workbench offers.
 						() => factoryControllerRegistered(),
+						() => nativeNotices.current,
 					);
 					return activeDashboard;
 				},
 				{ overlay: false },
 			);
-			if (action.kind !== "close") await dispatch(ctx, action);
-			if (action.kind === "scope") reopen = true;
-			if (action.kind === "factory" && factoryHandoffRequested) {
-				const batchId = factoryHandoffBatchId;
-				const openOnly = factoryOpenOnly;
-				factoryHandoffBatchId = undefined;
-				factoryOpenOnly = false;
-				factoryHandoffRequested = false;
-				if (batchId !== undefined || openOnly) await openFactoryDashboard(ctx, batchId);
-				reopen = true;
-			}
-		} catch {
-			// OMP cancellation closes the workbench without changing batch state.
+		} catch (error) {
+			if (!isUiCancellation(error)) reportDashboardFailure(ctx, error);
+			return;
 		} finally {
 			dashboardOpen = false;
 			activeDashboard = undefined;
-			persist();
-			syncStatus(ctx);
+			try {
+				persist();
+				syncStatus(ctx);
+			} catch (error) {
+				reportDashboardFailure(ctx, error, action);
+			}
 		}
-		if (reopen) void openDashboard(ctx);
+		if (!action || action.kind === "close") return;
+		let reopen = action.kind === "scope";
+		await dispatchDashboardAction(ctx, action);
+		if (action.kind === "factory" && factoryHandoffRequested) {
+			const batchId = factoryHandoffBatchId;
+			const openOnly = factoryOpenOnly;
+			factoryHandoffBatchId = undefined;
+			factoryOpenOnly = false;
+			factoryHandoffRequested = false;
+			if (batchId !== undefined || openOnly) {
+				try { await openFactoryDashboard(ctx, batchId); }
+				catch (error) { reportDashboardFailure(ctx, error, action); }
+			}
+			reopen = true;
+		}
+		if (reopen) void openDashboard(ctx).catch((error: unknown) => reportDashboardFailure(ctx, error));
 	};
 
 	const startSession = async (ctx: CtxLike, persisted: PersistedSelection | undefined) => {
@@ -2874,8 +3118,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		const hive = await mode.refreshHive();
 		if (hive.configured && hive.error) {
-			ctx.ui.notify(
-				`${hiveFailureStatus(hive.error)}; local attention order remains active, and review, fix, and slay remain available`,
+			notifyUser(ctx,				`${hiveFailureStatus(hive.error)}; local attention order remains active, and review, fix, and slay remain available`,
 				"warning",
 			);
 		}
@@ -2890,7 +3133,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const recoveredBatch = latestOwner && (latest?.waveExit || resourceClaims().list().some((claim) => claim.owner === latestOwner))
 			? loadWave(factoryClaimsRoot(env), latestOwner) ?? latest : latest;
 		if (recoveredBatch) {
-			activeBatch = recoveredBatch.state === "running" || (recoveredBatch.state === "paused" && recoveredBatch.cancelRequested === true)
+			const noWorkAdmission = recoveredBatch.error?.startsWith("No work admitted:") === true
+				&& recoveredBatch.waves.length === 0 && !recoveredBatch.waveIdentity;
+			activeBatch = noWorkAdmission
+				? undefined
+				: recoveredBatch.state === "running" || (recoveredBatch.state === "paused" && recoveredBatch.cancelRequested === true)
 				? {
 					...recoveredBatch,
 					state: "blocked",
@@ -2904,7 +3151,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (activeBatch?.state === "blocked") rememberRecoveryBatch(activeBatch);
 			if (recoveredBatch.state === "running") {
 				pi.appendEntry(BATCH_ENTRY, activeBatch);
-				ctx.ui.notify(`Recovered blocked run ${recoveredBatch.id}; use /review reconcile or /review revise after inspecting the settled external effect`, "warning");
+				notifyUser(ctx, `Recovered blocked run ${recoveredBatch.id}; use /review reconcile or /review revise after inspecting the settled external effect`, "warning");
 			}
 			if (activeBatch?.state === "paused") mode.setPaused(true);
 			syncBatchProgress(ctx);
@@ -2932,30 +3179,30 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			mode.setPaused(true);
 			if (sessionStopped(activeBatch) || !activeBatch.waveIdentity) {
 				const choice = await ctx.ui.select("Saved Review work (execution stopped)", ["Leave paused", "Resume saved work", "Cancel saved work"]);
-				if (choice === "Resume saved work") ctx.ui.notify(await resumeStoppedBatch(ctx), "info");
+				if (choice === "Resume saved work") notifyUser(ctx, await resumeStoppedBatch(ctx), "info");
 				else if (choice === "Cancel saved work" && !activeBatch.waveIdentity) persistBatch(ctx, { ...activeBatch, state: "cancelled", error: "Undispatched saved work cancelled" });
 				else if (choice === "Cancel saved work" && activeBatch.waveExit) {
 					persistBatch(ctx, { ...activeBatch, waveExit: { ...activeBatch.waveExit, choice: "cancel" } });
 					const batch = activeBatch;
-					ctx.ui.notify(settleStoppedBatch(ctx, batch, await reconcileBatchClaims(ctx, batch)), "info");
+					notifyUser(ctx, settleStoppedBatch(ctx, batch, await reconcileBatchClaims(ctx, batch)), "info");
 				}
-			} else ctx.ui.notify(activeBatch.error ?? "Saved work lacks positive owning-session shutdown proof; use /review reconcile", "warning");
+			} else notifyUser(ctx, activeBatch.error ?? "Saved work lacks positive owning-session shutdown proof; use /review reconcile", "warning");
 		}
 		const recoveredComment = readPersistedComment(ctx);
 		if (recoveredComment?.state === "previewed" || recoveredComment?.state === "confirmed") {
-			ctx.ui.notify("An interrupted comment plan was not replayed; inspect it before retrying", "warning");
+			notifyUser(ctx, "An interrupted comment plan was not replayed; inspect it before retrying", "warning");
 		}
 
 		const preselect = pi.getFlag("pr");
 		if (typeof preselect === "string" && preselect.trim()) {
 			const number = Number.parseInt(preselect.trim().replace(/^#/, ""), 10);
 			if (Number.isInteger(number) && !mode.selectById(undefined, number)) {
-				ctx.ui.notify(`#${number} is not in the open ${mode.queueMode} queue`, "warning");
+				notifyUser(ctx, `#${number} is not in the open ${mode.queueMode} queue`, "warning");
 			}
 		}
 		syncStatus(ctx);
 		if (pi.getFlag("autoslay") === true) await startAutoslay(ctx);
-		void openDashboard(ctx);
+		void openDashboard(ctx).catch((error: unknown) => reportDashboardFailure(ctx, error));
 	};
 
 	const advanceRepositoryBatch = async (ctx: CtxLike) => {
@@ -2983,7 +3230,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				: !covered ? "workflowz task-to-job evidence is missing or ambiguous for the repository wave"
 					: "workflowz workers lack terminal settlement evidence for the repository wave";
 			persistBatch(ctx, { ...activeBatch, state: "blocked", error });
-			ctx.ui.notify(`Repository wave stopped: ${error}`, "error");
+			notifyUser(ctx, `Repository wave stopped: ${error}`, "error");
 			return;
 		}
 		if (batchAtEntry.cancelRequested) {
@@ -2998,7 +3245,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			);
 			if (live.error) {
 				persistBatch(ctx, { ...activeBatch, state: "blocked", error: live.error });
-				ctx.ui.notify(`Slay wave stopped: ${live.error}`, "error");
+				notifyUser(ctx, `Slay wave stopped: ${live.error}`, "error");
 				return;
 			}
 			mode.reconcileItems(live.items);
@@ -3016,7 +3263,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					? `slay repair jobs settled but targets have no new head: ${targets}`
 					: `slay review jobs settled but targets remain open without auto-merge: ${observed}. ${slayLandingRecovery(pendingItems)}`;
 				persistBatch(ctx, { ...activeBatch, state: "blocked", error });
-				ctx.ui.notify(`Slay wave stopped: ${error}`, "error");
+				notifyUser(ctx, `Slay wave stopped: ${error}`, "error");
 				return;
 			}
 		}
@@ -3028,7 +3275,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			);
 			if (live.error) {
 				persistBatch(ctx, { ...activeBatch, state: "blocked", error: live.error });
-				ctx.ui.notify(`Slay wave stopped: ${live.error}`, "error");
+				notifyUser(ctx, `Slay wave stopped: ${live.error}`, "error");
 				return;
 			}
 			const unfinished = wave.items.filter((item) => {
@@ -3039,14 +3286,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				const targets = unfinished.map((item) => `${item.repo}#${item.id}`).join(", ");
 				const error = `issue slay jobs settled without exactly one new submitted pull request (no pull request was submitted or the effect was ambiguous): ${targets}`;
 				persistBatch(ctx, { ...activeBatch, state: "blocked", error });
-				ctx.ui.notify(`Slay wave stopped: ${error}`, "error");
+				notifyUser(ctx, `Slay wave stopped: ${error}`, "error");
 				return;
 			}
 		}
 		const refreshed = await refreshQueue(ctx);
 		if (refreshed.error) {
 			persistBatch(ctx, { ...activeBatch, state: "blocked", error: refreshed.error });
-			ctx.ui.notify(`Repository wave stopped: ${refreshed.error}`, "error");
+			notifyUser(ctx, `Repository wave stopped: ${refreshed.error}`, "error");
 			return;
 		}
 		if (activeBatch.waveOperatorPolicy && activeBatch.kind === "slay" && wave.items.every((item) => item.type === "pr") && !wave.items.every((item) => isRepairRequested(item, mode.currentUserLogin))) {
@@ -3054,7 +3301,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			const observed = await authoritativeReconcile(ctx, { ...verified, state: "blocked" }, `repo:${wave.repo.toLowerCase()}`);
 			if (observed.kind !== "settled" || observed.outcome !== "success" || !sameWaveEvidence(verified, activeBatch)) {
 				persistBatch(ctx, { ...activeBatch, state: "blocked", error: "Slay landing is unverified: exact reviewed head and authoritative merged/auto-merge effect required; use /review reconcile" });
-				ctx.ui.notify(activeBatch.error!, "warning");
+				notifyUser(ctx, activeBatch.error!, "warning");
 				return;
 			}
 		}
@@ -3063,14 +3310,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const completedItems = activeBatch.completedItems + wave.items.length;
 		if (nextWave >= activeBatch.waves.length) {
 			persistBatch(ctx, { ...activeBatch, currentWave: nextWave, completedItems, state: "complete" });
-			ctx.ui.notify(activeBatch.kind === "slay" ? "Slay complete" : "Repository run complete", "info");
+			notifyUser(ctx, activeBatch.kind === "slay" ? "Slay complete" : "Repository run complete", "info");
 			return;
 		}
+		const pauseNextWave = mode.paused;
 		persistBatch(ctx, {
 			...activeBatch,
 			currentWave: nextWave,
 			completedItems,
-			state: mode.paused ? "paused" : "running",
+			state: pauseNextWave ? "paused" : "running",
 			waveIdentity: undefined,
 			waveToolCallIds: undefined,
 			waveTaskWorkers: undefined,
@@ -3078,7 +3326,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			waveJobIds: undefined,
 			waveTerminalJobStatuses: undefined,
 		});
-		if (!mode.paused) await dispatchCurrentWave(ctx, "followUp");
+		if (pauseNextWave) {
+			notifyUser(ctx, `Drain settled ${wave.repo}; ${activeBatch.id} is paused before ${activeBatch.waves[nextWave]!.repo}. Resume with the workbench pause control.`, "info");
+			return;
+		}
+		await dispatchCurrentWave(ctx, "followUp");
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -3086,12 +3338,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		ownedWavePrompts.clear();
 		pendingExit = undefined;
 		activeCtx = ctx;
+		updateNoticeSession(ctx);
 		resetTrace(ctx);
 		// One bounded startup diagnostic: a missing Factory controller that cannot
 		// be reached only surfaces as a mystery on Shift+F, and the absent
 		// LUNA_FACTORY_ENABLED opt-in is blamed for a load failure.
 		if (!factoryControllerRegistered()) {
-			ctx.ui.notify(`Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
+			notifyUser(ctx, `Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
 		}
 		mode.setToken(resolveToken(env));
 		// Mode, scope and filter apply immediately; the remembered item can only be
@@ -3111,7 +3364,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (typeof flagRepo === "string" && flagRepo.trim()) {
 			const scope = parseScope(flagRepo, mode.org);
 			if (scope) mode.setScope(scope);
-			else if (ctx.hasUI) ctx.ui.notify(`--repo is not a repository: ${flagRepo}`, "error");
+			else if (ctx.hasUI) notifyUser(ctx, `--repo is not a repository: ${flagRepo}`, "error");
 		}
 		const flagSkipRepo = pi.getFlag("skip-repo");
 		if (typeof flagSkipRepo === "string" && flagSkipRepo.trim()) {
@@ -3147,6 +3400,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					mode,
 					RAIL_KEYS,
 					() => dashboardOpen,
+				() => nativeNotices.current,
 				);
 			},
 			{ placement: "belowEditor" },
@@ -3170,13 +3424,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		// Detached: nothing awaits this, so an escaping rejection would take the
 		// whole session process down with it.
 		started = startSession(ctx, persisted).catch((error: unknown) => {
-			ctx.ui.notify(`${mode.isReviewMode() ? "Review" : "Hive"} workbench startup: ${error instanceof Error ? error.message : String(error)}`, "error");
+			notifyUser(ctx, `${mode.isReviewMode() ? "Review" : "Hive"} workbench startup: ${error instanceof Error ? error.message : String(error)}`, "error");
 		});
 	});
 
-	pi.on("session_switch", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
-	pi.on("session_branch", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
-	pi.on("session_tree", (_event, ctx) => { activeCtx = ctx; resetTrace(ctx); repaint(); });
+	pi.on("session_switch", (_event, ctx) => { activeCtx = ctx; updateNoticeSession(ctx); resetTrace(ctx); repaint(); });
+	pi.on("session_branch", (_event, ctx) => { activeCtx = ctx; updateNoticeSession(ctx); resetTrace(ctx); repaint(); });
+	pi.on("session_tree", (_event, ctx) => { activeCtx = ctx; updateNoticeSession(ctx); resetTrace(ctx); repaint(); });
 	const requestSessionExit = (ctx: CtxLike, sessionId: string, choice: "pause" | "cancel"): void => {
 		const batch = activeBatch;
 		if (!batch || !["running", "paused", "blocked"].includes(batch.state)) return;
@@ -3458,7 +3712,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	pi.registerShortcut("alt+b", {
 		description: mode.isReviewMode() ? "Open the Review workbench" : "Open the Hive workbench",
-		handler: (ctx) => void openDashboard(ctx),
+		handler: (ctx) => { void openDashboard(ctx).catch((error: unknown) => reportDashboardFailure(ctx, error)); },
 	});
 	pi.registerShortcut("alt+s", {
 		description: "Repair returned pull requests, then implement issue waves",

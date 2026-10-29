@@ -181,6 +181,14 @@ Normal Review commands provide recovery without claim-file or Factory archaeolog
 - `/review revise` cancels a blocked wave after the same safe reconciliation and leaves the session ready for a new selection.
 - `/review slay` starts another issue Slay from the refreshed visible queue.
 
+Review keeps the latest unresolved warning or error visible in the below-editor
+banner and the workbench. On hosts that render OMP `StatusNotice` components,
+the same event also appears as a native terminal toast; ANSI sessions retain the
+notice in the transcript. The `Next:` row keeps the relevant `/review` recovery
+command visible, and notices do not move focus or start work.
+Running `/review status` acknowledges and clears that persistent banner; it
+does not release claims or resume work.
+
 If OMP records a coordinator error or abort before any tool invocation, Review binds that terminal event to the unique dispatched prompt and saves the proof. Explicit reconciliation can release its claims after checking that GitHub effects are unchanged and no worker is running or awaiting delivery. The wave is cancelled, not completed. Missing terminal proof, tool activity, or uncertain effects keep ownership protected. Existing records without this proof remain fenced.
 
 After a provider/model error, select a working model and run `/review reconcile` before starting the selection again. A blocked wave with retained claims rejects retries without changing its original dispatch or worker evidence. A claim conflict before dispatch records no dispatched prompt or owning-session identity.

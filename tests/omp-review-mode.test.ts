@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import test, { beforeEach, afterEach } from "node:test";
 import { loadPackagedJobManager } from "./omp-async-runtime.ts";
 import { createReviewerOutputSchema, reviewerDefinitionTrusted } from "../image/extension/review/reviewer-receipts.ts";
+import { createReviewNoticeComponent } from "../image/extension/review/notice.ts";
 
 import { GLYPH, PLAIN_PAINTER, formatDuration, statusIcon } from "../image/extension/review/glyphs.ts";
 import { workbenchPainter } from "../image/extension/review/paint.ts";
@@ -37,6 +38,7 @@ import {
 	GENERIC_WORKBENCH_POLICY,
 	actionPrompt,
 	createReviewExtension as createReviewExtensionImpl,
+	taskSchemaSupportsStructuredOutput,
 	createCommentActionPlan,
 	renderCommentActionPlan,
 	validateCommentActionPlan,
@@ -54,7 +56,9 @@ const NOW = 1_800_000_000_000;
 // registration and must never open a socket.
 const ISOLATED_ENV = { GH_TOKEN: "t", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", REVIEW_MODE: "hive", LUNA_FACTORY_STATE_ROOT: "", LUNA_FACTORY_CLAIMS_ROOT: "" };
 const REVIEW_EXTENSION_ROOT = fileURLToPath(new URL("../image/extension/review", import.meta.url));
+let noticeFixtureSession = 0;
 beforeEach(() => {
+	createReviewNoticeComponent().sessionChanged(`review-mode-test-${++noticeFixtureSession}`);
 	ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "review-state-"));
 	ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT = mkdtempSync(join(tmpdir(), "review-claims-"));
 });
@@ -104,6 +108,19 @@ function queueItem(overrides = {}) {
 		deletions: 7,
 		...overrides,
 	};
+}
+
+function nativeTaskParameters(structured = true) {
+	return Object.assign(() => undefined, {
+		toJsonSchema: () => ({
+			type: "object",
+			properties: {
+				agent: { type: "string" },
+				task: { type: "string" },
+				...(structured ? { outputSchema: { type: ["object", "boolean", "string", "null"] }, schemaMode: { enum: ["permissive", "strict"] } } : {}),
+			},
+		}),
+	});
 }
 
 /**
@@ -468,12 +485,15 @@ function recoveredPrSlayFetch(items, effects, options = {}) {
 function fakeHost({ qualifiedMcp = true, mcpShaDescription = "SHA that pull request head must match to allow merge" } = {}) {
 	const zodLeaf = () => ({ optional: () => zodLeaf(), describe: () => zodLeaf(), toJsonSchema: () => ({}) });
 	return {
-		toolInfo: qualifiedMcp ? [{
-			name: "mcp__github_merge_pull_request",
-			mcpServerName: "github",
-			mcpToolName: "merge_pull_request",
-			parameters: { type: "object", properties: { sha: { type: "string", description: mcpShaDescription } } },
-		}] : [],
+		toolInfo: [
+			{ name: "task", parameters: nativeTaskParameters() },
+			...(qualifiedMcp ? [{
+				name: "mcp__github_merge_pull_request",
+				mcpServerName: "github",
+				mcpToolName: "merge_pull_request",
+				parameters: { type: "object", properties: { sha: { type: "string", description: mcpShaDescription } } },
+			}] : []),
+		],
 		sessionShutdownLifecycleVersion: 1,
 		labels: [],
 		events: new Map(),
@@ -2939,6 +2959,10 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 		"hive_workbench_status",
 		"hive_workbench_trace",
 	]);
+	const completeReview = pi.commands.get("review").getArgumentCompletions;
+	assert.ok(completeReview);
+	assert.deepEqual(completeReview("re")?.map((item) => item.value), ["recap", "reconcile", "recover", "resume", "revise", "re-slay"]);
+	assert.equal(completeReview("   ")?.length, 12, "empty argument completion offers supported Review subcommands");
 	// Reserved chords would be silently dropped by omp.
 	for (const chord of pi.shortcuts.keys()) assert.match(chord, /^alt\+[a-z]$/);
 
@@ -2946,6 +2970,9 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	ctx.ui.parent = ctx;
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
+	assert.ok(completeReview("policy pro")?.some((item) => item.value === "policy projectbluefin/review"));
+	assert.deepEqual(completeReview("policy example/widgets")?.map((item) => item.value), ["policy example/widgets solo", "policy example/widgets team"]);
+	assert.deepEqual(completeReview("policy projectbluefin/review s")?.map((item) => item.value), ["policy projectbluefin/review solo"]);
 	assert.ok(ctx.statuses.get("hive_workbench")?.includes("#42"), ctx.statuses.get("hive_workbench"));
 	assert.equal(typeof ctx.widgets.get("hive-workbench-rail"), "function", "the rail is a component, not capped strings");
 	const diff = await pi.tools.get("hive_workbench_diff").execute("id", { pull_request: 42 });
@@ -2998,6 +3025,70 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	assert.match(status.content[0].text, /review, fix, and slay remain available/, "a missing Hive must not read as browse-only: authorized actions remain available");
 });
 
+test("Review blocks PR mutation admission when the effective OMP task schema omits structured fields", async () => {
+	const pi = fakeHost();
+	pi.toolInfo[0].parameters = nativeTaskParameters(false);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await pi.commands.get("review").handler("slay", ctx);
+	assert.equal(pi.messages.length, 0);
+	assert.ok(ctx.notifications.some(({ message, level }) => level === "error" && /task\.structured: true/.test(message) && /reopen the Review session/.test(message)));
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0, "failed capability preflight creates no admitted wave");
+});
+
+test("structured reviewer capability reads OMP ArkType batch schemas through its wire conversion", () => {
+	let conversionOptions;
+	const nativeParameters = Object.assign(() => undefined, {
+		toJsonSchema: (options) => {
+			conversionOptions = options;
+			return { type: "object", properties: { tasks: { type: "array", items: { type: "object", properties: { outputSchema: { type: "object" }, schemaMode: { type: "string" } } } } } };
+		},
+	});
+	assert.equal(taskSchemaSupportsStructuredOutput(nativeParameters), true);
+	assert.equal(conversionOptions.target, "draft-2020-12");
+	assert.equal(typeof conversionOptions.fallback, "function");
+});
+
+test("Review Slay records all-CI-skipped selections as no-work, not completed work", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const item = { ...queueItem(), headSha: "e".repeat(40), ciStatus: "failure" };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: hiveBackedFetch([item]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	const result = await pi.commands.get("review").handler("slay", ctx);
+	assert.match(result, /No work admitted/);
+	assert.equal(pi.messages.length, 0);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "blocked");
+	assert.equal(batch.completedItems, 0);
+	assert.equal(batch.waves.length, 0);
+	assert.equal(batch.skippedItems[0].number, item.id);
+	assert.match(batch.error, /no work was completed/i);
+	assert.ok(ctx.notifications.some(({ message }) => /No work admitted.*no work was completed/i.test(message)));
+	const reconciliation = await pi.commands.get("review").handler("reconcile", ctx);
+	assert.match(reconciliation, /no work was admitted or completed/);
+	assert.equal(pi.messages.length, 0, "no-work reconciliation never dispatches or retries a worker");
+});
+
+test("Review Slay reports an empty eligible selection without claiming admission", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review", REVIEW_SKIP_REPOS: "projectbluefin/review,projectbluefin/other" };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	const result = await pi.commands.get("review").handler("slay", ctx);
+	assert.match(result, /No eligible work/);
+	assert.doesNotMatch(result, /requested|admitted|complete/i);
+	assert.equal(pi.messages.length, 0);
+	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0);
+});
+
 test("session transitions clear old trace state and reject late events", async () => {
 	const pi = fakeHost();
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
@@ -3022,6 +3113,93 @@ test("session transitions clear old trace state and reject late events", async (
 	assert.equal(current.details.has_state, true);
 	assert.match(current.content[0].text, /turn 1/);
 	assert.doesNotMatch(current.content[0].text, /late failure/);
+});
+
+test("dashboard reports unexpected custom-UI rejection and Alt+B can reopen it", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const custom = ctx.ui.custom.bind(ctx.ui);
+	let rejectOnce = true;
+	ctx.ui.custom = (...args) => {
+		if (rejectOnce) {
+			rejectOnce = false;
+			return Promise.reject(new Error(`dashboard renderer failed ${"x".repeat(280)}`));
+		}
+		return custom(...args);
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.ok(ctx.notifications.some(({ message, level }) => level === "error" && /dashboard renderer failed/.test(message)));
+	await pi.shortcuts.get("alt+b").handler(ctx);
+	assert.equal(ctx.overlays.length, 1, "a rejected dashboard releases ownership so Alt+B can reopen it");
+	const dashboardNotice = ctx.overlays[0].render(100).join("\n");
+	assert.match(dashboardNotice, /Review workbench action failed/, "the latest unresolved failure remains visible as a compact summary");
+	assert.doesNotMatch(dashboardNotice, /dashboard renderer failed/, "long diagnostic details stay in the transcript instead of repeating in the banner");
+	assert.match(dashboardNotice, /Next: \/review status/, "the recovery command stays visible even when failure details are long");
+	assert.equal(ctx.notifications.filter(({ message }) => /dashboard renderer failed/.test(message)).length, 1, "the full diagnostic appears once");
+	await pi.commands.get("review").handler("status", ctx);
+	assert.doesNotMatch(ctx.overlays[0].render(100).join("\n"), /Review workbench action failed/, "reading status acknowledges and clears the persistent notice");
+	const next = fakeCtx();
+	next.sessionId = "session-2";
+	pi.events.get("session_switch")({}, next);
+	assert.doesNotMatch(ctx.overlays[0].render(100).join("\n"), /dashboard renderer failed/, "session changes clear prior-session notices");
+	ctx.overlays[0].handleInput("q");
+});
+
+test("dashboard treats an AbortError as cancellation and remains reopenable", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	const custom = ctx.ui.custom.bind(ctx.ui);
+	let rejectOnce = true;
+	ctx.ui.custom = (...args) => {
+		if (rejectOnce) {
+			rejectOnce = false;
+			return Promise.reject(new DOMException("cancelled", "AbortError"));
+		}
+		return custom(...args);
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.ok(!ctx.notifications.some(({ message }) => /AbortError|cancelled/.test(message)));
+	await pi.shortcuts.get("alt+b").handler(ctx);
+	assert.equal(ctx.overlays.length, 1);
+	ctx.overlays[0].handleInput("q");
+});
+
+test("dashboard browser launch exceptions preserve a copyable URL and visible reason", async () => {
+	const pi = fakeHost();
+	pi.exec = async () => { throw new Error("browser launch failed"); };
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("v");
+	ctx.overlays[0].handleInput("o");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.match(ctx.pasted.at(-1) ?? "", /https:\/\/github\.com\/projectbluefin\/review\/pull\/42/);
+	assert.ok(ctx.notifications.some(({ message, level }) => level === "warning" && /browser launch failed/.test(message)));
+});
+
+test("dashboard releases its open slot before a closed dialog finishes its action", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	let finishInput;
+	ctx.ui.input = () => new Promise((resolve) => { finishInput = resolve; });
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	ctx.overlays[0].handleInput("o");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(typeof finishInput, "function", "the first dashboard has closed and its scope action is waiting for operator input");
+	await pi.shortcuts.get("alt+b").handler(ctx);
+	assert.equal(ctx.overlays.length, 2, "Alt+B can open a new dashboard while the previous action finishes");
+	finishInput(undefined);
+	ctx.overlays[1].handleInput("q");
 });
 
 test("--autoslay repairs returned pull requests before implementing issue waves", async () => {
@@ -3340,10 +3518,11 @@ test("all known red and pending selections persist a terminal skipped-only batch
 
 	assert.equal(pi.messages.length, 0);
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	assert.equal(batch.state, "complete");
+	assert.equal(batch.state, "blocked", "a skipped-only selection is a no-work outcome, not completed work");
 	assert.deepEqual(batch.waves, []);
 	assert.equal(batch.completedItems, 0);
 	assert.equal(batch.totalItems, 2);
+	assert.match(batch.error, /No work admitted/);
 	assert.deepEqual(batch.skippedItems.map(({ number, ciStatus, ciEvidenceSource }) => ({ number, ciStatus, ciEvidenceSource })), [
 		{ number: 63, ciStatus: "failure", ciEvidenceSource: "statusCheckRollup" },
 		{ number: 64, ciStatus: "pending", ciEvidenceSource: "checkSuites" },
@@ -3629,9 +3808,10 @@ test("slay retains incomplete-file exclusions when every remaining selected issu
 	assert.equal(pi.messages.length, 0, "no wave is dispatched after the remaining issue is filtered");
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
 	assert.ok(batch, "the excluded selection remains available in the Review status receipt");
-	assert.equal(batch.state, "complete");
+	assert.equal(batch.state, "blocked", "excluded/already-submitted selections are not completed work");
 	assert.equal(batch.totalItems, 2, "the original mixed selection remains the denominator");
 	assert.deepEqual(batch.waves, []);
+	assert.match(batch.error, /No work admitted/);
 	assert.deepEqual(batch.excludedItems[0], {
 		repo: incompletePr.repo,
 		number: incompletePr.id,
@@ -3781,6 +3961,8 @@ for (const [actionKey, actionName] of [["s", "Slay"], ["f", "fix"]] as const) te
 	assert.deepEqual(receipt.excludedItems.map(({ number, reason }) => ({ number, reason })), [
 		{ number: 102, reason: "incomplete changed-file list" },
 	]);
+	assert.equal(receipt.state, "blocked", "all-excluded work is not recorded as completed");
+	assert.match(receipt.error, /No work admitted/);
 	await pi.commands.get("review").handler("status", ctx);
 	assert.match(ctx.notifications.at(-1).message, new RegExp(`Active Review wave: ${active.id} `));
 	assert.notEqual(receipt.id, active.id);
@@ -5991,9 +6173,10 @@ test("blocked issue Slay can be revised and re-Slayed in the same Review session
 });
 
 
-test("Review drain pauses active issue Slay and preserves UNKNOWN claims", async () => {
+test("Review drain settles its current issue wave, then pauses later admission without cancellation", async () => {
 	const states = {
 		"projectbluefin/review#77": { title: "drain issue", submittedPrs: [] },
+		"projectbluefin/other#78": { title: "later drain issue", submittedPrs: [] },
 	};
 	const env = { ...ISOLATED_ENV, REVIEW_MODE: "review" };
 	const pi = fakeHost();
@@ -6011,19 +6194,25 @@ test("Review drain pauses active issue Slay and preserves UNKNOWN claims", async
 	await pi.events.get("turn_end")({}, ctx);
 	await pi.commands.get("review").handler("drain", ctx);
 	const draining = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	assert.equal(draining.state, "paused");
-	assert.equal(draining.cancelRequested, true);
+	assert.equal(draining.state, "running");
+	assert.equal(draining.cancelRequested, undefined);
 
 	ctx.asyncJobs.running = [];
-	ctx.asyncJobs.recent = [{ id: "drain-worker", status: "failed", startTime: Date.now() + 2 }];
-	await pi.events.get("agent_end")({}, ctx);
-	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "paused");
+	ctx.asyncJobs.recent = [{ id: "drain-worker", status: "completed", startTime: Date.now() + 2 }];
+	const firstWave = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.waves[0];
+	const firstIssue = firstWave.items[0];
+	states[`${firstIssue.repo}#${firstIssue.id}`].submittedPrs = [`${firstIssue.repo}#99`];
 	await deliverTaskResults(pi, ctx, ["drain-worker"]);
 	await pi.events.get("agent_end")({}, ctx);
-	const cancelled = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	assert.equal(cancelled.state, "cancelled");
+	const paused = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(paused.state, "paused");
+	assert.equal(paused.currentWave, 1);
+	assert.equal(paused.completedItems, 1);
+	assert.match(ctx.notifications.at(-1)?.message ?? "", /drain.*paused/i);
+	assert.equal(pi.messages.length, 1, "drain pauses before admitting the second repository");
 	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
-	assert.match(claims.conflict("repo:projectbluefin/review", "review:other:0") ?? "", /owned by review:/);
+	assert.equal(claims.conflict(`repo:${firstIssue.repo}`, "review:other:0"), undefined, "settled first-wave claims are reconciled");
+	assert.notEqual(paused.waves[paused.currentWave].repo, firstIssue.repo);
 });
 
 test("slay prompts require unique target checkouts and live-rule landing", () => {
@@ -6842,6 +7031,7 @@ test("a Review session that offers the Factory handoff has a registered Factory 
 });
 
 test("issue admission gate handles positive admission, negative cases, and invariants", async () => {
+	let setupSession = 0;
 	const setup = async (issueAttrs, options = {}) => {
 		const pi = fakeHost();
 		const issues = Array.isArray(issueAttrs) ? issueAttrs : [issueAttrs];
@@ -6998,8 +7188,8 @@ test("issue admission gate handles positive admission, negative cases, and invar
 			},
 		});
 		const ctx = fakeCtx();
+		ctx.sessionId = `issue-admission-${++setupSession}`;
 		ctx.ui.parent = ctx;
-		;
 		if (!options.isPr) pi.flagValues.set("issues", true);
 		await pi.events.get("session_start")({}, ctx);
 		await review.whenStarted();

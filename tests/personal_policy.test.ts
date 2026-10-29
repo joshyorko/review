@@ -13,6 +13,7 @@ import { EMPTY_HIVE } from "../image/extension/review/hive.ts";
 import { ReviewMode } from "../image/extension/review/mode.ts";
 import { renderRail, tmuxReviewStatusBar } from "../image/extension/review/rail.ts";
 import { registerTools } from "../image/extension/review/tools.ts";
+import { createReviewNoticeComponent } from "../image/extension/review/notice.ts";
 
 const NOW = 1_800_000_000_000;
 const ENV = {
@@ -23,7 +24,9 @@ const ENV = {
 	LUNA_FACTORY_CLAIMS_ROOT: "",
 	REVIEW_MODE: "review",
 };
+let noticeFixtureSession = 0;
 beforeEach(() => {
+	createReviewNoticeComponent().sessionChanged(`personal-policy-test-${++noticeFixtureSession}`);
 	ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "personal-state-"));
 	ENV.LUNA_FACTORY_CLAIMS_ROOT = mkdtempSync(join(tmpdir(), "personal-claims-"));
 });
@@ -130,7 +133,11 @@ function makeFetch(
 
 function fakeHost() {
 	const leaf = (): any => ({ optional: () => leaf(), describe: () => leaf() });
+	const taskParameters = Object.assign((input: unknown) => input, {
+		toJsonSchema: () => ({ type: "object", properties: { context: { type: "string" }, tasks: { type: "array", items: { type: "object", properties: { outputSchema: { type: "object" }, schemaMode: { type: "string" } } } } } }),
+	});
 	return {
+		toolInfo: [{ name: "task", parameters: taskParameters }],
 		sessionShutdownLifecycleVersion: 1,
 		events: new Map<string, any>(),
 		flags: new Map<string, any>(),
@@ -146,6 +153,7 @@ function fakeHost() {
 		getFlag(name: string) { return this.flagValues.get(name); },
 		registerShortcut(name: string, options: any) { this.shortcuts.set(name, options); },
 		registerTool(definition: any) { this.tools.set(definition.name, definition); },
+		getAllTools() { return this.toolInfo; },
 		sendUserMessage(content: string) { this.messages.push(content); },
 		appendEntry(customType: string, data: unknown) { this.entries.push({ customType, data }); },
 		async exec() { return { stdout: "", stderr: "", code: 0, killed: false }; },

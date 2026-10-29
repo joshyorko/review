@@ -20,6 +20,7 @@ import { type RenderedRow, type Span, defaultExpanded, findSpan, hasChildren, re
 import { fitToWidth, truncateToWidth, visibleWidth } from "./width.ts";
 import { issueDetailToLines, PrDetailCache, prDetailToLines, sanitizeMarkdown, type PrDetail } from "./reader.ts";
 import { fetchIssueDetail, fetchPrDetail } from "./github.ts";
+import { renderNoticeBanner, type ReviewNotice } from "./notice.ts";
 export type DashboardAction =
 	| { kind: "close" }
     | { kind: "factory"; action: "inspect" | "patch" | "pr-ready" }
@@ -193,6 +194,7 @@ export class ReviewDashboard {
 	private readonly onAction?: (action: DashboardAction) => void;
 	private readonly onPauseChange?: (paused: boolean) => void;
 	private readonly factoryAvailable: () => boolean;
+	private readonly currentNotice: () => ReviewNotice | undefined;
 
 	constructor(
 		tui: TuiLike,
@@ -206,6 +208,7 @@ export class ReviewDashboard {
 		onAction?: (action: DashboardAction) => void,
 		onPauseChange?: (paused: boolean) => void,
 		factoryAvailable: () => boolean = () => true,
+		currentNotice: () => ReviewNotice | undefined = () => undefined,
 	) {
 		this.tui = tui;
 		this.painter = painter;
@@ -218,6 +221,7 @@ export class ReviewDashboard {
 		this.onAction = onAction;
 		this.onPauseChange = onPauseChange;
 		this.factoryAvailable = factoryAvailable;
+		this.currentNotice = currentNotice;
 		this.enableMouse();
 		const handle = setInterval(() => {
 			try {
@@ -1330,6 +1334,11 @@ export class ReviewDashboard {
 		this.lastWidth = width;
 		const now = Date.now();
 		const lines: string[] = [this.headerRow(width, now), this.painter.fg("border", "─".repeat(width))];
+		const notice = renderNoticeBanner(this.currentNotice(), {
+			fg: (role, text) => this.painter.fg(role === "info" ? "accent" : role, text),
+			bold: (text) => this.painter.bold(text),
+		});
+		lines.push(...notice.map((line) => truncateToWidth(line, width)));
 
 		if (this.showHelp) {
 			lines.push(this.painter.bold(this.painter.fg("accent", this.mode.isReviewMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH")));
