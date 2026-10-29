@@ -822,7 +822,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			action: action ?? "Read /review details before deciding what to do.",
 		}, message);
 	};
-	const notifyNotice = (ctx: CtxLike, level: "warning" | "error", id: string, content: { title: string; outcome: string; action: string }, diagnostic: unknown): void => {
+	const notifyNotice = (ctx: CtxLike, level: "warning" | "error", id: string, content: { title: string; outcome: string; action: string; steps?: readonly string[] }, diagnostic: unknown): void => {
 		const details = safePreview(errorMessage(diagnostic), 1_200, "head").text || "No additional diagnostic was provided.";
 		const sessionId = noticeSessionId(ctx);
 		const accepted = nativeNotices.publish({ id, sessionId, level, content: { ...content, details } });
@@ -2119,7 +2119,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				? saved as unknown as { title: string; outcome: string; action: string; details: string }
 				: undefined;
 			return notice
-				? `${notice.title}\n${notice.outcome}\nNext: ${notice.action}\n\nDiagnostic (read only):\n${notice.details}`
+				? `${notice.title}\n${notice.outcome}\nNext steps:\n${notice.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\nDiagnostic (read only):\n${notice.details}`
 				: "No saved Review diagnostic is available in this session";
 		}
 		if (args === "policy" || args.startsWith("policy ")) {
@@ -2215,7 +2215,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return [
 				...(acknowledged ? [
 					acknowledged.level === "error" ? "Notice dismissed; the issue is still open." : "Notice dismissed; the underlying Review status is unchanged.",
-					`Next: ${acknowledged.action}`,
+					"Next steps:",
+					...acknowledged.steps.map((step, index) => `${index + 1}. ${step}`),
 					"Use /review details to read the saved diagnostic.",
 				] : []),
 				activeBatch ? `Active Review wave: ${activeBatch.id} ${activeBatch.state}${activeBatch.error ? ` — ${activeBatch.error}` : ""}${skippedSummary(activeBatch)}` : "No active Review wave",
@@ -2558,7 +2559,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			notifyNotice(ctx, "error", `review-structured-task:${subject?.repo ?? "unknown"}#${subject?.id ?? 0}`, {
 				title: "Review couldn’t start this item",
 				outcome: `No new work was started for ${subject ? `${subject.repo}#${subject.id}` : "this item"}.`,
-				action: "If the dashboard is open, press q to close it. In the editor, run /settings and turn on Structured Task Results under Tasks → Subagents; it applies now. Press Esc, then Alt+B; select this PR and press s.",
+				action: "Enable Structured Task Results and retry this PR.",
+				steps: [
+					"If the dashboard is open, press q to close it.",
+					"In the editor, run /settings. Under Tasks → Subagents, turn on Structured Task Results; it applies now.",
+					"Press Esc, then Alt+B to reopen Review.",
+					"Select this PR and press s to retry it.",
+				],
 			}, reviewerBlocker);
 			return { kind: "blocked", message: reviewerBlocker };
 		}
@@ -2864,7 +2871,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				notifyNotice(ctx, "warning", "review-factory-unavailable", {
 					title: "Factory actions aren’t available in this session",
 					outcome: "You can still browse the GitHub review queue.",
-					action: "Restart with the packaged review launcher. If Factory is still unavailable, run /review details.",
+					action: "Restart Review with Factory available.",
+					steps: ["Restart Review with the packaged launcher.", "If Factory is still unavailable, run /review details for the reason."],
 				}, factoryLoadDiagnostic());
 				return;
 			}
@@ -2930,7 +2938,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			const browserNotice = {
 				title: `Couldn’t open the ${itemName} in your browser`,
 				outcome: "The review item is still available, and its link is in your draft.",
-				action: "Open the review link from your draft, or check your browser and try again.",
+				action: "Open the review link from your draft.",
+				steps: ["Open the review link from your draft.", "If it still won’t open, check your browser and try again."],
 			};
 			try {
 				const result = await pi.exec(
@@ -3108,9 +3117,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		notifyNotice(ctx, "error", `review-dashboard:${action?.kind ?? "unknown"}:${subjectText}`, {
 			title: "Review couldn’t confirm what finished",
 			outcome: `Don’t retry ${subjectText} yet; Review could not confirm the result.`,
-			action: activeBatch?.waveIdentity
-				? "Run /review reconcile to compare saved worker results with GitHub before deciding what to retry."
-				: "Run /review details to inspect the error before deciding what to retry.",
+			action: activeBatch?.waveIdentity ? "Reconcile before retrying." : "Inspect the error before retrying.",
+			steps: activeBatch?.waveIdentity
+				? ["Run /review reconcile to compare saved worker results with GitHub.", "Then decide what to retry."]
+				: ["Run /review details to inspect the error.", "Check the current Review status before retrying."],
 		}, error);
 	};
 	const dispatchDashboardAction = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
@@ -3431,7 +3441,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			notifyNotice(ctx, "warning", "review-factory-unavailable", {
 				title: "Factory actions aren’t available in this session",
 				outcome: "You can still browse the GitHub review queue.",
-				action: "Restart with the packaged review launcher. If Factory is still unavailable, run /review details.",
+				action: "Restart Review with Factory available.",
+				steps: ["Restart Review with the packaged launcher.", "If Factory is still unavailable, run /review details for the reason."],
 			}, factoryLoadDiagnostic());
 		}
 		mode.setToken(resolveToken(env));

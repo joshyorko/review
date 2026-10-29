@@ -3042,7 +3042,9 @@ test("Review blocks PR mutation admission when the effective OMP task schema omi
 		));
 	assert.doesNotMatch(ctx.notifications.at(-1)?.message ?? "", /task\.structured|outputSchema|schemaMode/);
 	assert.match(ctx.overlays[0].render(80).join("\n"), /No new work was started for projectbluefin\/review#42/);
-	assert.match(ctx.overlays[0].render(80).join("\n"), /Structured Task Results/);
+	const recoveryCard = ctx.overlays[0].render(80).join("\n");
+	assert.match(recoveryCard, /turn on Structured/);
+	assert.match(recoveryCard, /Task Results/);
 	const details = await pi.commands.get("review").handler("details", ctx);
 	assert.match(details, /Diagnostic \(read only\):/);
 	assert.match(details, /outputSchema and schemaMode/);
@@ -3152,13 +3154,13 @@ test("dashboard reports unexpected custom-UI rejection and Alt+B can reopen it",
 	assert.match(dashboardNotice, /Review couldn’t confirm what finished/, "the latest unresolved failure remains visible as a compact summary");
 	assert.match(dashboardNotice, /Don’t retry the selected item yet/);
 	assert.doesNotMatch(dashboardNotice, /dashboard renderer failed/, "long diagnostic details stay in the transcript instead of repeating in the banner");
-	assert.match(dashboardNotice, /Next: Run \/review details to inspect the error before deciding what to retry/);
+	assert.match(dashboardNotice, /Next steps[\s\S]*1\. Run \/review details to inspect the error[\s\S]*2\. Check the current Review status before retrying/);
 	assert.equal(ctx.notifications.filter(({ message }) => /dashboard renderer failed/.test(message)).length, 0, "technical diagnostics stay out of the transcript");
 	const nativeNoticeFactory = ctx.widgets.get("review-native-notice");
 	assert.equal(typeof nativeNoticeFactory, "function", "the persistent failure also registers a passive native widget");
 	const nativeNotice = nativeNoticeFactory();
 	assert.deepEqual(nativeNotice.describe({ supports: (kind) => kind === "toast" }), {
-		k: "toast", p: { text: "Review couldn’t confirm what finished", sub: "Next: Run /review details to inspect the error before deciding what to retry.", ttl: 2400 },
+		k: "toast", p: { text: "Review couldn’t confirm what finished", sub: "Next: Inspect the error before retrying.", ttl: 2400 },
 	});
 	const status = await pi.commands.get("review").handler("status", ctx);
 	assert.match(status, /Notice dismissed; the issue is still open/);

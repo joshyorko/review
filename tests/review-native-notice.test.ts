@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createNativeToastWidget, createReviewNoticeComponent, renderNoticeBanner } from "../image/extension/review/notice.ts";
+import { visibleWidth } from "../image/extension/review/width.ts";
 
 const content = {
 	title: "Review couldn’t start this item",
 	outcome: "No new work was started for fixture/review#42.",
-	action: "Open /settings → Tasks → Subagents → Structured Task Results, turn it on, then retry from the Review queue.",
+	action: "Enable Structured Task Results and retry this PR.",
+	steps: [
+		"If the dashboard is open, close it with q.",
+		"In the editor, run /settings and enable Structured Task Results under Tasks → Subagents.",
+		"Press Esc, then Alt+B to reopen Review.",
+		"Select this PR and press s to retry it.",
+	],
 	details: "The reviewer could not use structured task results.",
 };
 
@@ -51,7 +58,7 @@ test("dedupe retains only a fixed recent window of lifecycle IDs", () => {
 	assert.equal(notice.publish({ id: "event-0", sessionId: "session-dedupe-bound", level: "info", content }), true);
 });
 
-test("banner presents a styled title, outcome, and wrapped action without diagnostics", () => {
+test("banner presents a styled, numbered recovery card without diagnostics and caps at 80 columns", () => {
 	const notice = createReviewNoticeComponent();
 	notice.sessionChanged("session-banner");
 	notice.publish({ id: "blocked", sessionId: "session-banner", level: "error", content: { ...content, details: "PRIVATE TECHNICAL DETAIL" } });
@@ -59,10 +66,15 @@ test("banner presents a styled title, outcome, and wrapped action without diagno
 		fg: (role, text) => `<${role}>${text}</${role}>`,
 		bold: (text) => `**${text}**`,
 	}, 80);
-	assert.equal(banner[0], "**<error>Review couldn’t start this item</error>**");
+	assert.match(banner[0]!, /<border>│<\/border> \*\*<error>Review couldn’t start this item/);
 	assert.match(banner[1]!, /No new work was started for fixture\/review#42/);
-	assert.ok(banner.some((line) => line.includes("<accent>  Next:")));
+	assert.match(banner[2]!, /Next steps/);
+	assert.ok(banner.some((line) => line.includes("1.")));
+	assert.ok(banner.some((line) => line.includes("<accent>\/settings<\/accent>")));
+	const plain = renderNoticeBanner(notice.current, { fg: (_role, text) => text, bold: (text) => text }, 100);
+	assert.ok(plain.every((line) => visibleWidth(line) <= 80), "wide terminals retain a readable card width");
 	assert.ok(banner.every((line) => !line.includes("PRIVATE TECHNICAL DETAIL")));
+	assert.ok(banner.includes("<border>│</border> <dim>Details: </dim><accent>/review details</accent>"));
 	assert.deepEqual(renderNoticeBanner(undefined, { fg: (_role, text) => text, bold: (text) => text }), []);
 });
 
@@ -91,8 +103,8 @@ test("diagnostics stay out of the compact card and acknowledgement preserves the
 	const details = "task.structured schemaMode outputSchema " + "x".repeat(800);
 	notice.publish({ id: "error", sessionId: "session-long-error", level: "error", content: { ...content, details: `line one\nline two\n${details}` } });
 	const rows = renderNoticeBanner(notice.current, { fg: (_role, text) => text, bold: (text) => text }, 80);
-	assert.ok(rows.length <= 7, "the card remains compact at 80 columns");
-	assert.ok(rows.some((line) => /Next:/.test(line)), "the recovery step remains visible");
+	assert.ok(rows.length <= 9, "the card remains compact at 80 columns");
+	assert.ok(rows.some((line) => /1\./.test(line)), "the numbered recovery step remains visible");
 	assert.ok(rows.every((line) => !/schemaMode|outputSchema/.test(line)));
 	notice.acknowledge();
 	assert.equal(notice.current, undefined);

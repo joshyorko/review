@@ -11,11 +11,12 @@ export interface ReviewNotice {
 	readonly title: string;
 	readonly outcome: string;
 	readonly action: string;
+	readonly steps: readonly string[];
 	readonly details: string;
 }
 
 export interface NoticePainter {
-	fg(role: NoticeLevel | "dim" | "accent" | "text", text: string): string;
+	fg(role: NoticeLevel | "dim" | "accent" | "text" | "border", text: string): string;
 	bold(text: string): string;
 }
 
@@ -23,6 +24,7 @@ export interface NoticeContent {
 	readonly title: string;
 	readonly outcome: string;
 	readonly action: string;
+	readonly steps?: readonly string[];
 	readonly details: string;
 }
 
@@ -59,6 +61,14 @@ function safeDiagnostic(value: string): string {
 		.split(/\r?\n/).map((line) => line.replace(/[\t ]+/g, " ").trimEnd()).join("\n").trim().slice(0, MAX_TEXT_LENGTH);
 }
 
+function safeSteps(value: readonly string[] | undefined, fallback: string): string[] {
+	const steps = (value?.length ? value : [fallback])
+		.map((step) => safeText(step, 180))
+		.filter(Boolean)
+		.slice(0, 5);
+	return steps.length ? steps : ["Run /review details to inspect the saved diagnostic."];
+}
+
 function wrap(text: string, width: number, indent = ""): string[] {
 	const available = Math.max(8, width - visibleWidth(indent));
 	const words = text.split(/\s+/).filter(Boolean);
@@ -76,14 +86,38 @@ function wrap(text: string, width: number, indent = ""): string[] {
 /** Compact themed card: severity title, truthful outcome, then the next action. */
 export function renderNoticeBanner(notice: ReviewNotice | undefined, painter: NoticePainter, width = 100): string[] {
 	if (!notice) return [];
+	const columns = Math.min(80, Math.max(32, width));
+	const left = painter.fg("border", "│");
 	const title = safeText(notice.title, 100);
 	const outcome = safeText(notice.outcome, 240);
-	const action = safeText(notice.action, 240);
-	return [
-		painter.bold(painter.fg(notice.level, title)),
-		...wrap(outcome, width, "  ").map((line) => painter.fg("text", line)),
-		...wrap(`Next: ${action}`, width, "  ").map((line) => painter.bold(painter.fg("accent", line))),
+	const lines = [
+		`${left} ${painter.bold(painter.fg(notice.level, title))}`,
+		...wrap(outcome, columns - 2, "  ").map((line) => `${left} ${painter.fg("text", line.trimStart())}`),
+		`${left} ${painter.fg("dim", "Next steps")}`,
 	];
+	for (const [index, step] of notice.steps.entries()) {
+		const wrapped = wrap(step, columns - 2, "    ");
+		for (let lineIndex = 0; lineIndex < wrapped.length; lineIndex++) {
+			const content = wrapped[lineIndex]!.trimStart();
+			const number = lineIndex === 0 ? painter.bold(painter.fg("accent", `${index + 1}.`)) : "  ";
+			lines.push(`${left} ${number} ${paintControls(content, painter)}`);
+		}
+	}
+	lines.push(`${left} ${painter.fg("dim", "Details: ")}${painter.fg("accent", "/review details")}`);
+	return lines;
+}
+
+function paintControls(text: string, painter: NoticePainter): string {
+	const control = /(\/review(?:\s+(?:status|details|reconcile|revise|resume))?|\/settings|Alt\+[A-Za-z]|Structured Task Results|\b(?:Esc|press q|press s)\b)/gi;
+	const parts: string[] = [];
+	let cursor = 0;
+	for (const match of text.matchAll(control)) {
+		const index = match.index ?? 0;
+		parts.push(text.slice(cursor, index), painter.fg("accent", match[0]));
+		cursor = index + match[0].length;
+	}
+	parts.push(text.slice(cursor));
+	return parts.join("");
 }
 
 /** Public TSP component contract; ANSI hosts render the persistent card instead. */
@@ -97,7 +131,7 @@ export function createNativeToastWidget(getCurrent: () => ReviewNotice | undefin
 			if (!notice || !context.supports("toast")) return null;
 			if (notice.id !== currentId) {
 				currentId = notice.id;
-				toast = { k: "toast", p: { text: notice.title, sub: `Next: ${notice.action}`, ttl: 2400 } };
+				toast = { k: "toast", p: { text: notice.title, sub: `Next: ${safeText(notice.action, 96)}`, ttl: 2400 } };
 			}
 			return toast ?? null;
 		},
@@ -125,7 +159,8 @@ export function createReviewNoticeComponent(host?: NoticeHost) {
 			const content = {
 				title: safeText(input.content.title, 100),
 				outcome: safeText(input.content.outcome, 240),
-				action: safeText(input.content.action, 240),
+				action: safeText(input.content.action, 120),
+				steps: safeSteps(input.content.steps, input.content.action),
 				details: safeDiagnostic(input.content.details),
 			};
 			if (!content.title || !content.outcome || !content.action) return false;
