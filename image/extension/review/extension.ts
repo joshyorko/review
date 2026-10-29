@@ -9,6 +9,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import { createNativeToastWidget, createReviewNoticeComponent } from "./notice.ts";
+import { safePreview } from "./safe-output.ts";
 import { loadWave, saveWave } from "./wave-store.ts";
 import type { CiEvidenceSource, QueueItem } from "./github.ts";
 import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, isForwardHead, orgScope, parseScope, resolveToken } from "./github.ts";
@@ -58,6 +59,7 @@ export const STATE_ENTRY = "com.hive.workbench.selection";
 export const BATCH_ENTRY = "com.hive.workbench.batch";
 export const COMMENT_ENTRY = "com.hive.workbench.comment";
 export const HANDOFF_ENTRY = "com.hive.workbench.handoff";
+export const NOTICE_ENTRY = "com.review.notice-diagnostic";
 const RECAP_BRANCH_ENTRY_LIMIT = 512;
 
 export type RepositoryBatchKind = "slay" | "fix" | "diff";
@@ -66,7 +68,7 @@ type ReviewActionOutcome =
 	| { readonly kind: "admitted"; readonly message: string }
 	| { readonly kind: "blocked"; readonly message: string }
 	| { readonly kind: "cancelled"; readonly message: string }
-	| { readonly kind: "no-eligible"; readonly message: string };
+	| { readonly kind: "no-eligible"; readonly message: string; readonly details?: string };
 type CiSkippedItem = {
 	readonly item: QueueItem;
 	readonly status: "failure" | "pending";
@@ -793,7 +795,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		tui?.requestRender();
 	};
 	const acknowledgeNotice = (ctx: CtxLike): void => {
-		nativeNotices.clear();
+		nativeNotices.acknowledge();
 		clearNativeNoticeWidget(ctx);
 		tui?.requestRender();
 	};
@@ -806,18 +808,28 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			ctx.ui.notify(message, level);
 			return;
 		}
-		const recoveryAction = action
-			?? (message.includes("/review reconcile") ? "/review reconcile"
-				: message.includes("/review revise") ? "/review revise"
-					: message.includes("/review resume") ? "/review resume" : "/review status");
-		const recoverySummary = summary ?? message.slice(0, 100);
-		const sessionId = noticeSessionId(ctx);
-		const noticeId = `${level}:${message}`;
-		const accepted = nativeNotices.publish({ id: noticeId, sessionId, level, message, summary: recoverySummary, action: recoveryAction });
-		if (accepted) {
-			ctx.ui.notify(message, level);
-			if (nativeNotices.current?.id === noticeId) updateNativeNoticeWidget(ctx);
+		if (level === "error") {
+			notifyNotice(ctx, "error", `review-error:${createHash("sha256").update(message).digest("hex").slice(0, 16)}`, {
+				title: summary ?? "Review couldn’t complete this step",
+				outcome: "Review could not confirm the result. Check the current operation before trying again.",
+				action: action ?? "Run /review status, then /review details before retrying.",
+			}, message);
+			return;
 		}
+		notifyNotice(ctx, "warning", `review-warning:${createHash("sha256").update(message).digest("hex").slice(0, 16)}`, {
+			title: summary ?? "Review needs your attention",
+			outcome: "Review could not confirm everything about this item.",
+			action: action ?? "Read /review details before deciding what to do.",
+		}, message);
+	};
+	const notifyNotice = (ctx: CtxLike, level: "warning" | "error", id: string, content: { title: string; outcome: string; action: string }, diagnostic: unknown): void => {
+		const details = safePreview(errorMessage(diagnostic), 1_200, "head").text || "No additional diagnostic was provided.";
+		const sessionId = noticeSessionId(ctx);
+		const accepted = nativeNotices.publish({ id, sessionId, level, content: { ...content, details } });
+		if (!accepted) return;
+		pi.appendEntry(NOTICE_ENTRY, { id, sessionId, level, ...content, details });
+		ctx.ui.notify(content.title, level);
+		if (nativeNotices.current?.id === id) updateNativeNoticeWidget(ctx);
 		tui?.requestRender();
 	};
 	let reviewerTrustFailure: ReturnType<typeof reviewerDefinitionTrusted> | undefined;
@@ -1319,7 +1331,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		syncStatus(ctx);
 		const result = await mode.refreshQueue();
 		if (result.error && !result.cancelled && result.items.length === 0 && ctx.hasUI) {
-			notifyUser(ctx, `${mode.isReviewMode() ? "Review" : "Hive"} workbench queue: ${result.error}`, "error");
+			notifyNotice(ctx, "error", "review-queue-refresh", {
+				title: "Couldn’t refresh the review list",
+				outcome: "The list on screen may be out of date.",
+				action: "Press Alt+U to try the refresh again.",
+			}, result.error);
 		}
 		syncStatus(ctx);
 		return result;
@@ -2034,6 +2050,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	const supportedReviewCommands: readonly ReviewAutocompleteItem[] = [
 		{ value: "status", label: "status", description: "Inspect active Review waves and claims" },
+		{ value: "details", label: "details", description: "Read the latest saved Review diagnostic" },
 		{ value: "recap", label: "recap", description: "Open a bounded read-only session recap" },
 		{ value: "handoff", label: "handoff", description: "Export a bounded read-only handoff" },
 		{ value: "reconcile", label: "reconcile", description: "Reconcile worker and GitHub evidence" },
@@ -2091,6 +2108,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 
 	const reviewCommand = async (rawArgs: string, ctx: CtxLike): Promise<string> => {
 		const args = rawArgs.trim().toLowerCase();
+		if (args === "details") {
+			const sessionId = noticeSessionId(ctx);
+			const saved = nativeNotices.latestDetails?.sessionId === sessionId
+				? nativeNotices.latestDetails
+				: readLatestCustom<Record<string, unknown>>(ctx, NOTICE_ENTRY);
+			const notice = saved && "sessionId" in saved && saved.sessionId === sessionId
+				&& typeof saved.title === "string" && typeof saved.outcome === "string"
+				&& typeof saved.action === "string" && typeof saved.details === "string"
+				? saved as unknown as { title: string; outcome: string; action: string; details: string }
+				: undefined;
+			return notice
+				? `${notice.title}\n${notice.outcome}\nNext: ${notice.action}\n\nDiagnostic (read only):\n${notice.details}`
+				: "No saved Review diagnostic is available in this session";
+		}
 		if (args === "policy" || args.startsWith("policy ")) {
 			const parts = args.split(/\s+/);
 			if (parts.length < 2 || parts.length > 3 || (parts[2] !== undefined && parts[2] !== "solo" && parts[2] !== "team")) return "usage: /review policy owner/repo [solo|team]";
@@ -2163,7 +2194,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		if (args === "" || args === "status") {
 			// Reading Review status is the explicit acknowledgement for the latest
-			// persistent banner; the read does not release claims or resume work.
+			// persistent banner; the read does not resolve the underlying issue.
+			const acknowledged = nativeNotices.current;
 			acknowledgeNotice(ctx);
 			restoreClaimWaves();
 			const claims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:"));
@@ -2181,6 +2213,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			const batches = [...recoveryBatches.values()].map((batch) =>
 				`${batch.id} ${batch.state}${batch.error ? ` — ${batch.error}` : ""}${skippedSummary(batch)}`);
 			return [
+				...(acknowledged ? [
+					acknowledged.level === "error" ? "Notice dismissed; the issue is still open." : "Notice dismissed; the underlying Review status is unchanged.",
+					`Next: ${acknowledged.action}`,
+					"Use /review details to read the saved diagnostic.",
+				] : []),
 				activeBatch ? `Active Review wave: ${activeBatch.id} ${activeBatch.state}${activeBatch.error ? ` — ${activeBatch.error}` : ""}${skippedSummary(activeBatch)}` : "No active Review wave",
 				...batches,
 				claims.length > 0
@@ -2188,7 +2225,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					: "No Review mutation claims",
 			].join("\n");
 		}
-		return "usage: /review policy owner/repo [solo|team] | status | recap | handoff | reconcile | resume | drain | cancel | revise | slay";
+		return "usage: /review policy owner/repo [solo|team] | status | details | recap | handoff | reconcile | resume | drain | cancel | revise | slay";
 	};
 	pi.registerCommand?.("review", {
 		description: "Inspect or recover an interrupted Review repository wave",
@@ -2196,14 +2233,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		handler: async (args, ctx) => {
 			try {
 				const message = await reviewCommand(args, ctx);
-			if (ctx.hasUI && !["slay", "re-slay"].includes(args.trim().toLowerCase())) {
-				notifyUser(ctx, message, /UNKNOWN|unaccounted|No blocked|No work admitted|No eligible work/.test(message) ? "warning" : "info");
-			}
 				return message;
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				if (ctx.hasUI) notifyUser(ctx, message, "error");
-				return message;
+				return ctx.hasUI ? "Review could not finish this command. Use /review details to inspect the saved diagnostic." : message;
 			}
 		},
 	});
@@ -2520,7 +2554,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		const reviewerBlocker = reviewerCapabilityBlocker(kind, items);
 		if (reviewerBlocker) {
-			notifyUser(ctx, reviewerBlocker, "error");
+			const subject = items.find((item) => item.type === "pr");
+			notifyNotice(ctx, "error", `review-structured-task:${subject?.repo ?? "unknown"}#${subject?.id ?? 0}`, {
+				title: "Review couldn’t start this item",
+				outcome: `No new work was started for ${subject ? `${subject.repo}#${subject.id}` : "this item"}.`,
+				action: "If the dashboard is open, press q to close it. In the editor, run /settings and turn on Structured Task Results under Tasks → Subagents; it applies now. Press Esc, then Alt+B; select this PR and press s.",
+			}, reviewerBlocker);
 			return { kind: "blocked", message: reviewerBlocker };
 		}
 		const generation = ++batchRequestGeneration;
@@ -2595,18 +2634,24 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			return runnableItems.length > 0 ? [{ ...wave, items: runnableItems }] : [];
 		});
 		const skippedCi = validations.flatMap((validation) => validation.skippedCi);
-		for (const skipped of skippedCi) notifyCiSkip(ctx, skipped);
 		const skippedItems = skippedCi.map(persistedCiSkip);
 		if (runnableWaves.length === 0) {
 			const message = "No work admitted: every selected PR was excluded by current CI checks. The selection and skip evidence are retained; no work was completed.";
 			persistArchivedBatch(ctx, { ...batch, waves: [], skippedItems, state: "blocked", error: message });
-			return { kind: "no-eligible", message };
+			const details = [...skippedItems.map((item) => `${item.repo}#${item.number}: ${item.ciStatus} checks (${item.ciEvidenceSource})`), message].join("\n");
+			if (kind !== "slay") notifyNotice(ctx, "warning", `review-no-work:${batch.id}`, {
+				title: "No work was started",
+				outcome: "Every selected pull request has failing or pending checks. No work was completed.",
+				action: "Run /review status to see which checks need attention before retrying.",
+			}, details);
+			return { kind: "no-eligible", message, details };
 		}
 		mode.clearSelected();
 		persist();
 		persistBatch(ctx, { ...batch, waves: runnableWaves, skippedItems });
 		await dispatchCurrentWave(ctx, undefined, true);
 		if (activeBatch?.state === "running" && activeBatch.waveIdentity) {
+			if (skippedCi.length > 0 || (selection.excludedItems?.length ?? 0) > 0) notifySelectionOmissions(ctx, skippedCi, selection.excludedItems ?? []);
 			return { kind: "admitted", message: `Review ${kind} admitted for ${runnableWaves[0]!.repo}` };
 		}
 		return { kind: "blocked", message: activeBatch?.error ?? `Review ${kind} admission did not dispatch; inspect /review status` };
@@ -2631,14 +2676,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		ciEvidenceSource: evidenceSource,
 		observedAt,
 	});
-	const notifyCiSkip = (ctx: CtxLike, skipped: CiSkippedItem): void => {
-		notifyUser(ctx,			`Skipping ${skipped.item.repo}#${skipped.item.id} head=${skipped.item.headSha}: CI is ${skipped.status} (source=${skipped.evidenceSource}); ordinary PR review/landing waits for checks`,
-			"warning",
-		);
+	const notifySelectionOmissions = (ctx: CtxLike, skipped: readonly CiSkippedItem[], excluded: readonly PersistedCandidateExclusion[]): void => {
+		const count = skipped.length + excluded.length;
+		const details = [
+			...skipped.map(({ item, status, evidenceSource }) => `${item.repo}#${item.id}: ${status} checks (${evidenceSource})`),
+			...excluded.map((item) => `${item.repo}#${item.number}: ${item.reason}${item.detail ? ` (${item.detail})` : ""}`),
+		].join("\n");
+		notifyNotice(ctx, "warning", `review-selection-omissions:${createHash("sha256").update(details).digest("hex").slice(0, 16)}`, {
+			title: `${count} selected item${count === 1 ? " was" : "s were"} left out`,
+			outcome: "Review started work only on items that passed its checks.",
+			action: "Run /review status to see why each item was left out before retrying.",
+		}, details);
 	};
 
 	const filterUnsupportedSlayItems = (
-		ctx: CtxLike,
 		items: readonly QueueItem[],
 		excludedItems?: PersistedCandidateExclusion[],
 	): QueueItem[] => {
@@ -2659,7 +2710,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					observedAt: Date.now(),
 				};
 				excludedItems?.push(excluded);
-				notifyUser(ctx, `Skipping ${item.repo}#${item.id}: changes ${excluded.detail}`, "warning");
 				continue;
 			}
 			if (item.changedFilesComplete === false) {
@@ -2671,7 +2721,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					observedAt: Date.now(),
 				};
 				excludedItems?.push(excluded);
-				notifyUser(ctx, `Skipping ${item.repo}#${item.id}${item.headSha ? ` head=${item.headSha}` : ""}: ${excluded.reason}`, "warning");
 				continue;
 			}
 			eligible.push(item);
@@ -2679,7 +2728,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return eligible;
 	};
 
-	const filterCompletedIssueSlayItems = (ctx: CtxLike, items: readonly QueueItem[], excludedItems?: PersistedCandidateExclusion[]): QueueItem[] => {
+	const filterCompletedIssueSlayItems = (items: readonly QueueItem[], excludedItems?: PersistedCandidateExclusion[]): QueueItem[] => {
 		const eligible: QueueItem[] = [];
 		for (const item of items) {
 			if (item.type === "issue" && (item.submittedPrs?.length ?? 0) > 0) {
@@ -2691,9 +2740,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					observedAt: Date.now(),
 				};
 				excludedItems?.push(excluded);
-				notifyUser(ctx,					`Skipping ${item.repo}#${item.id}: pull request already submitted (${excluded.detail})`,
-					"warning",
-				);
 				continue;
 			}
 			eligible.push(item);
@@ -2704,7 +2750,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const startSlay = async (ctx: CtxLike, candidates: readonly QueueItem[] = mode.slayableItems(BATCH_LIMIT)): Promise<ReviewActionOutcome> => {
 		if (candidates.length === 0) {
 			const message = "No eligible work: the current Review queue has no items to slay";
-			notifyUser(ctx, message, "warning");
+			notifyNotice(ctx, "warning", "review-no-eligible-work", {
+				title: "No items are ready to review",
+				outcome: "No work was started because the current queue has no eligible items.",
+				action: "Refresh with Alt+U or select an eligible pull request in Review.",
+			}, message);
 			return { kind: "no-eligible", message };
 		}
 		const excludedItems: PersistedCandidateExclusion[] = [];
@@ -2727,22 +2777,41 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				error: message,
 			});
 		};
-		const eligible = filterUnsupportedSlayItems(ctx, candidates, excludedItems);
+		const eligible = filterUnsupportedSlayItems(candidates, excludedItems);
 		if (eligible.length === 0) {
 			persistExcludedSelection();
 			const message = `No work admitted: all ${candidates.length} selected candidates were excluded. No work was completed.`;
-			notifyUser(ctx, message, "warning");
+			notifyNotice(ctx, "warning", `review-no-work:${createHash("sha256").update(message).digest("hex").slice(0, 16)}`, {
+				title: "No work was started",
+				outcome: "Review skipped every selected item after its safety checks. No work was completed.",
+				action: "Run /review status to see why each item was skipped before retrying.",
+			}, [...excludedItems.map((item) => `${item.repo}#${item.number}: ${item.reason}${item.detail ? ` (${item.detail})` : ""}`), message].join("\n"));
 			return { kind: "no-eligible", message };
 		}
-		const items = filterCompletedIssueSlayItems(ctx, eligible, excludedItems);
+		const items = filterCompletedIssueSlayItems(eligible, excludedItems);
 		if (items.length === 0) {
 			persistExcludedSelection();
 			const message = `No work admitted: all ${candidates.length} selected candidates were excluded or already submitted. No work was completed.`;
-			notifyUser(ctx, message, "warning");
+			notifyNotice(ctx, "warning", `review-no-work:${createHash("sha256").update(message).digest("hex").slice(0, 16)}`, {
+				title: "No work was started",
+				outcome: "Review skipped every selected item. No work was completed.",
+				action: "Run /review status to see why each item was skipped before retrying.",
+			}, [...excludedItems.map((item) => `${item.repo}#${item.number}: ${item.reason}${item.detail ? ` (${item.detail})` : ""}`), message].join("\n"));
 			return { kind: "no-eligible", message };
 		}
 		const outcome = await startRepositoryBatch(ctx, "slay", items, { totalItems: candidates.length, excludedItems });
-		if (outcome.kind === "no-eligible" || outcome.kind === "cancelled") notifyUser(ctx, outcome.message, "warning");
+		if (outcome.kind === "no-eligible" || outcome.kind === "cancelled") {
+			const diagnostics = [
+				...excludedItems.map((item) => `${item.repo}#${item.number}: ${item.reason}${item.detail ? ` (${item.detail})` : ""}`),
+				...(outcome.details ? [outcome.details] : []),
+				outcome.message,
+			].join("\n");
+			if (outcome.kind === "cancelled" || (outcome.kind === "no-eligible" && excludedItems.length === 0)) notifyNotice(ctx, "warning", `review-slay-outcome:${createHash("sha256").update(diagnostics).digest("hex").slice(0, 16)}`, {
+				title: outcome.kind === "cancelled" ? "Review stopped before starting this request" : "No work was started",
+				outcome: outcome.kind === "cancelled" ? "Review cancelled this request before work was admitted." : "The selected items did not meet the current Review checks. No work was completed.",
+				action: "Run /review status to see which items need attention before retrying.",
+			}, diagnostics);
+		}
 		return outcome;
 	};
 
@@ -2792,7 +2861,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			// but an admitted Factory batch must remain immutable.
 			const capturedItems = mode.factorySelection("inspect");
 			if (!factoryControllerRegistered()) {
-				notifyUser(ctx, `Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
+				notifyNotice(ctx, "warning", "review-factory-unavailable", {
+					title: "Factory actions aren’t available in this session",
+					outcome: "You can still browse the GitHub review queue.",
+					action: "Restart with the packaged review launcher. If Factory is still unavailable, run /review details.",
+				}, factoryLoadDiagnostic());
 				return;
 			}
 			const repositories = new Set(capturedItems.map((item) => item.repo));
@@ -2865,10 +2938,18 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				}
 				const reason = result.killed ? "browser launch timed out" : result.stderr.trim() || `gh exited with code ${result.code}`;
 				ctx.ui.pasteToEditor(action.item.url);
-				notifyUser(ctx, `Browser unavailable for ${action.item.repo}#${action.item.id}: ${reason}; added ${action.item.url} to the prompt`, "warning");
+				notifyNotice(ctx, "warning", `review-browser:${action.item.repo}#${action.item.id}`, {
+					title: "Couldn’t open the pull request in your browser",
+					outcome: "The review item is still available, and its link is in your draft.",
+					action: "Open the pull request link from your draft, or check your browser and try again.",
+				}, `${reason}; ${action.item.url}`);
 			} catch (error) {
 				ctx.ui.pasteToEditor(action.item.url);
-				notifyUser(ctx, `Browser unavailable for ${action.item.repo}#${action.item.id}: ${errorMessage(error)}; added ${action.item.url} to the prompt`, "warning");
+				notifyNotice(ctx, "warning", `review-browser:${action.item.repo}#${action.item.id}`, {
+					title: "Couldn’t open the pull request in your browser",
+					outcome: "The review item is still available, and its link is in your draft.",
+					action: "Open the pull request link from your draft, or check your browser and try again.",
+				}, `${errorMessage(error)}; ${action.item.url}`);
 			}
 			return;
 		}
@@ -2988,7 +3069,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (action.kind === "fix") {
 			activeCtx = ctx;
 			const excludedItems: PersistedCandidateExclusion[] = [];
-			const supported = filterUnsupportedSlayItems(ctx, capturedItems, excludedItems);
+			const supported = filterUnsupportedSlayItems(capturedItems, excludedItems);
 			if (supported.length === 0) {
 				if (excludedItems.length > 0) {
 					const startedAt = Date.now();
@@ -3007,7 +3088,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 						excludedItems,
 						error: message,
 					});
-					notifyUser(ctx, message, "warning");
+					notifyNotice(ctx, "warning", `review-fix-no-work:${createHash("sha256").update(message).digest("hex").slice(0, 16)}`, {
+						title: "No work was started",
+						outcome: "Review skipped every selected item because it could not confirm the changed files. No work was completed.",
+						action: "Refresh with Alt+U, then check /review status before retrying.",
+					}, [...excludedItems.map((item) => `${item.repo}#${item.number}: ${item.reason}`), message].join("\n"));
 				}
 				return;
 			}
@@ -3021,9 +3106,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 	const reportDashboardFailure = (ctx: CtxLike, error: unknown, action?: DashboardAction): void => {
 		const subject = action && "item" in action ? ` for ${action.item.repo}#${action.item.id}` : "";
-		const recovery = activeBatch?.waveIdentity ? "Use /review status, then /review reconcile before retrying." : "Use /review status to inspect the current operation.";
-		const summary = action && "item" in action ? `Review ${action.kind} failed for ${action.item.repo}#${action.item.id}` : "Review workbench action failed";
-		notifyUser(ctx, `Review workbench action${subject} failed: ${errorMessage(error)}. ${recovery} The workbench can be reopened with Alt+B.`, "error", activeBatch?.waveIdentity ? "/review reconcile" : "/review status", summary);
+		const subjectText = subject ? subject.trim() : "the selected item";
+		notifyNotice(ctx, "error", `review-dashboard:${action?.kind ?? "unknown"}:${subjectText}`, {
+			title: "Review couldn’t confirm what finished",
+			outcome: `Don’t retry ${subjectText} yet; Review could not confirm the result.`,
+			action: activeBatch?.waveIdentity
+				? "Run /review reconcile to compare saved worker results with GitHub before deciding what to retry."
+				: "Run /review details to inspect the error before deciding what to retry.",
+		}, error);
 	};
 	const dispatchDashboardAction = async (ctx: CtxLike, action: DashboardAction): Promise<void> => {
 		try {
@@ -3108,9 +3198,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		const hive = await mode.refreshHive();
 		if (hive.configured && hive.error) {
-			notifyUser(ctx,				`${hiveFailureStatus(hive.error)}; local attention order remains active, and review, fix, and slay remain available`,
-				"warning",
-			);
+			notifyNotice(ctx, "warning", "review-hive-unavailable", {
+				title: "Hive context isn’t available",
+				outcome: "The GitHub review queue is still available and uses local ordering.",
+				action: "Run /review details to inspect the Hive connection error.",
+			}, `${hiveFailureStatus(hive.error)}: ${hive.error}`);
 		}
 		await refreshQueue(ctx);
 		if (persisted?.id) mode.selectById(persisted.repo, persisted.id);
@@ -3180,7 +3272,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		const recoveredComment = readPersistedComment(ctx);
 		if (recoveredComment?.state === "previewed" || recoveredComment?.state === "confirmed") {
-			notifyUser(ctx, "An interrupted comment plan was not replayed; inspect it before retrying", "warning");
+			notifyNotice(ctx, "warning", "review-comment-interrupted", {
+				title: "A planned comment was not posted",
+				outcome: "Review did not replay the comment after the session ended.",
+				action: "Run /review details before deciding whether to post it again.",
+			}, "An interrupted comment plan was not replayed; its saved receipt requires inspection before retrying.");
 		}
 
 		const preselect = pi.getFlag("pr");
@@ -3334,7 +3430,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		// be reached only surfaces as a mystery on Shift+F, and the absent
 		// LUNA_FACTORY_ENABLED opt-in is blamed for a load failure.
 		if (!factoryControllerRegistered()) {
-			notifyUser(ctx, `Factory handoff unavailable: ${factoryLoadDiagnostic()}`, "warning");
+			notifyNotice(ctx, "warning", "review-factory-unavailable", {
+				title: "Factory actions aren’t available in this session",
+				outcome: "You can still browse the GitHub review queue.",
+				action: "Restart with the packaged review launcher. If Factory is still unavailable, run /review details.",
+			}, factoryLoadDiagnostic());
 		}
 		mode.setToken(resolveToken(env));
 		// Mode, scope and filter apply immediately; the remembered item can only be
@@ -3414,7 +3514,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		// Detached: nothing awaits this, so an escaping rejection would take the
 		// whole session process down with it.
 		started = startSession(ctx, persisted).catch((error: unknown) => {
-			notifyUser(ctx, `${mode.isReviewMode() ? "Review" : "Hive"} workbench startup: ${error instanceof Error ? error.message : String(error)}`, "error");
+			notifyNotice(ctx, "error", "review-startup", {
+				title: "Review couldn’t open the workbench",
+				outcome: "The review list may not be current.",
+				action: "Open /review to try again, or use /review details to inspect the saved error.",
+			}, error);
 		});
 	});
 

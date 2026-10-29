@@ -296,7 +296,7 @@ export class ReviewRail {
 		const notice = renderNoticeBanner(this.currentNotice?.(), {
 			fg: (role, text) => this.painter.fg(role === "info" ? "accent" : role, text),
 			bold: (text) => this.painter.bold(text),
-		});
+		}, width);
 		rows.push(...notice.map((line) => truncateToWidth(line, width)));
 		// pi-tui skips work when a component returns the same array reference.
 		const key = `${width}:${rows.join("\u0000")}`;

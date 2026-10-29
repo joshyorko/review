@@ -144,6 +144,7 @@ function fakeHost() {
 		flagValues: new Map<string, unknown>(),
 		shortcuts: new Map<string, any>(),
 		tools: new Map<string, any>(),
+		commands: new Map<string, any>(),
 		messages: [] as string[],
 		entries: [] as Array<{ customType: string; data: unknown }>,
 		zod: { object: () => ({}), string: leaf, number: leaf },
@@ -153,11 +154,17 @@ function fakeHost() {
 		getFlag(name: string) { return this.flagValues.get(name); },
 		registerShortcut(name: string, options: any) { this.shortcuts.set(name, options); },
 		registerTool(definition: any) { this.tools.set(definition.name, definition); },
+		registerCommand(name: string, definition: any) { this.commands.set(name, definition); },
 		getAllTools() { return this.toolInfo; },
 		sendUserMessage(content: string) { this.messages.push(content); },
 		appendEntry(customType: string, data: unknown) { this.entries.push({ customType, data }); },
 		async exec() { return { stdout: "", stderr: "", code: 0, killed: false }; },
 	};
+}
+
+async function assertErrorDetails(pi: ReturnType<typeof fakeHost>, ctx: ReturnType<typeof fakeCtx>, expected: RegExp): Promise<void> {
+	assert.ok(ctx.notifications.some((entry) => entry.level === "error" && /Review couldn’t complete this step/.test(entry.message)), "the operator sees a concise human notice");
+	assert.match(await pi.commands.get("review").handler("details", ctx), expected);
 }
 
 function fakeCtx() {
@@ -225,7 +232,7 @@ test("personal workflow dispatch rejects push-only permission when workflow scop
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /workflow\/Actions write permission could not be verified/);
 });
 
 test("personal workflow dispatch rechecks named workflow paths when queue omits files", async (t) => {
@@ -243,7 +250,7 @@ test("personal workflow dispatch rechecks named workflow paths when queue omits 
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /workflow\/Actions write permission/);
 });
 
 test("returned workflow PR repair still requires capability when scopes are omitted", async (t) => {
@@ -261,7 +268,7 @@ test("returned workflow PR repair still requires capability when scopes are omit
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /workflow\/Actions write permission could not be verified/);
 });
 
 test("returned workflow repair fails closed without named file evidence", async (t) => {
@@ -279,7 +286,7 @@ test("returned workflow repair fails closed without named file evidence", async 
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /complete changed-file list unavailable/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /complete changed-file list unavailable/);
 });
 
 test("personal workflow dispatch reports missing workflow write permission", async (t) => {
@@ -293,7 +300,7 @@ test("personal workflow dispatch reports missing workflow write permission", asy
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /lacks workflow\/Actions write permission/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /lacks workflow\/Actions write permission/);
 });
 
 test("personal workflow dispatch fails closed when OAuth scopes are unavailable", async (t) => {
@@ -307,7 +314,7 @@ test("personal workflow dispatch fails closed when OAuth scopes are unavailable"
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /workflow\/Actions write permission could not be verified/);
 });
 
 test("personal workflow dispatch fails closed when scope lookup fails", async (t) => {
@@ -321,7 +328,7 @@ test("personal workflow dispatch fails closed when scope lookup fails", async (t
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /workflow\/Actions write permission could not be verified/);
 });
 
 test("personal workflow dispatch fails closed when changed-file evidence is unavailable", async (t) => {
@@ -335,7 +342,7 @@ test("personal workflow dispatch fails closed when changed-file evidence is unav
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /complete changed-file list unavailable/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /complete changed-file list unavailable/);
 });
 
 test("Issue s and Alt-S dispatch issue implementation, while d requests issue evidence", () => {
@@ -748,5 +755,5 @@ test("live head changes still block the captured pull request", async (t) => {
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((entry) => /pull request head changed/.test(entry.message)));
+	await assertErrorDetails(pi, ctx, /pull request head changed/);
 });

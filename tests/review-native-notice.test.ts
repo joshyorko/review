@@ -2,117 +2,111 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createNativeToastWidget, createReviewNoticeComponent, renderNoticeBanner } from "../image/extension/review/notice.ts";
 
+const content = {
+	title: "Review couldn’t start this item",
+	outcome: "No new work was started for fixture/review#42.",
+	action: "Open /settings → Tasks → Subagents → Structured Task Results, turn it on, then retry from the Review queue.",
+	details: "The reviewer could not use structured task results.",
+};
+
 test("notice state is shared and repeated lifecycle notices are delivered once", () => {
 	const delivered: string[] = [];
 	const first = createReviewNoticeComponent({ notify: (message) => delivered.push(message) });
 	const second = createReviewNoticeComponent();
 	first.sessionChanged("session-a");
-	assert.equal(first.publish({ id: "worker-completed", sessionId: "session-a", level: "info", message: "Worker completed" }), true);
-	assert.equal(second.current?.message, "Worker completed");
-	assert.equal(second.publish({ id: "worker-completed", sessionId: "session-a", level: "info", message: "Worker completed" }), false);
-	assert.deepEqual(delivered, ["Worker completed"]);
+	assert.equal(first.publish({ id: "worker-completed", sessionId: "session-a", level: "error", content }), true);
+	assert.deepEqual(second.current, { id: "worker-completed", sessionId: "session-a", level: "error", ...content });
+	assert.equal(second.publish({ id: "worker-completed", sessionId: "session-a", level: "error", content }), false);
+	assert.deepEqual(delivered, [`${content.title}. ${content.outcome} Next: ${content.action}`]);
 });
 
 test("session changes clear session-owned notices and reject stale events", () => {
 	const notice = createReviewNoticeComponent();
 	notice.sessionChanged("session-b");
-	assert.equal(notice.publish({ id: "old", sessionId: "session-a", level: "warning", message: "stale" }), false);
-	assert.equal(notice.publish({ id: "current", sessionId: "session-b", level: "warning", message: "current" }), true);
+	assert.equal(notice.publish({ id: "old", sessionId: "session-a", level: "warning", content }), false);
+	assert.equal(notice.publish({ id: "current", sessionId: "session-b", level: "warning", content }), true);
 	notice.sessionChanged("session-c");
 	assert.equal(notice.current, undefined);
-	assert.equal(notice.publish({ id: "current", sessionId: "session-c", level: "warning", message: "new session" }), true);
+	assert.equal(notice.latestDetails, undefined);
+	assert.equal(notice.publish({ id: "current", sessionId: "session-c", level: "warning", content }), true);
 });
 
 test("informational notices do not hide the latest unresolved warning or error", () => {
 	const notice = createReviewNoticeComponent();
 	notice.sessionChanged("session-priority");
-	notice.publish({ id: "blocked", sessionId: "session-priority", level: "warning", message: "Needs review" });
-	notice.publish({ id: "progress", sessionId: "session-priority", level: "info", message: "Worker started" });
-	assert.equal(notice.current?.message, "Needs review");
-	notice.publish({ id: "failed", sessionId: "session-priority", level: "error", message: "Worker failed" });
-	notice.publish({ id: "warning", sessionId: "session-priority", level: "warning", message: "Another item needs attention" });
-	notice.publish({ id: "complete", sessionId: "session-priority", level: "info", message: "Other item completed" });
-	assert.equal(notice.current?.message, "Worker failed");
-	notice.clear();
-	assert.equal(notice.current, undefined);
+	notice.publish({ id: "blocked", sessionId: "session-priority", level: "warning", content });
+	notice.publish({ id: "failed", sessionId: "session-priority", level: "error", content: { ...content, title: "A higher priority failure" } });
+	notice.publish({ id: "warning", sessionId: "session-priority", level: "warning", content });
+	assert.equal(notice.current?.title, "A higher priority failure");
+	assert.equal(notice.latestDetails?.title, "A higher priority failure", "a lower-severity warning cannot replace the error details");
 });
 
 test("dedupe retains only a fixed recent window of lifecycle IDs", () => {
 	const notice = createReviewNoticeComponent();
 	notice.sessionChanged("session-dedupe-bound");
 	for (let index = 0; index < 257; index++) {
-		assert.equal(notice.publish({ id: `event-${index}`, sessionId: "session-dedupe-bound", level: "info", message: `event ${index}` }), true);
+		assert.equal(notice.publish({ id: `event-${index}`, sessionId: "session-dedupe-bound", level: "info", content: { ...content, title: `event ${index}` } }), true);
 	}
-	assert.equal(notice.publish({ id: "event-256", sessionId: "session-dedupe-bound", level: "info", message: "latest duplicate" }), false);
-	assert.equal(notice.publish({ id: "event-0", sessionId: "session-dedupe-bound", level: "info", message: "outside recent window" }), true);
+	assert.equal(notice.publish({ id: "event-256", sessionId: "session-dedupe-bound", level: "info", content }), false);
+	assert.equal(notice.publish({ id: "event-0", sessionId: "session-dedupe-bound", level: "info", content }), true);
 });
 
-test("banner is compact and uses native theme ANSI styling", () => {
+test("banner presents a styled title, outcome, and wrapped action without diagnostics", () => {
 	const notice = createReviewNoticeComponent();
 	notice.sessionChanged("session-banner");
-	notice.publish({ id: "blocked", sessionId: "session-banner", level: "warning", message: "Needs review", action: "/review reconcile" });
+	notice.publish({ id: "blocked", sessionId: "session-banner", level: "error", content: { ...content, details: "PRIVATE TECHNICAL DETAIL" } });
 	const banner = renderNoticeBanner(notice.current, {
 		fg: (role, text) => `<${role}>${text}</${role}>`,
 		bold: (text) => `**${text}**`,
-	});
-	assert.deepEqual(banner, [
-		"**<warning>Review</warning>** <dim>·</dim> <warning>Needs review</warning>",
-		"**<warning>Next: /review reconcile</warning>**",
-	]);
+	}, 80);
+	assert.equal(banner[0], "**<error>Review couldn’t start this item</error>**");
+	assert.match(banner[1]!, /No new work was started for fixture\/review#42/);
+	assert.ok(banner.some((line) => line.includes("<accent>  Next:")));
+	assert.ok(banner.every((line) => !line.includes("PRIVATE TECHNICAL DETAIL")));
 	assert.deepEqual(renderNoticeBanner(undefined, { fg: (_role, text) => text, bold: (text) => text }), []);
 });
 
-test("native notice widget uses the public TSP toast node and stays quiet in ANSI", () => {
+test("native toast uses human copy while ANSI render adds no rows", () => {
 	const notice = createReviewNoticeComponent();
 	notice.sessionChanged("session-toast-node");
-	notice.publish({ id: "blocked", sessionId: "session-toast-node", level: "error", message: "Full diagnostic", summary: "Review action failed", action: "/review status" });
-	const current = notice.current;
-	if (!current) throw new Error("notice was not retained");
+	notice.publish({ id: "blocked", sessionId: "session-toast-node", level: "error", content });
 	const widget = createNativeToastWidget(() => notice.current);
 	const toastNode = widget.describe({ supports: (kind) => kind === "toast" });
 	assert.deepEqual(toastNode, {
 		k: "toast",
-		p: { text: "Review action failed", sub: "Next: /review status", ttl: 2400 },
+		p: { text: content.title, sub: `Next: ${content.action}`, ttl: 2400 },
 	});
-	assert.equal(widget.describe({ supports: (kind) => kind === "toast" }), toastNode, "unchanged notices reuse the same native node identity");
+	assert.equal(widget.describe({ supports: (kind) => kind === "toast" }), toastNode, "unchanged notices reuse the same node identity");
 	assert.equal(widget.describe({ supports: () => false }), null);
 	assert.deepEqual(widget.render(80), []);
-	notice.publish({ id: "next", sessionId: "session-toast-node", level: "warning", message: "Other blocker", summary: "Review action needs attention", action: "/review status" });
-	assert.equal(widget.describe({ supports: (kind) => kind === "toast" }), toastNode, "a lower-severity warning does not replace the unresolved error toast");
-	notice.clear();
-	assert.equal(widget.describe({ supports: (kind) => kind === "toast" }), null, "acknowledgement removes a pending toast description");
+	notice.acknowledge();
+	assert.equal(widget.describe({ supports: (kind) => kind === "toast" }), null);
+	assert.equal(notice.latestDetails?.details, content.details, "acknowledgement preserves read-only diagnostics");
+	assert.equal(notice.publish({ id: "blocked", sessionId: "session-toast-node", level: "error", content }), true, "a repeated failure can reappear after acknowledgement");
 });
 
-test("long failures keep their recovery command on a separate visible banner row", () => {
+test("diagnostics stay out of the compact card and acknowledgement preserves them", () => {
 	const notice = createReviewNoticeComponent();
 	notice.sessionChanged("session-long-error");
-	notice.publish({ id: "error", sessionId: "session-long-error", level: "error", message: "x".repeat(240), summary: "Review action failed for fixture/repo#42", action: "/review reconcile" });
-	const rows = renderNoticeBanner(notice.current, { fg: (_role, text) => text, bold: (text) => text });
-	assert.equal(rows.length, 2);
-	assert.equal(rows[0], "Review · Review action failed for fixture/repo#42");
-	assert.equal(rows[1], "Next: /review reconcile");
+	const details = "task.structured schemaMode outputSchema " + "x".repeat(800);
+	notice.publish({ id: "error", sessionId: "session-long-error", level: "error", content: { ...content, details: `line one\nline two\n${details}` } });
+	const rows = renderNoticeBanner(notice.current, { fg: (_role, text) => text, bold: (text) => text }, 80);
+	assert.ok(rows.length <= 7, "the card remains compact at 80 columns");
+	assert.ok(rows.some((line) => /Next:/.test(line)), "the recovery step remains visible");
+	assert.ok(rows.every((line) => !/schemaMode|outputSchema/.test(line)));
+	notice.acknowledge();
+	assert.equal(notice.current, undefined);
+	assert.match(notice.latestDetails?.details ?? "", /line one\nline two/);
+	assert.match(notice.latestDetails?.details ?? "", /outputSchema/);
+	notice.sessionChanged("session-next");
+	assert.equal(notice.latestDetails, undefined, "session changes discard prior-session diagnostics");
 });
 
-test("explicit acknowledgement clears the persistent notice and dedupe entry", () => {
+test("clear removes the current notice and saved details", () => {
 	const notice = createReviewNoticeComponent();
-	notice.sessionChanged("session-ack");
-	const level: "error" = "error";
-	const input = { id: "blocked", sessionId: "session-ack", level, message: "Needs reconciliation", action: "/review reconcile" };
-	assert.equal(notice.publish(input), true);
+	notice.sessionChanged("session-clear");
+	notice.publish({ id: "blocked", sessionId: "session-clear", level: "error", content });
 	notice.clear();
 	assert.equal(notice.current, undefined);
-	assert.equal(notice.publish(input), true, "the same unresolved event can reappear after acknowledgement");
-});
-
-test("acknowledgement and session changes clear shared notices across module copies", () => {
-	const firstCopy = createReviewNoticeComponent();
-	const secondCopy = createReviewNoticeComponent();
-	firstCopy.sessionChanged("session-widget-fence");
-	firstCopy.publish({ id: "blocked", sessionId: "session-widget-fence", level: "error", message: "Review failed" });
-	assert.equal(secondCopy.current?.message, "Review failed");
-	secondCopy.clear();
-	assert.equal(firstCopy.current, undefined);
-	firstCopy.publish({ id: "again", sessionId: "session-widget-fence", level: "error", message: "Review failed again" });
-	firstCopy.sessionChanged("session-widget-next");
-	assert.equal(secondCopy.current, undefined);
+	assert.equal(notice.latestDetails, undefined);
 });

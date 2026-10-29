@@ -1337,7 +1337,7 @@ export class ReviewDashboard {
 		const notice = renderNoticeBanner(this.currentNotice(), {
 			fg: (role, text) => this.painter.fg(role === "info" ? "accent" : role, text),
 			bold: (text) => this.painter.bold(text),
-		});
+		}, width);
 		lines.push(...notice.map((line) => truncateToWidth(line, width)));
 
 		if (this.showHelp) {

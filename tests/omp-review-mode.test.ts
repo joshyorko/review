@@ -38,6 +38,7 @@ import {
 	GENERIC_WORKBENCH_POLICY,
 	actionPrompt,
 	createReviewExtension as createReviewExtensionImpl,
+	NOTICE_ENTRY,
 	taskSchemaSupportsStructuredOutput,
 	createCommentActionPlan,
 	renderCommentActionPlan,
@@ -2962,7 +2963,8 @@ test("the extension registers keyboard-only surfaces and real tools", async () =
 	const completeReview = pi.commands.get("review").getArgumentCompletions;
 	assert.ok(completeReview);
 	assert.deepEqual(completeReview("re")?.map((item) => item.value), ["recap", "reconcile", "recover", "resume", "revise", "re-slay"]);
-	assert.equal(completeReview("   ")?.length, 12, "empty argument completion offers supported Review subcommands");
+	assert.equal(completeReview("   ")?.length, 13, "empty argument completion offers supported Review subcommands");
+	assert.ok(completeReview("d")?.some((item) => item.value === "details"), "diagnostic inspection is discoverable from /review completion");
 	// Reserved chords would be silently dropped by omp.
 	for (const chord of pi.shortcuts.keys()) assert.match(chord, /^alt\+[a-z]$/);
 
@@ -3036,9 +3038,16 @@ test("Review blocks PR mutation admission when the effective OMP task schema omi
 	await pi.commands.get("review").handler("slay", ctx);
 	assert.equal(pi.messages.length, 0);
 	assert.ok(ctx.notifications.some(({ message, level }) => level === "error"
-		&& /Cannot admit slay for projectbluefin\/review#42/.test(message)
-		&& /task\.structured: true/.test(message)
-		&& /reopen the Review session/.test(message)));
+		&& /Review couldn’t start this item/.test(message)
+		));
+	assert.doesNotMatch(ctx.notifications.at(-1)?.message ?? "", /task\.structured|outputSchema|schemaMode/);
+	assert.match(ctx.overlays[0].render(80).join("\n"), /No new work was started for projectbluefin\/review#42/);
+	assert.match(ctx.overlays[0].render(80).join("\n"), /Structured Task Results/);
+	const details = await pi.commands.get("review").handler("details", ctx);
+	assert.match(details, /Diagnostic \(read only\):/);
+	assert.match(details, /outputSchema and schemaMode/);
+	assert.match(details, /No new work was started for projectbluefin\/review#42/);
+	assert.ok(pi.entries.some((entry) => entry.customType === NOTICE_ENTRY && entry.data?.details?.includes("outputSchema")), "bounded diagnostics are saved to the session journal");
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0, "failed capability preflight creates no admitted wave");
 });
 
@@ -3072,7 +3081,8 @@ test("Review Slay records all-CI-skipped selections as no-work, not completed wo
 	assert.equal(batch.waves.length, 0);
 	assert.equal(batch.skippedItems[0].number, item.id);
 	assert.match(batch.error, /no work was completed/i);
-	assert.ok(ctx.notifications.some(({ message }) => /No work admitted.*no work was completed/i.test(message)));
+	assert.ok(ctx.notifications.some(({ message }) => /No work was started/.test(message)));
+	assert.match(await pi.commands.get("review").handler("details", ctx), /No work admitted.*no work was completed/i);
 	const reconciliation = await pi.commands.get("review").handler("reconcile", ctx);
 	assert.match(reconciliation, /no work was admitted or completed/);
 	assert.equal(pi.messages.length, 0, "no-work reconciliation never dispatches or retries a worker");
@@ -3134,23 +3144,27 @@ test("dashboard reports unexpected custom-UI rejection and Alt+B can reopen it",
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.ok(ctx.notifications.some(({ message, level }) => level === "error" && /dashboard renderer failed/.test(message)));
+	assert.ok(ctx.notifications.some(({ message, level }) => level === "error" && /Review couldn’t confirm what finished/.test(message)));
+	assert.doesNotMatch(ctx.notifications.at(-1)?.message ?? "", /dashboard renderer failed/);
 	await pi.shortcuts.get("alt+b").handler(ctx);
 	assert.equal(ctx.overlays.length, 1, "a rejected dashboard releases ownership so Alt+B can reopen it");
 	const dashboardNotice = ctx.overlays[0].render(100).join("\n");
-	assert.match(dashboardNotice, /Review workbench action failed/, "the latest unresolved failure remains visible as a compact summary");
+	assert.match(dashboardNotice, /Review couldn’t confirm what finished/, "the latest unresolved failure remains visible as a compact summary");
+	assert.match(dashboardNotice, /Don’t retry the selected item yet/);
 	assert.doesNotMatch(dashboardNotice, /dashboard renderer failed/, "long diagnostic details stay in the transcript instead of repeating in the banner");
-	assert.match(dashboardNotice, /Next: \/review status/, "the recovery command stays visible even when failure details are long");
-	assert.equal(ctx.notifications.filter(({ message }) => /dashboard renderer failed/.test(message)).length, 1, "the full diagnostic appears once");
+	assert.match(dashboardNotice, /Next: Run \/review details to inspect the error before deciding what to retry/);
+	assert.equal(ctx.notifications.filter(({ message }) => /dashboard renderer failed/.test(message)).length, 0, "technical diagnostics stay out of the transcript");
 	const nativeNoticeFactory = ctx.widgets.get("review-native-notice");
 	assert.equal(typeof nativeNoticeFactory, "function", "the persistent failure also registers a passive native widget");
 	const nativeNotice = nativeNoticeFactory();
 	assert.deepEqual(nativeNotice.describe({ supports: (kind) => kind === "toast" }), {
-		k: "toast", p: { text: "Review workbench action failed", sub: "Next: /review status", ttl: 2400 },
+		k: "toast", p: { text: "Review couldn’t confirm what finished", sub: "Next: Run /review details to inspect the error before deciding what to retry.", ttl: 2400 },
 	});
-	await pi.commands.get("review").handler("status", ctx);
-	assert.doesNotMatch(ctx.overlays[0].render(100).join("\n"), /Review workbench action failed/, "reading status acknowledges and clears the persistent notice");
+	const status = await pi.commands.get("review").handler("status", ctx);
+	assert.match(status, /Notice dismissed; the issue is still open/);
+	assert.doesNotMatch(ctx.overlays[0].render(100).join("\n"), /Review couldn’t confirm what finished/, "reading status acknowledges and clears the persistent notice");
 	assert.equal(ctx.widgets.get("review-native-notice"), undefined, "status acknowledgement removes the native widget too");
+	assert.match(await pi.commands.get("review").handler("details", ctx), /dashboard renderer failed/, "the diagnostic remains available after acknowledgement");
 	const next = fakeCtx();
 	next.sessionId = "session-2";
 	pi.events.get("session_switch")({}, next);
@@ -3180,7 +3194,7 @@ test("dashboard treats an AbortError as cancellation and remains reopenable", as
 	ctx.overlays[0].handleInput("q");
 });
 
-test("dashboard browser launch exceptions preserve a copyable URL and visible reason", async () => {
+test("dashboard browser launch exceptions preserve a copyable URL and human recovery card", async () => {
 	const pi = fakeHost();
 	pi.exec = async () => { throw new Error("browser launch failed"); };
 	const ctx = fakeCtx();
@@ -3192,7 +3206,11 @@ test("dashboard browser launch exceptions preserve a copyable URL and visible re
 	ctx.overlays[0].handleInput("o");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.match(ctx.pasted.at(-1) ?? "", /https:\/\/github\.com\/projectbluefin\/review\/pull\/42/);
-	assert.ok(ctx.notifications.some(({ message, level }) => level === "warning" && /browser launch failed/.test(message)));
+	assert.ok(ctx.notifications.some(({ message, level }) => level === "warning"
+		&& /Couldn’t open the pull request in your browser/.test(message)));
+	assert.match(ctx.overlays[0].render(100).join("\n"), /link is in your draft/);
+	assert.doesNotMatch(ctx.notifications.at(-1)?.message ?? "", /browser launch failed/);
+	assert.match(await pi.commands.get("review").handler("details", ctx), /browser launch failed/);
 });
 
 test("dashboard releases its open slot before a closed dialog finishes its action", async () => {
@@ -3361,7 +3379,8 @@ test("ordinary PR slay blocks failed CI before reviewer dispatch", async () => {
 	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /CI is failure/.test(notification.message)));
+	assert.ok(ctx.notifications.some((notification) => /No work was started/.test(notification.message)));
+	assert.match(await pi.commands.get("review").handler("details", ctx), /#42: failure checks/);
 });
 
 test("slay skips known red and pending ordinary PRs without blocking eligible waves or repairs", async () => {
@@ -3421,10 +3440,11 @@ test("slay skips known red and pending ordinary PRs without blocking eligible wa
 		{ number: 44, headSha: "4".repeat(40), ciStatus: "pending", ciEvidenceSource: "checkSuites" },
 	]);
 	assert.ok(batch.skippedItems.every((item) => Number.isFinite(item.observedAt)));
-	assert.ok(ctx.notifications.some((notification) => /skipping .*#41 head=1{40}: CI is failure \(source=statusCheckRollup\)/i.test(notification.message)));
-	assert.ok(ctx.notifications.some((notification) => /skipping .*#44 head=4{40}: CI is pending \(source=checkSuites\)/i.test(notification.message)));
-	await pi.commands.get("review").handler("status", ctx);
-	const status = ctx.notifications.at(-1).message;
+	assert.ok(ctx.notifications.some((notification) => /2 selected items were left out/.test(notification.message)));
+	const details = await pi.commands.get("review").handler("details", ctx);
+	assert.match(details, /#41: failure checks \(statusCheckRollup\)/);
+	assert.match(details, /#44: pending checks \(checkSuites\)/);
+	const status = await pi.commands.get("review").handler("status", ctx);
 	assert.match(status, /Skipped CI: projectbluefin\/review#41 head=1{40} ci=failure source=statusCheckRollup observedAt=/);
 	assert.match(status, /Skipped CI: projectbluefin\/other#44 head=4{40} ci=pending source=checkSuites observedAt=/);
 });
@@ -3487,7 +3507,7 @@ test("slay blocks an auto-merge state without a recorded exact-head landing atte
 	assert.equal(batch.completedItems, 0);
 	assert.equal(batch.totalItems, 2);
 	assert.deepEqual(batch.skippedItems, [], "a later pending wave is not read past an unverified landing effect");
-	assert.ok(ctx.notifications.some((notification) => /unverified|reconcile/i.test(notification.message)));
+	assert.match(await pi.commands.get("review").handler("details", ctx), /unverified|reconcile/i);
 });
 
 test("all known red and pending selections persist a terminal skipped-only batch", async () => {
@@ -3737,11 +3757,12 @@ test("slay reports incomplete-file candidates separately while preserving select
 		observedAt: batch.excludedItems[0].observedAt,
 	}]);
 	assert.ok(Number.isFinite(batch.excludedItems[0].observedAt));
-	assert.ok(ctx.notifications.some((notification) => /skipping .*#84 head=b{40}: incomplete changed-file list/i.test(notification.message)));
+	assert.ok(ctx.notifications.some((notification) => /1 selected item was left out/.test(notification.message)));
 	assert.equal(ctx.notifications.some((notification) => /#84.*CI is/i.test(notification.message)), false);
-	await pi.commands.get("review").handler("status", ctx);
-	assert.match(ctx.notifications.at(-1).message, /Excluded candidate: projectbluefin\/incomplete#84 head=b{40} reason=incomplete changed-file list observedAt=/);
-	assert.doesNotMatch(ctx.notifications.at(-1).message, /Skipped CI: projectbluefin\/incomplete#84/);
+	assert.match(await pi.commands.get("review").handler("details", ctx), /projectbluefin\/incomplete#84: incomplete changed-file list/);
+	const status = await pi.commands.get("review").handler("status", ctx);
+	assert.match(status, /Excluded candidate: projectbluefin\/incomplete#84 head=b{40} reason=incomplete changed-file list observedAt=/);
+	assert.doesNotMatch(status, /Skipped CI: projectbluefin\/incomplete#84/);
 });
 
 test("slay retains incomplete-file exclusions when every remaining selected issue is already submitted", async () => {
@@ -3833,9 +3854,9 @@ test("slay retains incomplete-file exclusions when every remaining selected issu
 		{ number: incompletePr.id, reason: "incomplete changed-file list", detail: undefined },
 		{ number: submittedIssue.id, reason: "pull request already submitted", detail: submittedIssue.submittedPrs.join(", ") },
 	]);
-	await pi.commands.get("review").handler("status", ctx);
-	assert.match(ctx.notifications.at(-1).message, /Excluded candidate: projectbluefin\/incomplete#86 head=d{40} reason=incomplete changed-file list observedAt=/);
-	assert.match(ctx.notifications.at(-1).message, /Excluded candidate: projectbluefin\/already-submitted#87 reason=pull request already submitted detail=projectbluefin\/already-submitted#10 observedAt=/);
+	const status = await pi.commands.get("review").handler("status", ctx);
+	assert.match(status, /Excluded candidate: projectbluefin\/incomplete#86 head=d{40} reason=incomplete changed-file list observedAt=/);
+	assert.match(status, /Excluded candidate: projectbluefin\/already-submitted#87 reason=pull request already submitted detail=projectbluefin\/already-submitted#10 observedAt=/);
 });
 
 test("slay durably accounts for workflow-file candidates when no work is dispatched", async () => {
@@ -3912,7 +3933,7 @@ test("dashboard fix persists filtered PRs beside dispatched work using the origi
 	ctx.overlays[0].handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 
-	assert.equal(pi.messages.length, 1);
+	assert.equal(pi.messages.length, 1, JSON.stringify(pi.entries.filter((entry) => entry.customType === NOTICE_ENTRY).map((entry) => entry.data)));
 	assert.match(pi.messages[0], /projectbluefin\/eligible#90/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/incomplete#89/);
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
@@ -3973,8 +3994,8 @@ for (const [actionKey, actionName] of [["s", "Slay"], ["f", "fix"]] as const) te
 	]);
 	assert.equal(receipt.state, "blocked", "all-excluded work is not recorded as completed");
 	assert.match(receipt.error, /No work admitted/);
-	await pi.commands.get("review").handler("status", ctx);
-	assert.match(ctx.notifications.at(-1).message, new RegExp(`Active Review wave: ${active.id} `));
+	const status = await pi.commands.get("review").handler("status", ctx);
+	assert.match(status, new RegExp(`Active Review wave: ${active.id} `));
 	assert.notEqual(receipt.id, active.id);
 });
 
@@ -4142,7 +4163,8 @@ test("self-hosted slay and fix dispatch workflow pull requests while incomplete 
 	dashboard.handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 0, "stale workflow head must not dispatch a fixer");
-	assert.ok(ctx.notifications.some((n) => /pull request head changed/.test(n.message)));
+	assert.ok(ctx.notifications.some((n) => /Review couldn’t complete this step/.test(n.message)));
+	assert.match(await pi.commands.get("review").handler("details", ctx), /pull request head changed/);
 
 });
 
@@ -4196,14 +4218,15 @@ test("generic PR fix revalidates every selected head and live workflow classific
 	ctx.overlays[0].handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 0, "a newly workflow-changing live PR is blocked by managed policy");
-	assert.ok(ctx.notifications.some((n) => /changes \.github\/workflows\/deploy\.yml/.test(n.message)));
+	assert.ok(ctx.notifications.some((n) => /Review couldn’t complete this step/.test(n.message)));
+	assert.match(await pi.commands.get("review").handler("details", ctx), /changes \.github\/workflows\/deploy\.yml/);
 
 	liveHead = "b".repeat(40);
 	ctx.notifications.length = 0;
 	ctx.overlays[0].handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 0, "a stale generic-fix head never dispatches");
-	assert.ok(ctx.notifications.some((n) => /pull request head changed/.test(n.message)));
+	assert.match(await pi.commands.get("review").handler("details", ctx), /pull request head changed/);
 });
 
 test("generic workflow fix rejects push-only permission", async () => {
@@ -4249,7 +4272,8 @@ test("generic workflow fix rejects push-only permission", async () => {
 	ctx.overlays[0].handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((n) => /workflow\/Actions write permission could not be verified/.test(n.message)));
+	assert.ok(ctx.notifications.some((n) => /Review couldn’t complete this step/.test(n.message)));
+	assert.match(await pi.commands.get("review").handler("details", ctx), /workflow\/Actions write permission could not be verified/);
 });
 test("active slay blocks privileged and credential-bearing bash mutations", async () => {
 	const target = queueItem({ id: 7, repo: "projectbluefin/other", headSha: "7".repeat(40), reviewState: "approved", ciStatus: "success", labels: [] });
@@ -4364,17 +4388,17 @@ for (const scenario of [
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, { org: "example", fetchImpl: landingGuardFetch([target]), env, humanReviewObserver: observer });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	await pi.commands.get("review").handler(`policy example/solo ${scenario.mode}`, ctx);
-	assert.match(ctx.notifications.at(-1).message, /Starts no work/);
+	const changed = await pi.commands.get("review").handler(`policy example/solo ${scenario.mode}`, ctx);
+	assert.match(changed, /Starts no work/);
 	assert.equal(pi.messages.length, 0, "policy selection does not dispatch work");
-	await pi.commands.get("review").handler("policy example/solo", ctx);
-	assert.match(ctx.notifications.at(-1).message, new RegExp(`${scenario.mode} \\(explicit\\)`));
+	const read = await pi.commands.get("review").handler("policy example/solo", ctx);
+	assert.match(read, new RegExp(`${scenario.mode} \\(explicit\\)`));
 	const restarted = fakeHost();
 	const restartedCtx = fakeCtx(); restartedCtx.ui.parent = restartedCtx;
 	const restartedReview = createReviewExtension(restarted, { org: "example", fetchImpl: landingGuardFetch([target]), env, humanReviewObserver: observer });
 	await restarted.events.get("session_start")({}, restartedCtx); await restartedReview.whenStarted();
-	await restarted.commands.get("review").handler("policy example/solo", restartedCtx);
-	assert.match(restartedCtx.notifications.at(-1).message, new RegExp(`${scenario.mode} \\(explicit\\)`), "policy survives extension restart");
+	const persistedRead = await restarted.commands.get("review").handler("policy example/solo", restartedCtx);
+	assert.match(persistedRead, new RegExp(`${scenario.mode} \\(explicit\\)`), "policy survives extension restart");
 	ctx.overlays[0].handleInput("s"); await new Promise((resolve) => setImmediate(resolve));
 	await completeReviewTask(pi, ctx, 1, { deliver: scenario.expected !== "undelivered" });
 	const guard = pi.events.get("tool_call");
@@ -4816,7 +4840,8 @@ test("a slay wave blocks when review jobs leave pull requests open", async () =>
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(batch.state, "blocked");
 	assert.match(batch.error, /projectbluefin\/review#42/);
-	assert.ok(ctx.notifications.some((notification) => /remain open without auto-merge/.test(notification.message)));
+	assert.ok(ctx.notifications.some((notification) => /Review couldn’t complete this step/.test(notification.message)));
+	assert.match(await pi.commands.get("review").handler("details", ctx), /remain open without auto-merge/);
 });
 
 
@@ -4890,7 +4915,8 @@ test("restart blocks interrupted slays and never replays confirmed comments", as
 
 	assert.equal(pi.execCalls.length, 0, "confirmed comments are never replayed after restart");
 	assert.equal(pi.messages.length, 0, "interrupted repository waves are never replayed");
-	assert.ok(ctx.notifications.some((notification) => /interrupted comment plan was not replayed/.test(notification.message)));
+	assert.ok(ctx.notifications.some((notification) => /A planned comment was not posted/.test(notification.message)));
+	assert.match(await pi.commands.get("review").handler("details", ctx), /interrupted comment plan was not replayed/);
 	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(recovered.state, "blocked");
 	assert.match(recovered.error, /session ended/);
@@ -5034,7 +5060,8 @@ test("a live admission blocker on retry preserves the claimed dispatch evidence"
 	await fixture.pi.commands.get("review").handler("slay", fixture.ctx);
 	assert.deepEqual(loadWave(fixture.env.LUNA_FACTORY_CLAIMS_ROOT, owner), saved);
 	assert.equal(fixture.pi.messages.length, 1);
-	assert.ok(fixture.ctx.notifications.some((notice) => /pull request already submitted/.test(notice.message)));
+	assert.ok(fixture.ctx.notifications.some((notice) => /Review couldn’t complete this step/.test(notice.message)));
+	assert.match(await fixture.pi.commands.get("review").handler("details", fixture.ctx), /pull request already submitted/);
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
 
@@ -5107,8 +5134,8 @@ test("a started job without terminal evidence remains an unaccounted UNKNOWN wor
 	assert.deepEqual(blocked.waveJobIds, ["job-1"]);
 	assert.deepEqual(blocked.waveTerminalJobStatuses, {});
 	assert.equal(blocked.state, "blocked");
-	await fixture.pi.commands.get("review").handler("cancel", fixture.ctx);
-	assert.ok(fixture.ctx.notifications.some((notice) => /unaccounted worker/.test(notice.message)));
+	const cancelled = await fixture.pi.commands.get("review").handler("cancel", fixture.ctx);
+	assert.match(cancelled, /unaccounted worker/i);
 	assert.equal(new ResourceClaims(fixture.env.LUNA_FACTORY_STATE_ROOT, fixture.env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
 
@@ -5641,9 +5668,9 @@ test("Slay landing recovery explains pending repaired head and settles only afte
 	assert.doesNotMatch(batch.error, /required CI|GitHub.*reject|resume once/i);
 	const claims = () => new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list();
 	effects[350].ciState = "SUCCESS";
-	await pi.commands.get("review").handler("reconcile", ctx);
+	const reconciliation = await pi.commands.get("review").handler("reconcile", ctx);
 	assert.deepEqual(claims().map((claim) => claim.resource).sort(), ["item:projectbluefin/review#350", "repo:projectbluefin/review"]);
-	const warning = ctx.notifications.at(-1).message;
+	const warning = reconciliation;
 	assert.match(warning, /still open|not.*merged/i);
 	assert.match(warning, /does not.*merge/i);
 	assert.match(warning, /GitHub.*then.*\/review reconcile/i);
@@ -5667,12 +5694,12 @@ async function reconcileBlockedPrSlayWave(prepare, options = {}, beforeReconcile
 	ctx.sessionManager = { getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects, options), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	await pi.commands.get("review").handler("reconcile", ctx);
+	const reconciliation = await pi.commands.get("review").handler("reconcile", ctx);
 	return {
 		batch,
 		recovered: pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data ?? batch,
 		claims: new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list(),
-		ctx,
+		ctx, reconciliation,
 	};
 }
 
@@ -5686,7 +5713,7 @@ test("/review reconcile recovers a merged three-PR Slay wave and admits the next
 	ctx.sessionManager = { getSessionId: () => ctx.sessionId, getBranch: () => entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: recoveredPrSlayFetch(items, effects), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	await pi.commands.get("review").handler("reconcile", ctx);
+	const firstReconcile = await pi.commands.get("review").handler("reconcile", ctx);
 	const recovered = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(recovered.state, "complete");
 	assert.equal(recovered.completedItems, 3);
@@ -5697,7 +5724,7 @@ test("/review reconcile recovers a merged three-PR Slay wave and admits the next
 	await new Promise((resolve) => setImmediate(resolve));
 	await pi.commands.get("review").handler("slay", ctx);
 	assert.equal(pi.messages.length, 1, "a new Slay dispatch is not blocked by the recovered wave's old claims");
-	assert.match(ctx.notifications.map((notification) => notification.message).join("\n"), /Reconciled/);
+	assert.match(firstReconcile, /Reconciled/);
 });
 
 test("#79 solo merge acknowledgement loss reconciles the recorded reviewed heads and releases the same claims", async () => {
@@ -5849,13 +5876,13 @@ for (const scenario of ["unreviewed", "stale", "changes-requested"]) test(`chang
 });
 
 test("closed unmerged Slay PRs release claims without counting as completed", async () => {
-	const { recovered, claims, ctx } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
+	const { recovered, claims, reconciliation } = await reconcileBlockedPrSlayWave(({ items, effects }) => {
 		for (const item of items.slice(0, 3)) effects[item.id] = { state: "CLOSED", merged: false, headSha: item.headSha, autoMerge: false, reviewDecision: "REVIEW_REQUIRED", reviewsIncomplete: true, reviews: [] };
 	});
 	assert.equal(recovered.state, "cancelled");
 	assert.equal(recovered.completedItems, 0);
 	assert.equal(claims.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /terminal outcome not satisfied.*closed without merging/i.test(notification.message)));
+	assert.match(reconciliation, /terminal outcome not satisfied.*closed without merging/i);
 });
 
 for (const scenario of ["unreviewed-head-change", "stale-review-head", "unreadable"]) test(`Slay PR reconciliation retains UNKNOWN claims for ${scenario}`, async () => {
@@ -6020,8 +6047,8 @@ test("Review reconcile reports orphan UNKNOWN claims without inventing settlemen
 	const pi = fakeHost(); const ctx = fakeCtx(); ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch({}), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	await pi.commands.get("review").handler("reconcile", ctx);
-	assert.ok(ctx.notifications.some((notice) => /UNKNOWN.*orphan.*recovery record/i.test(notice.message)));
+	const result = await pi.commands.get("review").handler("reconcile", ctx);
+	assert.match(result, /UNKNOWN.*orphan.*recovery record/i);
 	assert.equal(claims.list().length, 1);
 });
 
@@ -6131,14 +6158,14 @@ test("ambiguous submitted PR observations retain UNKNOWN issue-Slay claims", asy
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	await pi.commands.get("review").handler("reconcile", ctx);
+	const reconciliation = await pi.commands.get("review").handler("reconcile", ctx);
 
 	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
 	assert.equal(
 		claims.conflict("repo:projectbluefin/review", "review:other:0"),
 		`repo:projectbluefin/review is owned by review:${batch.id}:0`,
 	);
-	assert.ok(ctx.notifications.some((notification) => /UNKNOWN/.test(notification.message)));
+	assert.match(reconciliation, /UNKNOWN/);
 	assert.equal(pi.messages.length, 0);
 });
 
@@ -6307,10 +6334,8 @@ test("session_start returns while the queue is still loading", { timeout: 5000 }
 	stalled.resolve({ ok: false, status: 504, statusText: "Gateway Timeout", json: async () => ({}) });
 	await review.whenStarted();
 	assert.equal(ctx.overlays.length, 1, "the one workbench opens after the initial queue read");
-	assert.ok(
-		ctx.notifications.some((entry) => entry.level === "error" && /504/.test(entry.message)),
-		"a queue that failed says so instead of rendering as empty",
-	);
+	assert.ok(ctx.notifications.some((entry) => entry.level === "error" && /Couldn’t refresh the review list/.test(entry.message)), "a queue failure is described in user language");
+	assert.match(await pi.commands.get("review").handler("details", ctx), /504/);
 });
 test("refresh cancellation is silent while replacement activity continues", async () => {
 	const pi = fakeHost();
@@ -6559,12 +6584,9 @@ test("a hive-only session with a broken hub still fails visibly and concisely", 
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 
-	assert.ok(
-		ctx.notifications.some((notification) => /hive unavailable; local attention order remains active/.test(notification.message)),
-		`a broken hive must fail visibly at startup, got ${JSON.stringify(ctx.notifications)}`,
-	);
-	const startupHive = ctx.notifications.find((notification) => /local attention order remains active/.test(notification.message));
-	assert.doesNotMatch(startupHive.message, /502/);
+	assert.ok(ctx.notifications.some((notification) => /Hive context isn’t available/.test(notification.message)), `a broken hive is explained, got ${JSON.stringify(ctx.notifications)}`);
+	assert.match(ctx.overlays[0].render(100).join("\n"), /GitHub review queue is still available/);
+	assert.match(await pi.commands.get("review").handler("details", ctx), /502/);
 });
 
 
@@ -7001,13 +7023,11 @@ test("a Review session that offers the Factory handoff has a registered Factory 
 
 	const alone = ctx.overlays[0];
 	assert.ok(!alone.render(200).join("\n").includes("F factory"), "an unregistered Factory is not advertised as a handoff");
-	assert.ok(
-		ctx.notifications.some((n) => /Factory handoff unavailable: .*never registered a controller/.test(n.message)),
-		"startup names the packaging/extension cause instead of blaming LUNA_FACTORY_ENABLED",
-	);
+	assert.ok(ctx.notifications.some((n) => /Factory actions aren’t available in this session/.test(n.message)), "startup names the unavailable action in user language");
+	assert.match(alone.render(100).join("\n"), /You can still browse the GitHub review queue/);
 	alone.handleInput("F");
 	for (let i = 0; i < 20; i++) await Promise.resolve();
-	assert.ok(ctx.notifications.some((n) => /Factory handoff unavailable/.test(n.message)), "a direct invocation is explained, not silent");
+	assert.match(await pi.commands.get("review").handler("details", ctx), /never registered a controller/, "the diagnostic remains available on request");
 	ctx.overlays.at(-1).handleInput("q");
 
 	// Co-load: the real package entry registers the controller in this process.
@@ -7235,7 +7255,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("s");
 		await turn();
 		assert.equal(pi.messages.length, 0, "unadmitted issue slay does not dispatch");
-		assert.ok(ctx.notifications.some((n) => n.message.includes("missing explicit admission label")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
 	}
 
 	// 2. No label
@@ -7245,7 +7265,8 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "no label -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && /Review couldn’t complete this step/.test(n.message)));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
 	}
 
 	// 3. Only 3-human-queue
@@ -7255,7 +7276,8 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "3-human-queue only -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && /Review couldn’t complete this step/.test(n.message)));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
 	}
 
 	// 4. Only hive/* or agent/* provenance
@@ -7265,7 +7287,8 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "hive/agent labels only -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+		assert.ok(ctx.notifications.some((n) => n.level === "error" && /Review couldn’t complete this step/.test(n.message)));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
 	}
 
 	// 5. hold label present (even if 3-clanker-queue is present)
@@ -7275,7 +7298,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "hold label -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("hold label")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /hold label/);
 	}
 
 	// 6. blocked label present (even if 3-clanker-queue is present)
@@ -7285,7 +7308,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "blocked label -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("blocked label")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /blocked label/);
 	}
 
 	// 7. closed issue
@@ -7295,7 +7318,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "closed issue -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue is closed")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /issue is closed/);
 	}
 
 	// 8. Admission removed between display and dispatch
@@ -7306,7 +7329,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "label removed between display and dispatch -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
 	}
 
 	// 9. Request failure (network error / HTTP error / GraphQL partial errors)
@@ -7316,7 +7339,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "network error -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("Admission check failed")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /Admission check failed/);
 	}
 	{
 		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { graphqlErrors: [{ message: "rate limited" }] });
@@ -7324,7 +7347,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "graphql error -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("rate limited")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /rate limited/);
 	}
 
 	// 10. Incomplete label evidence (labelsTruncated)
@@ -7334,7 +7357,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "truncated labels -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("incomplete label evidence")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /incomplete label evidence/);
 	}
 	// Missing freshness evidence fails closed.
 	{
@@ -7346,7 +7369,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "missing open-state evidence -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue is closed")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /issue is closed/);
 	}
 	{
 		const { pi, dashboard, ctx, turn } = await setup(
@@ -7357,7 +7380,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "missing label pagination evidence -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("incomplete label evidence")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /incomplete label evidence/);
 	}
 
 	// 11. Wrong returned repository or issue identity
@@ -7367,7 +7390,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "wrong repo returned -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("repository mismatch")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /repository mismatch/);
 	}
 	{
 		const { pi, dashboard, ctx, turn } = await setup({ number: 485, labels: ["3-clanker-queue"] }, { wrongNumber: true });
@@ -7375,7 +7398,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "wrong issue number returned -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue number mismatch")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /issue number mismatch/);
 	}
 
 	// 12. Missing node
@@ -7385,7 +7408,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "missing node -> no dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("not found")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /not found/);
 	}
 
 	// 13. Mixed batch containing one ineligible Review issue: zero dispatches (do not silently shrink)
@@ -7401,7 +7424,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "batch with one ineligible item yields zero dispatches");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue has hold label")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /issue has hold label/);
 	}
 
 	// 14. Mixed batch containing Review issue and other repo issue: if Review issue is ineligible, zero dispatches
@@ -7416,7 +7439,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "mixed-repo batch with ineligible review issue yields zero dispatches");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
 	}
 
 	// 15. Unmanaged repository issue: no admission read needed, still dispatches as before
@@ -7453,7 +7476,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "fix on unadmitted Review issue dispatches zero messages");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
 	}
 	// fix on a projectbluefin/review PR is unchanged (no admission read, dispatches)
 	{
@@ -7483,7 +7506,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "review queue label does not admit a documentation issue");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("missing explicit admission label")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /missing explicit admission label/);
 	}
 	{
 		// A review denied label (blocked) is not in the documentation policy, so it
@@ -7493,7 +7516,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "documentation hold label blocks its own dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue has hold label")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /issue has hold label/);
 	}
 	{
 		// Negative fixture in the review repository: hold blocks there too.
@@ -7502,7 +7525,7 @@ test("issue admission gate handles positive admission, negative cases, and invar
 		dashboard.handleInput("f");
 		await turn();
 		assert.equal(pi.messages.length, 0, "review hold label blocks its own dispatch");
-		assert.ok(ctx.notifications.some((n) => n.level === "error" && n.message.includes("issue has hold label")));
+		assert.match(await pi.commands.get("review").handler("details", ctx), /issue has hold label/);
 	}
 
 	// 17. Selection changes during the read: no retargeting
@@ -8339,7 +8362,7 @@ test("Review Fix ownership rejection preserves the saved run without creating an
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(other.messages.length, 0);
 	assert.equal(other.entries.filter((entry) => entry.customType === BATCH_ENTRY).length, 0);
-	assert.ok(next.notifications.some((n) => n.message.includes(`review:${original.id}:0`)));
+	assert.match(await other.commands.get("review").handler("details", next), new RegExp(`review:${original.id}:0`));
 });
 
 for (const choice of ["Stay", undefined]) test(`Review exit ${choice ?? "dismiss"} preserves wave and claims`, async () => {
@@ -8380,8 +8403,8 @@ test("Review signal exit defaults pause; foreign, premature and duplicate settle
 	const count = pi.entries.length;
 	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
 	assert.equal(pi.entries.length, count);
-	await pi.commands.get("review").handler("reconcile", ctx);
-	assert.match(ctx.notifications.at(-1).message, /missing positive owning-session/);
+	const result = await pi.commands.get("review").handler("reconcile", ctx);
+	assert.match(result, /missing positive owning-session/);
 });
 
 test("Review stopped worker receipt retains changed GitHub effect claims", async () => {
@@ -8389,8 +8412,8 @@ test("Review stopped worker receipt retains changed GitHub effect claims", async
 	pi.events.get("session_shutdown")({}, ctx);
 	pi.events.get("session_shutdown_settled")({ sessionId: ctx.sessionId, settled: true, pendingJobIds: [] }, ctx);
 	states["projectbluefin/review#77"].submittedPrs.push("https://github.com/projectbluefin/review/pull/99", "https://github.com/projectbluefin/review/pull/100");
-	await pi.commands.get("review").handler("reconcile", ctx);
-	assert.match(ctx.notifications.at(-1).message, /execution stopped; GitHub effect proof/);
+	const result = await pi.commands.get("review").handler("reconcile", ctx);
+	assert.match(result, /execution stopped; GitHub effect proof/);
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 	await pi.commands.get("review").handler("resume", ctx);
 	assert.equal(pi.messages.length, 1);
@@ -8492,7 +8515,8 @@ test("Review missing native lifecycle capability blocks mutation before claims",
 	for (let i = 0; i < 20; i++) await Promise.resolve();
 	assert.equal(pi.messages.length, 0);
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
-	assert.ok(ctx.notifications.some((notice) => /upgrade to the packaged Review OMP/.test(notice.message)));
+	assert.ok(ctx.notifications.some((notice) => /Review couldn’t complete this step/.test(notice.message)));
+	assert.match(await pi.commands.get("review").handler("details", ctx), /upgrade to the packaged Review OMP/);
 });
 
 test("Review restart offers saved paused work and preserves stop proof across unrelated chat", async () => {
@@ -8528,9 +8552,9 @@ test("Review stopped issue with one linked PR releases claims and resume never d
 	ctx.sessionId = "session-2";
 	ctx.sessionManager.getBranch = () => pi.entries.map((entry) => ({ type: "custom", ...entry }));
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	await pi.commands.get("review").handler("resume", ctx);
+	const resumed = await pi.commands.get("review").handler("resume", ctx);
 	assert.equal(pi.messages.length, 1);
-	assert.match(ctx.notifications.at(-1).message, /already has submitted PRs/);
+	assert.match(resumed, /already has submitted PRs/);
 });
 
 test("Review late same-owner tool contradicts settlement and duplicate receipt cannot revive it", async () => {

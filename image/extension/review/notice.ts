@@ -1,19 +1,29 @@
 /** Small, passive notice state shared by cache-busted Review module copies. */
 
+import { visibleWidth } from "./width.ts";
+
 export type NoticeLevel = "info" | "warning" | "error";
 
 export interface ReviewNotice {
 	readonly id: string;
 	readonly sessionId: string;
 	readonly level: NoticeLevel;
-	readonly message: string;
-	readonly summary: string;
+	readonly title: string;
+	readonly outcome: string;
 	readonly action: string;
+	readonly details: string;
 }
 
 export interface NoticePainter {
-	fg(role: NoticeLevel | "dim", text: string): string;
+	fg(role: NoticeLevel | "dim" | "accent" | "text", text: string): string;
 	bold(text: string): string;
+}
+
+export interface NoticeContent {
+	readonly title: string;
+	readonly outcome: string;
+	readonly action: string;
+	readonly details: string;
 }
 
 export interface NoticeHost {
@@ -27,11 +37,12 @@ interface NativeToastDescribeContext {
 interface SharedNoticeState {
 	sessionId?: string;
 	current?: ReviewNotice;
+	latestDetails?: ReviewNotice;
 	readonly delivered: Set<string>;
 }
 
-const STATE_KEY = Symbol.for("com.review.native-notice.v1");
-const MAX_MESSAGE_LENGTH = 240;
+const STATE_KEY = Symbol.for("com.review.native-notice.v2");
+const MAX_TEXT_LENGTH = 1_200;
 const MAX_DELIVERED_IDS = 256;
 
 function sharedState(): SharedNoticeState {
@@ -39,23 +50,44 @@ function sharedState(): SharedNoticeState {
 	return root[STATE_KEY] ??= { delivered: new Set<string>() };
 }
 
-function safeMessage(value: string): string {
-	return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_MESSAGE_LENGTH);
+function safeText(value: string, max = MAX_TEXT_LENGTH): string {
+	return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
-/** ANSI-capable themed one-line banner suitable for a native status/widget area. */
-export function renderNoticeBanner(notice: ReviewNotice | undefined, painter: NoticePainter): string[] {
+function safeDiagnostic(value: string): string {
+	return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "")
+		.split(/\r?\n/).map((line) => line.replace(/[\t ]+/g, " ").trimEnd()).join("\n").trim().slice(0, MAX_TEXT_LENGTH);
+}
+
+function wrap(text: string, width: number, indent = ""): string[] {
+	const available = Math.max(8, width - visibleWidth(indent));
+	const words = text.split(/\s+/).filter(Boolean);
+	const lines: string[] = [];
+	let line = "";
+	for (const word of words) {
+		if (!line) line = word;
+		else if (visibleWidth(`${line} ${word}`) <= available) line += ` ${word}`;
+		else { lines.push(`${indent}${line}`); line = word; }
+	}
+	if (line) lines.push(`${indent}${line}`);
+	return lines.length ? lines : [indent];
+}
+
+/** Compact themed card: severity title, truthful outcome, then the next action. */
+export function renderNoticeBanner(notice: ReviewNotice | undefined, painter: NoticePainter, width = 100): string[] {
 	if (!notice) return [];
-	const label = painter.bold(painter.fg(notice.level, "Review"));
+	const title = safeText(notice.title, 100);
+	const outcome = safeText(notice.outcome, 240);
+	const action = safeText(notice.action, 240);
 	return [
-		`${label} ${painter.fg("dim", "·")} ${painter.fg(notice.level, safeMessage(notice.summary))}`,
-		painter.bold(painter.fg(notice.level, `Next: ${safeMessage(notice.action)}`)),
+		painter.bold(painter.fg(notice.level, title)),
+		...wrap(outcome, width, "  ").map((line) => painter.fg("text", line)),
+		...wrap(`Next: ${action}`, width, "  ").map((line) => painter.bold(painter.fg("accent", line))),
 	];
 }
 
-/** Public TSP component contract; ANSI hosts render the persistent banner instead. */
+/** Public TSP component contract; ANSI hosts render the persistent card instead. */
 export function createNativeToastWidget(getCurrent: () => ReviewNotice | undefined) {
-	const kind: "toast" = "toast";
 	let currentId: string | undefined;
 	let toast: { k: "toast"; p: { text: string; sub: string; ttl: number } } | undefined;
 	return {
@@ -65,54 +97,57 @@ export function createNativeToastWidget(getCurrent: () => ReviewNotice | undefin
 			if (!notice || !context.supports("toast")) return null;
 			if (notice.id !== currentId) {
 				currentId = notice.id;
-				toast = { k: kind, p: { text: notice.summary, sub: `Next: ${notice.action}`, ttl: 2400 } };
+				toast = { k: "toast", p: { text: notice.title, sub: `Next: ${notice.action}`, ttl: 2400 } };
 			}
 			return toast ?? null;
 		},
 	};
 }
 
-/**
- * Lifecycle events are explicitly supplied by the host integration. This helper
- * never subscribes, schedules work, changes focus, or performs retries.
- */
+/** Lifecycle events are explicit. This helper never schedules work or changes focus. */
 export function createReviewNoticeComponent(host?: NoticeHost) {
 	const state = sharedState();
 	return {
 		get current(): ReviewNotice | undefined { return state.current; },
+		get latestDetails(): ReviewNotice | undefined { return state.latestDetails; },
 		sessionChanged(sessionId: string | undefined): boolean {
 			if (state.sessionId === sessionId) return false;
 			state.sessionId = sessionId;
 			state.current = undefined;
+			state.latestDetails = undefined;
 			state.delivered.clear();
 			return true;
 		},
-		publish(input: { id: string; sessionId: string; level: NoticeLevel; message: string; summary?: string; action?: string }): boolean {
+		publish(input: { id: string; sessionId: string; level: NoticeLevel; content: NoticeContent }): boolean {
 			if (!input.id || !input.sessionId || input.sessionId !== state.sessionId) return false;
 			const key = `${input.sessionId}\u0000${input.id}`;
 			if (state.delivered.has(key)) return false;
-			const message = safeMessage(input.message);
-			if (!message) return false;
+			const content = {
+				title: safeText(input.content.title, 100),
+				outcome: safeText(input.content.outcome, 240),
+				action: safeText(input.content.action, 240),
+				details: safeDiagnostic(input.content.details),
+			};
+			if (!content.title || !content.outcome || !content.action) return false;
 			state.delivered.add(key);
 			while (state.delivered.size > MAX_DELIVERED_IDS) {
 				const oldest = state.delivered.values().next().value;
 				if (oldest === undefined) break;
 				state.delivered.delete(oldest);
 			}
-			const next = {
-				id: input.id,
-				sessionId: input.sessionId,
-				level: input.level,
-				message,
-				summary: safeMessage(input.summary ?? message.slice(0, 100)),
-				action: safeMessage(input.action ?? "/review status"),
-			};
+			const next: ReviewNotice = { id: input.id, sessionId: input.sessionId, level: input.level, ...content };
 			if (!state.current || input.level === "error" || state.current.level === "info" || (input.level === "warning" && state.current.level !== "error")) state.current = next;
-			host?.notify(message, input.level);
+			if (state.current?.id === next.id) state.latestDetails = next;
+			host?.notify(`${content.title}. ${content.outcome} Next: ${content.action}`, input.level);
 			return true;
+		},
+		acknowledge(): void {
+			if (state.current) state.delivered.delete(`${state.current.sessionId}\u0000${state.current.id}`);
+			state.current = undefined;
 		},
 		clear(): void {
 			state.current = undefined;
+			state.latestDetails = undefined;
 			state.delivered.clear();
 		},
 	};
