@@ -2146,9 +2146,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					resolution: typeof saved.resolution === "string" ? saved.resolution : undefined,
 				}
 				: undefined;
-			return notice
-				? `${notice.resolution ? `Resolved: ${notice.resolution}\n\n` : ""}${notice.title}\n${notice.outcome}\nNext steps:\n${notice.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\nDiagnostic (read only):\n${notice.details}`
-				: "No saved Review diagnostic is available in this session";
+			if (!notice) return "No saved Review diagnostic is available in this session";
+			if (notice.resolution) {
+				return `Resolved: ${notice.resolution}\n\nSaved diagnostic from the earlier attempt (read only):\n${notice.details}`;
+			}
+			return `${notice.title}\n${notice.outcome}\nNext steps:\n${notice.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\nDiagnostic (read only):\n${notice.details}`;
 		}
 		if (args === "policy" || args.startsWith("policy ")) {
 			const parts = args.split(/\s+/);

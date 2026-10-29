@@ -3102,8 +3102,16 @@ test("Review blocks PR mutation admission when the effective OMP task schema omi
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(pi.messages.length, 1, `the same selected PR is admitted after effective structured output becomes available: ${savedReviewNoticeText(pi)}`);
 	assert.doesNotMatch(ctx.overlays[0].render(80).join("\n"), /Review couldn’t start this item/, "the obsolete setup card clears after successful admission");
-	assert.match(await runReviewCommand(pi, ctx, "details"), /Resolved: Review admitted the same pull request/);
-	assert.match(await runReviewCommand(pi, ctx, "details"), /outputSchema and schemaMode/, "resolving the card keeps its diagnostic history");
+	for (const width of [80, 100]) {
+		const resolvedDetails = await runReviewCommand(pi, ctx, "details", width);
+		assert.match(resolvedDetails, /Resolved: Review admitted the same pull request/);
+		assert.match(resolvedDetails, /Saved diagnostic from the earlier attempt \(read only\):/);
+		assert.match(resolvedDetails, /outputSchema and schemaMode/, "resolving the card keeps its diagnostic history");
+		assert.doesNotMatch(resolvedDetails, /Next steps:|No new work was started|press s to retry/, "resolved Details must not present old recovery instructions as current work");
+	}
+	const savedResolution = pi.entries.filter((entry) => entry.customType === NOTICE_ENTRY && entry.data?.resolution).at(-1).data;
+	assert.match(savedResolution.outcome, /No new work was started/);
+	assert.ok(savedResolution.steps.length >= 4, "the complete historical notice remains in the session journal");
 });
 
 test("structured reviewer capability reads OMP ArkType batch schemas through its wire conversion", () => {
