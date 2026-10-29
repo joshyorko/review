@@ -3174,6 +3174,34 @@ test("dashboard reports unexpected custom-UI rejection and Alt+B can reopen it",
 	ctx.overlays[0].handleInput("q");
 });
 
+test("/review details recovers older saved notices without numbered steps", async () => {
+	const unregisterFactory = registerFactoryController(async () => "stub");
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	ctx.sessionManager = {
+		getSessionId: () => ctx.sessionId,
+		getBranch: () => [{
+			type: "custom",
+			customType: NOTICE_ENTRY,
+			data: {
+				id: "older-notice", sessionId: ctx.sessionId, level: "error",
+				title: "Review couldn’t finish this step", outcome: "The result is unclear.",
+				action: "Run /review status before retrying.", details: "saved diagnostic",
+			},
+		}],
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
+	try {
+		await pi.events.get("session_start")({}, ctx);
+		await review.whenStarted();
+		const details = await pi.commands.get("review").handler("details", ctx);
+		assert.match(details, /Next steps:\n1\. Run \/review status before retrying\./);
+		assert.match(details, /saved diagnostic/);
+	} finally {
+		unregisterFactory();
+	}
+});
+
 test("dashboard treats an AbortError as cancellation and remains reopenable", async () => {
 	const pi = fakeHost();
 	const ctx = fakeCtx();

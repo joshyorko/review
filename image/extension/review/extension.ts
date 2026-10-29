@@ -827,7 +827,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const sessionId = noticeSessionId(ctx);
 		const accepted = nativeNotices.publish({ id, sessionId, level, content: { ...content, details } });
 		if (!accepted) return;
-		pi.appendEntry(NOTICE_ENTRY, { id, sessionId, level, ...content, details });
+		pi.appendEntry(NOTICE_ENTRY, { id, sessionId, level, ...content, steps: content.steps?.length ? content.steps : [content.action], details });
 		ctx.ui.notify(content.title, level);
 		if (nativeNotices.current?.id === id) updateNativeNoticeWidget(ctx);
 		tui?.requestRender();
@@ -2116,7 +2116,13 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			const notice = saved && "sessionId" in saved && saved.sessionId === sessionId
 				&& typeof saved.title === "string" && typeof saved.outcome === "string"
 				&& typeof saved.action === "string" && typeof saved.details === "string"
-				? saved as unknown as { title: string; outcome: string; action: string; details: string }
+				? {
+					title: saved.title,
+					outcome: saved.outcome,
+					action: saved.action,
+					steps: Array.isArray(saved.steps) && saved.steps.every((step) => typeof step === "string") ? saved.steps : [saved.action],
+					details: saved.details,
+				}
 				: undefined;
 			return notice
 				? `${notice.title}\n${notice.outcome}\nNext steps:\n${notice.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\nDiagnostic (read only):\n${notice.details}`
@@ -2562,6 +2568,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				action: "Enable Structured Task Results and retry this PR.",
 				steps: [
 					"If the dashboard is open, press q to close it.",
+					"If the editor has an unfinished draft, save a copy, then leave the message box empty before /settings.",
 					"In the editor, run /settings. Under Tasks → Subagents, turn on Structured Task Results; it applies now.",
 					"Press Esc, then Alt+B to reopen Review.",
 					"Select this PR and press s to retry it.",

@@ -71,7 +71,19 @@ function safeSteps(value: readonly string[] | undefined, fallback: string): stri
 
 function wrap(text: string, width: number, indent = ""): string[] {
 	const available = Math.max(8, width - visibleWidth(indent));
-	const words = text.split(/\s+/).filter(Boolean);
+	const words = text.split(/\s+/).filter(Boolean).flatMap((word) => {
+		if (visibleWidth(word) <= available) return [word];
+		const chunks: string[] = [];
+		let chunk = "";
+		for (const character of word) {
+			if (chunk && visibleWidth(`${chunk}${character}`) > available) {
+				chunks.push(chunk);
+				chunk = character;
+			} else chunk += character;
+		}
+		if (chunk) chunks.push(chunk);
+		return chunks;
+	});
 	const lines: string[] = [];
 	let line = "";
 	for (const word of words) {
@@ -86,12 +98,12 @@ function wrap(text: string, width: number, indent = ""): string[] {
 /** Compact themed card: severity title, truthful outcome, then the next action. */
 export function renderNoticeBanner(notice: ReviewNotice | undefined, painter: NoticePainter, width = 100): string[] {
 	if (!notice) return [];
-	const columns = Math.min(80, Math.max(32, width));
+	const columns = Math.min(80, Math.max(14, width));
 	const left = painter.fg("border", "│");
 	const title = safeText(notice.title, 100);
 	const outcome = safeText(notice.outcome, 240);
 	const lines = [
-		`${left} ${painter.bold(painter.fg(notice.level, title))}`,
+		...wrap(title, columns - 2, "  ").map((line) => `${left} ${painter.bold(painter.fg(notice.level, line.trimStart()))}`),
 		...wrap(outcome, columns - 2, "  ").map((line) => `${left} ${painter.fg("text", line.trimStart())}`),
 		`${left} ${painter.fg("dim", "Next steps")}`,
 	];
@@ -103,7 +115,9 @@ export function renderNoticeBanner(notice: ReviewNotice | undefined, painter: No
 			lines.push(`${left} ${number} ${paintControls(content, painter)}`);
 		}
 	}
-	lines.push(`${left} ${painter.fg("dim", "Details: ")}${painter.fg("accent", "/review details")}`);
+	for (const line of wrap("Details: /review details", columns - 2, "  ")) {
+		lines.push(`${left} ${paintControls(line.trimStart(), painter)}`);
+	}
 	return lines;
 }
 
