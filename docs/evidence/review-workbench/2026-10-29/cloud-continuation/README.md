@@ -82,8 +82,11 @@ archive-only run. No old isolated worker result was promoted to integrated proof
 ## Product Design gates
 
 **Overall Product Design sign-off remains BLOCKED/PENDING. There are no fresh
-accepted screenshots in this continuation.** Historical previews were removed
-from the PR body. No protocol or source test substitutes for visual inspection.
+accepted screenshots in this continuation.** Removing the historical previews
+from the PR body remains pending. Automatic approval review rejected the prepared
+description update because it requires explicit approval of that description.
+No PR-body update was applied. No protocol or source test substitutes for visual
+inspection.
 
 | Step | Required evidence | Current health |
 | --- | --- | --- |
