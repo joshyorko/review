@@ -1,0 +1,174 @@
+{
+  "source_commit": "516b289e08954bbb346f68a4b5d02beaa46e88f",
+  "ui_manifest_sha256": "3d5cf1fab729763176bfca09e2b1bcff6f896f4",
+  "screenshots": [
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-issue/screenshots/01-issue-dashboard-baseline.png",
+      "sha256": "8085bce0b5173787da866eb1fba0ade8e739d1ff30485708863bccd79f8ef773",
+      "geometry": {
+        "file": "01-issue-dashboard-baseline.png",
+        "timestamp": "2026-10-29T16:46:48Z",
+        "target": [
+          80,
+          24
+        ],
+        "vte": [
+          80,
+          24
+        ],
+        "pty_ioctl": [
+          80,
+          24
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          802,
+          458
+        ]
+      }
+    },
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-issue/screenshots/02-issue-editor-draft-before.png",
+      "sha256": "6bda91788280c551c041e2a7193a7e0e7cff7ebf886f6252174eb5730673d96b",
+      "geometry": {
+        "file": "02-issue-editor-draft-before.png",
+        "timestamp": "2026-10-29T16:46:52Z",
+        "target": [
+          80,
+          24
+        ],
+        "vte": [
+          80,
+          24
+        ],
+        "pty_ioctl": [
+          80,
+          24
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          802,
+          458
+        ]
+      }
+    },
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-issue/screenshots/03-dashboard-issue.png",
+      "sha256": "0685cd0f6b752480ad01800519f758ca5b25fc8fa3e3cd2631a038359f3c9a77",
+      "geometry": {
+        "file": "03-dashboard-issue.png",
+        "timestamp": "2026-10-29T16:46:55Z",
+        "target": [
+          80,
+          24
+        ],
+        "vte": [
+          80,
+          24
+        ],
+        "pty_ioctl": [
+          80,
+          24
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          802,
+          458
+        ]
+      }
+    },
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-issue/screenshots/04-issue-reader-before-browser.png",
+      "sha256": "96b817fafbe1d4210ce5be42be35a5d309720e4d59a6ff90073eec9014b56258",
+      "geometry": {
+        "file": "04-issue-reader-before-browser.png",
+        "timestamp": "2026-10-29T16:46:58Z",
+        "target": [
+          80,
+          24
+        ],
+        "vte": [
+          80,
+          24
+        ],
+        "pty_ioctl": [
+          80,
+          24
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          802,
+          458
+        ]
+      }
+    },
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-issue/screenshots/05-issue-browser-warning-reader.png",
+      "sha256": "7e8dde176c3d022b30e1ecefaffe46e1082fefe6e1872ed7b35028cba8be1c6f",
+      "geometry": {
+        "file": "05-issue-browser-warning-reader.png",
+        "timestamp": "2026-10-29T16:47:01Z",
+        "target": [
+          80,
+          24
+        ],
+        "vte": [
+          80,
+          24
+        ],
+        "pty_ioctl": [
+          80,
+          24
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          802,
+          458
+        ]
+      }
+    },
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-issue/screenshots/06-issue-editor-draft-after.png",
+      "sha256": "cfb5beb4c02854ab6ba81dc5097d97f244661ea3b47dca06868d4e0aa42c3a13",
+      "geometry": {
+        "file": "06-issue-editor-draft-after.png",
+        "timestamp": "2026-10-29T16:47:04Z",
+        "target": [
+          80,
+          24
+        ],
+        "vte": [
+          80,
+          24
+        ],
+        "pty_ioctl": [
+          80,
+          24
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          802,
+          458
+        ]
+      }
+    }
+  ]
+}

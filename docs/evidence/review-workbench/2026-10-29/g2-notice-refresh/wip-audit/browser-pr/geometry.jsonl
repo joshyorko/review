@@ -1,0 +1,6 @@
+{"file": "01-dashboard-baseline.png", "timestamp": "2026-10-29T16:45:54Z", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610]}
+{"file": "02-editor-draft-before.png", "timestamp": "2026-10-29T16:45:58Z", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610]}
+{"file": "03-dashboard-pr.png", "timestamp": "2026-10-29T16:46:01Z", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610]}
+{"file": "04-reader-before-browser.png", "timestamp": "2026-10-29T16:46:04Z", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610]}
+{"file": "05-browser-warning-reader.png", "timestamp": "2026-10-29T16:46:07Z", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610]}
+{"file": "06-editor-draft-after.png", "timestamp": "2026-10-29T16:46:10Z", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610]}
