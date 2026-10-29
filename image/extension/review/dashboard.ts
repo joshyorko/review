@@ -350,7 +350,7 @@ export class ReviewDashboard {
 				} else {
 					this.handleTracePaneClick(col - (leftWidth + 3), bodyRow, rightWidth, bodyHeight);
 				}
-			} else if (noticeRows > 0 && bodyHeight < 7) {
+			} else if (highPriorityNotice && bodyHeight < 7) {
 				this.handleQueuePaneClick(col, bodyRow, width, bodyHeight);
 			} else {
 				const queueHeight = Math.max(3, Math.floor((bodyHeight - 2) / 2));

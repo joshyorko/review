@@ -828,7 +828,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const accepted = nativeNotices.publish({ id, sessionId, level, content: { ...content, details } });
 		if (!accepted) return;
 		pi.appendEntry(NOTICE_ENTRY, { id, sessionId, level, ...content, steps: content.steps?.length ? content.steps : [content.action], details });
-		ctx.ui.notify(content.title, level);
+		if (!ctx.hasUI) {
+			const steps = content.steps?.length ? content.steps : [content.action];
+			ctx.ui.notify(`${content.title}. ${content.outcome}\nNext steps:\n${steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\nDiagnostic:\n${details}`, level);
+			return;
+		}
 		if (nativeNotices.current?.id === id) updateNativeNoticeWidget(ctx);
 		tui?.requestRender();
 	};

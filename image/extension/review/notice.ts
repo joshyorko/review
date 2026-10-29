@@ -40,16 +40,16 @@ interface SharedNoticeState {
 	sessionId?: string;
 	current?: ReviewNotice;
 	latestDetails?: ReviewNotice;
-	readonly delivered: Set<string>;
+	readonly delivered: Map<string, string>;
 }
 
-const STATE_KEY = Symbol.for("com.review.native-notice.v2");
+const STATE_KEY = Symbol.for("com.review.native-notice.v3");
 const MAX_TEXT_LENGTH = 1_200;
 const MAX_DELIVERED_IDS = 256;
 
 function sharedState(): SharedNoticeState {
 	const root = globalThis as typeof globalThis & { [STATE_KEY]?: SharedNoticeState };
-	return root[STATE_KEY] ??= { delivered: new Set<string>() };
+	return root[STATE_KEY] ??= { delivered: new Map<string, string>() };
 }
 
 function safeText(value: string, max = MAX_TEXT_LENGTH): string {
@@ -168,7 +168,6 @@ export function createReviewNoticeComponent(host?: NoticeHost) {
 		publish(input: { id: string; sessionId: string; level: NoticeLevel; content: NoticeContent }): boolean {
 			if (!input.id || !input.sessionId || input.sessionId !== state.sessionId) return false;
 			const key = `${input.sessionId}\u0000${input.id}`;
-			if (state.delivered.has(key)) return false;
 			const content = {
 				title: safeText(input.content.title, 100),
 				outcome: safeText(input.content.outcome, 240),
@@ -177,15 +176,18 @@ export function createReviewNoticeComponent(host?: NoticeHost) {
 				details: safeDiagnostic(input.content.details),
 			};
 			if (!content.title || !content.outcome || !content.action) return false;
-			state.delivered.add(key);
+			const fingerprint = JSON.stringify([input.level, content]);
+			if (state.delivered.get(key) === fingerprint) return false;
+			state.delivered.delete(key);
+			state.delivered.set(key, fingerprint);
 			while (state.delivered.size > MAX_DELIVERED_IDS) {
-				const oldest = state.delivered.values().next().value;
+			const oldest = state.delivered.keys().next().value;
 				if (oldest === undefined) break;
 				state.delivered.delete(oldest);
 			}
 			const next: ReviewNotice = { id: input.id, sessionId: input.sessionId, level: input.level, ...content };
 			if (!state.current || input.level === "error" || state.current.level === "info" || (input.level === "warning" && state.current.level !== "error")) state.current = next;
-			if (state.current?.id === next.id) state.latestDetails = next;
+			if (state.current?.id === next.id && state.current.level === next.level) state.latestDetails = next;
 			host?.notify(`${content.title}. ${content.outcome} Next: ${content.action}`, input.level);
 			return true;
 		},

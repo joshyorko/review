@@ -54,8 +54,26 @@ test("dedupe retains only a fixed recent window of lifecycle IDs", () => {
 	for (let index = 0; index < 257; index++) {
 		assert.equal(notice.publish({ id: `event-${index}`, sessionId: "session-dedupe-bound", level: "info", content: { ...content, title: `event ${index}` } }), true);
 	}
-	assert.equal(notice.publish({ id: "event-256", sessionId: "session-dedupe-bound", level: "info", content }), false);
+	assert.equal(notice.publish({ id: "event-256", sessionId: "session-dedupe-bound", level: "info", content: { ...content, title: "event 256" } }), false);
 	assert.equal(notice.publish({ id: "event-0", sessionId: "session-dedupe-bound", level: "info", content }), true);
+});
+
+test("same event ID refreshes its saved diagnostic when the cause changes", () => {
+	const notice = createReviewNoticeComponent();
+	notice.sessionChanged("session-changing-diagnostic");
+	assert.equal(notice.publish({
+		id: "review-queue-refresh", sessionId: "session-changing-diagnostic", level: "error",
+		content: { ...content, details: "GitHub timed out" },
+	}), true);
+	assert.equal(notice.publish({
+		id: "review-queue-refresh", sessionId: "session-changing-diagnostic", level: "error",
+		content: { ...content, details: "GitHub authentication expired" },
+	}), true);
+	assert.equal(notice.latestDetails?.details, "GitHub authentication expired");
+	assert.equal(notice.publish({
+		id: "review-queue-refresh", sessionId: "session-changing-diagnostic", level: "error",
+		content: { ...content, details: "GitHub authentication expired" },
+	}), false, "unchanged repeated diagnostics remain deduplicated");
 });
 
 test("banner presents a styled, numbered recovery card without diagnostics and caps at 80 columns", () => {

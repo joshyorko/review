@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { actionPrompt, createReviewExtension } from "../image/extension/review/extension.ts";
+import { actionPrompt, createReviewExtension, NOTICE_ENTRY } from "../image/extension/review/extension.ts";
 import { ReviewDashboard } from "../image/extension/review/dashboard.ts";
 import { PLAIN_PAINTER } from "../image/extension/review/glyphs.ts";
 import { fetchQueue } from "../image/extension/review/github.ts";
@@ -163,7 +163,7 @@ function fakeHost() {
 }
 
 async function assertErrorDetails(pi: ReturnType<typeof fakeHost>, ctx: ReturnType<typeof fakeCtx>, expected: RegExp): Promise<void> {
-	assert.ok(ctx.notifications.some((entry) => entry.level === "error" && /Review couldn’t complete this step/.test(entry.message)), "the operator sees a concise human notice");
+	assert.ok(pi.entries.some((entry) => entry.customType === NOTICE_ENTRY && /Review couldn’t complete this step/.test(entry.data.title)), "the operator sees the persistent human notice");
 	assert.match(await pi.commands.get("review").handler("details", ctx), expected);
 }
 
