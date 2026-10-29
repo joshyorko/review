@@ -837,6 +837,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (nativeNotices.current?.id === id) updateNativeNoticeWidget(ctx);
 		tui?.requestRender();
 	};
+	const resolveStructuredSetupNotice = (ctx: CtxLike, admittedItems: readonly QueueItem[]): void => {
+		const current = nativeNotices.current;
+		if (!current?.id.startsWith("review-structured-task:")) return;
+		const admitted = admittedItems.find((item) => item.type === "pr" && current.id === `review-structured-task:${item.repo}#${item.id}`);
+		if (!admitted) return;
+		const resolution = nativeNotices.resolveCurrent(current.id, `Review admitted the same pull request (${admitted.repo}#${admitted.id}) after Structured Task Results was enabled.`);
+		if (!resolution) return;
+		pi.appendEntry(NOTICE_ENTRY, resolution);
+		clearNativeNoticeWidget(ctx);
+		tui?.requestRender();
+	};
 	let reviewerTrustFailure: ReturnType<typeof reviewerDefinitionTrusted> | undefined;
 	const reviewerTrust = () => {
 		if (reviewerTrustFailure) return reviewerTrustFailure;
@@ -2578,6 +2589,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		notifyUser(ctx, `Dispatching ${wave.repo} wave ${activeBatch.currentWave + 1}/${activeBatch.waves.length}`, "info");
 		ownedWavePrompts.add(promptDigest(prompt));
 		pi.sendUserMessage(prompt, { ...(deliverAs ? { deliverAs } : {}), waveId: `${activeBatch.id}:${activeBatch.currentWave}` });
+		resolveStructuredSetupNotice(ctx, wave.items);
 		rememberWaveEvidence(ctx);
 	};
 
@@ -2699,18 +2711,6 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		persistBatch(ctx, { ...batch, waves: runnableWaves, skippedItems });
 		await dispatchCurrentWave(ctx, undefined, true);
 		if (activeBatch?.state === "running" && activeBatch.waveIdentity) {
-			const resolvedSetup = items
-				.filter((item) => item.type === "pr")
-				.map((item) => `review-structured-task:${item.repo}#${item.id}`)
-				.find((id) => nativeNotices.current?.id === id);
-			if (resolvedSetup) {
-				const resolution = nativeNotices.resolveCurrent(resolvedSetup, "Review admitted the same pull request after Structured Task Results was enabled.");
-				if (resolution) {
-					pi.appendEntry(NOTICE_ENTRY, resolution);
-					clearNativeNoticeWidget(ctx);
-					tui?.requestRender();
-				}
-			}
 			if (skippedCi.length > 0 || (selection.excludedItems?.length ?? 0) > 0) notifySelectionOmissions(ctx, skippedCi, selection.excludedItems ?? []);
 			return { kind: "admitted", message: `Review ${kind} admitted for ${runnableWaves[0]!.repo}` };
 		}
