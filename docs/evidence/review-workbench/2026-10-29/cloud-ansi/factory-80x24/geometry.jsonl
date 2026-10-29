@@ -1,0 +1,5 @@
+{"file": "00-ready-check.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "01-factory-unavailable.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "02-factory-details.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "03-queue-still-available.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "04-factory-status.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}

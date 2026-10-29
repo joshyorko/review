@@ -1,5 +1,7 @@
 # Review notice UX refresh evidence
 
+> Historical checkpoint. The [fresh cloud ANSI report](../cloud-ansi/README.md) supersedes its screenshot/install/PR-preview status. Native TSP and full Product Design acceptance remain pending.
+
 Historical checkpoint only. These screenshots do not qualify the current PR94
 implementation. Later notice/dashboard changes and the integrated pagination
 repair require fresh captures. The narrow and browser captures under `wip-audit/`

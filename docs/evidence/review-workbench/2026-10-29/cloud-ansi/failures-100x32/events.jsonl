@@ -1,0 +1,28 @@
+{"event": "spawn", "ok": true, "pid": 74602, "argv": ["/workspace/.review-dev/visual-install/bun/bun-linux-x64-baseline/bun", "/tmp/pr94-ansi-1di33tyt/omp-lifecycle/packages/coding-agent/src/cli.ts", "--profile", "review-visual", "--cwd", "/tmp/pr94-ansi-1di33tyt/qualified-failures-100x32/work", "--config", "/tmp/pr94-ansi-1di33tyt/qualified-failures-100x32/config.yml", "--extension", "/tmp/pr94-ansi-1di33tyt/final-source/image/extension/luna-factory", "--extension", "/tmp/pr94-ansi-1di33tyt/qualified-failures-100x32/probe/visual-probe.ts", "--no-skills", "--no-rules", "--no-context-files", "--no-lsp", "--no-title", "--no-pty", "--model", "local-probe/deterministic"], "timestamp": "2026-10-29T18:39:41Z"}
+{"event": "capture", "file": "00-ready-check.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:48Z"}
+{"event": "capture", "file": "01-baseline.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:48Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:48Z"}
+{"event": "input", "label": "/visual-arm-refresh-failure<ENTER>", "timestamp": "2026-10-29T18:39:49Z"}
+{"event": "input", "label": "<ALT-B>", "timestamp": "2026-10-29T18:39:49Z"}
+{"event": "input", "label": "r", "timestamp": "2026-10-29T18:39:49Z"}
+{"event": "capture", "file": "02-refresh-failed.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:50Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:51Z"}
+{"event": "input", "label": "/review details<ENTER>", "timestamp": "2026-10-29T18:39:51Z"}
+{"event": "capture", "file": "03-refresh-details.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:51Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:52Z"}
+{"event": "input", "label": "<ALT-B>", "timestamp": "2026-10-29T18:39:52Z"}
+{"event": "input", "label": "r", "timestamp": "2026-10-29T18:39:52Z"}
+{"event": "capture", "file": "04-refresh-retry.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:53Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:54Z"}
+{"event": "input", "label": "/visual-arm-dashboard-failure<ENTER>", "timestamp": "2026-10-29T18:39:54Z"}
+{"event": "input", "label": "<ALT-B>", "timestamp": "2026-10-29T18:39:54Z"}
+{"event": "capture", "file": "05-dashboard-failed-editor.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:55Z"}
+{"event": "input", "label": "<ALT-B>", "timestamp": "2026-10-29T18:39:56Z"}
+{"event": "capture", "file": "06-dashboard-uncertain.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:56Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:56Z"}
+{"event": "input", "label": "/review details<ENTER>", "timestamp": "2026-10-29T18:39:57Z"}
+{"event": "capture", "file": "07-dashboard-details.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:57Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:57Z"}
+{"event": "input", "label": "/review status<ENTER>", "timestamp": "2026-10-29T18:39:58Z"}
+{"event": "capture", "file": "08-dashboard-status.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:58Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:58Z"}

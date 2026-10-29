@@ -1,5 +1,7 @@
 # PR94 cloud continuation
 
+> Historical checkpoint. The [fresh cloud ANSI report](../cloud-ansi/README.md) supersedes its screenshot/install/PR-preview status. Native TSP and full Product Design acceptance remain pending.
+
 Source under review: `c5d0f1f4af662f5a922ddbb6653c41d32b20f624`.
 Started from `df1e45edf44ef33ec65f3f54fdd5435e02c11b38` on
 `fix/review-workbench-recovery` in `joshyorko/review`.
