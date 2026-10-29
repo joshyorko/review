@@ -1,0 +1,44 @@
+{
+  "checkpoint_at": "2026-10-29T20:20:43.657828+00:00",
+  "source_revision": "bd143724883888d9c19695647c86b8b824a1d9b7",
+  "repository": "joshyorko/review",
+  "branch": "fix/review-workbench-recovery",
+  "network": "Managed replacement environment ready; HTTP policy unrestricted and enforced; pinned official Fedora pull succeeded.",
+  "pinned_fedora_pull": "passed",
+  "build_exit_receipt": 0,
+  "image": {
+    "Id": "sha256:96f6bcbf63d1508b4a085e3a9f7b42165f2674d506ffec5f0e8b656653486054",
+    "Size": 726858432,
+    "Architecture": "amd64",
+    "Os": "linux",
+    "revision": "bd143724883888d9c19695647c86b8b824a1d9b7",
+    "user": "65532:65532",
+    "entrypoint": [
+      "/usr/bin/review-appliance"
+    ]
+  },
+  "source_tests": {
+    "tests": 863,
+    "pass": 859,
+    "fail": 0,
+    "skipped": 4
+  },
+  "python_contracts": 43,
+  "launcher_parity": "passed",
+  "static_appliance": "passed",
+  "package_review_contracts": 16,
+  "sbom_contracts": 28,
+  "runc_verifier_exit": 1,
+  "runsc_verifier_exit": 1,
+  "smoke_exit": 0,
+  "smoke_result": "enabled=blocked disabled=passed; operator policy set/read through Review and Factory persisted across actual disabled restart",
+  "enabled_factory_restart_proven": false,
+  "active_batch_recovery_proven": false,
+  "native_tsp": "blocked; official Tern still closed beta, no public renderer release found",
+  "acceptance": "Keep PR94 draft. No Ready, merge, inference, user-machine deployment, verifier bypass or security relaxation performed.",
+  "execution_worktree_was_clean": true,
+  "product_source_changed": false,
+  "build_recipe": "Containerfile.cloud.txt; same pinned inputs and source, transient trusted-CA secret, compacted layers and preserved Git archive permissions",
+  "build_recipe_sha256": "ba4f44c11aec4caa3c56321d3c7ec83516c5480850c7422da9fc773384ba9847",
+  "receipt_note": "Only final canonical-context build and smoke receipts are published here. Source SHA and image revision remain bd143724; a later evidence-only commit does not change that execution subject."
+}

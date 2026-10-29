@@ -40,6 +40,8 @@ The deterministic GitHub fixture is injected at the network boundary; the native
 
 ## Packaged Factory restart: concrete cloud blocker
 
+The replacement environment has since pulled the pinned Fedora base and built the appliance. The [new packaged restart checkpoint](../cloud-packaged-restart/README.md) supersedes the network blocker below: disabled policy restart passed, while enabled verification remains blocked by actual namespace/runtime capability failures. The following records the earlier restricted-environment attempt.
+
 A genuine packaged restart was assessed using the existing Docker 28.4.0 engine and Buildx 0.31.0. There was no local appliance image. The repository's Containerfile and pins were used unchanged from the immutable `0a6fca9` snapshot; the later notice-lifecycle changes do not alter the base pin. [Build subject](packaged-build-source-manifest.json) and [actual failed build log](logs/docker-build.log.gz).
 
 The build exited **1 before compilation**: Docker's HEAD request for `registry.fedoraproject.org/fedora-minimal:46@sha256:47063fcb44549b53ef716744f90dc735dabe4febac4a0bc8fc12085651a6f0b9` returned **Forbidden**. The enforced cloud network policy is restricted to the package-manager preset, and `registry.fedoraproject.org` is absent from its effective allowlist. No image was created, and no packaged process/restart was started. This is an observed network/build blocker, not proof that Factory cannot run and not a source failure.

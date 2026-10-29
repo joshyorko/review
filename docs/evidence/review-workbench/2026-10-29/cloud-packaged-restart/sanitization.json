@@ -1,0 +1,107 @@
+{
+  "changes": [
+    "Host evidence-root path replaced with <evidence-root>",
+    "Temporary smoke-run directory replaced with <smoke-run>",
+    "Docker adaptation diff rendered without context lines; executable source changes are identical"
+  ],
+  "omitted": [
+    "Environment identifiers, host names and configuration/credential files"
+  ],
+  "original_and_published_hashes": {
+    "logs/docker-build.log.gz": {
+      "original_sha256": "57b3ad147dedbd612ed592182c2c7ead89dd3fcf3fe0fd450ccfe904754908d4",
+      "sanitized_uncompressed_sha256": "57b3ad147dedbd612ed592182c2c7ead89dd3fcf3fe0fd450ccfe904754908d4",
+      "artifact_sha256": "11a21067a9c0564683ebfea01cb25cc7a86fc0d9c75877be68d98669f145420f"
+    },
+    "logs/smoke-runc.log.gz": {
+      "original_sha256": "44756bf54f0418da8b273941ff38bc6ad67fa707877b3067f8838640867151ac",
+      "sanitized_uncompressed_sha256": "fc6c4e5d8fce8f0970f3c8eaa1f45b3466541993ec837bc1d28e944bb7c6148c",
+      "artifact_sha256": "03bec89da08a25a002c9789de2332e5c8ad7f7ca11d79cd53caffd02025e3f14"
+    },
+    "verifier-runc.jsonl": {
+      "original_sha256": "583e68d8817ce02d2e0d6ada03074b6413e1f4722b20508fd0fe253ea9aba188",
+      "sanitized_uncompressed_sha256": "583e68d8817ce02d2e0d6ada03074b6413e1f4722b20508fd0fe253ea9aba188",
+      "artifact_sha256": "583e68d8817ce02d2e0d6ada03074b6413e1f4722b20508fd0fe253ea9aba188"
+    },
+    "verifier-runsc.jsonl": {
+      "original_sha256": "61fbc129cb1fc3002a5b67660553e28e29824ae2372c4d1d092e5165cc95df93",
+      "sanitized_uncompressed_sha256": "61fbc129cb1fc3002a5b67660553e28e29824ae2372c4d1d092e5165cc95df93",
+      "artifact_sha256": "61fbc129cb1fc3002a5b67660553e28e29824ae2372c4d1d092e5165cc95df93"
+    },
+    "image-inspect.json": {
+      "original_sha256": "a132cf842d84ed6a5c1868dbf9286c30b671dd7d74092d2c854c1b1886e16511",
+      "sanitized_uncompressed_sha256": "a132cf842d84ed6a5c1868dbf9286c30b671dd7d74092d2c854c1b1886e16511",
+      "artifact_sha256": "a132cf842d84ed6a5c1868dbf9286c30b671dd7d74092d2c854c1b1886e16511"
+    },
+    "source-manifest.json": {
+      "original_sha256": "64f9aa7cbffd50986749ccd6769d43b6f8100770cb5d7ee7a623666aa99925f7",
+      "sanitized_uncompressed_sha256": "64f9aa7cbffd50986749ccd6769d43b6f8100770cb5d7ee7a623666aa99925f7",
+      "artifact_sha256": "64f9aa7cbffd50986749ccd6769d43b6f8100770cb5d7ee7a623666aa99925f7"
+    },
+    "Containerfile.cloud.txt": {
+      "original_sha256": "ba4f44c11aec4caa3c56321d3c7ec83516c5480850c7422da9fc773384ba9847",
+      "sanitized_uncompressed_sha256": "ba4f44c11aec4caa3c56321d3c7ec83516c5480850c7422da9fc773384ba9847",
+      "artifact_sha256": "ba4f44c11aec4caa3c56321d3c7ec83516c5480850c7422da9fc773384ba9847"
+    },
+    "smoke-docker.patch": {
+      "original_sha256": "9c0b93fb82bd12e972957ea1cf2933c896937d7f25a06317cc1d1ed6c22444f0",
+      "sanitized_uncompressed_sha256": "ccab0a0d093a2c617a92edf78d78def952d41449d4530ec0ec3857a42becd733",
+      "artifact_sha256": "ccab0a0d093a2c617a92edf78d78def952d41449d4530ec0ec3857a42becd733"
+    },
+    "build-adaptation.json": {
+      "original_sha256": "74a1af4f2e94e3f83d880af0b0f9fb0d9fe34b2ca14839d9c9e449006da4e0da",
+      "sanitized_uncompressed_sha256": "74a1af4f2e94e3f83d880af0b0f9fb0d9fe34b2ca14839d9c9e449006da4e0da",
+      "artifact_sha256": "74a1af4f2e94e3f83d880af0b0f9fb0d9fe34b2ca14839d9c9e449006da4e0da"
+    },
+    "build-failure-propagation-check.json": {
+      "original_sha256": "0ceabfa3746feb8e09419425803e673e3f91f2eb877b3f068d062e5a16928356",
+      "sanitized_uncompressed_sha256": "0ceabfa3746feb8e09419425803e673e3f91f2eb877b3f068d062e5a16928356",
+      "artifact_sha256": "0ceabfa3746feb8e09419425803e673e3f91f2eb877b3f068d062e5a16928356"
+    },
+    "context-modes.json": {
+      "original_sha256": "5b5e30582a5bc42953b706bb351a717d42602aeb5578872bf1d9905644074078",
+      "sanitized_uncompressed_sha256": "5b5e30582a5bc42953b706bb351a717d42602aeb5578872bf1d9905644074078",
+      "artifact_sha256": "5b5e30582a5bc42953b706bb351a717d42602aeb5578872bf1d9905644074078"
+    },
+    "logs/omp-review-mode.log.gz": {
+      "original_sha256": "8ca6f827ddbf7e9f7eca6cf8ae1b22c67653c24fe0042bf5faf29fd1604df3dd",
+      "sanitized_uncompressed_sha256": "8ca6f827ddbf7e9f7eca6cf8ae1b22c67653c24fe0042bf5faf29fd1604df3dd",
+      "artifact_sha256": "299cd197c43958eb6d94a24a20f507c25bb338d444ca05c9546c2a08e277df1c"
+    },
+    "logs/appliance-static.log.gz": {
+      "original_sha256": "43ae48e3cf4e2cf14384fdd832f33bce5dab4eb1547d87d8b33a512713436a9a",
+      "sanitized_uncompressed_sha256": "43ae48e3cf4e2cf14384fdd832f33bce5dab4eb1547d87d8b33a512713436a9a",
+      "artifact_sha256": "77264b1065e1a111ea7ccc089333557b0787bf997467494f9329694a4f59e11e"
+    },
+    "logs/package-review.log.gz": {
+      "original_sha256": "f7368f2c9cdf3f22000e9e44610f4b97af5b2f6d6665cc0a5bebdd9632d3f4bd",
+      "sanitized_uncompressed_sha256": "f7368f2c9cdf3f22000e9e44610f4b97af5b2f6d6665cc0a5bebdd9632d3f4bd",
+      "artifact_sha256": "bed34e6d895ec5d0347f5fd283f59f1d94c2a66cc6c88c68b12c1ebbf6effbe2"
+    },
+    "logs/appliance-sbom.log.gz": {
+      "original_sha256": "6124cabdde053256b6a9dd23f8809549f37985bf3d17f45a1a608e9bc3e7afea",
+      "sanitized_uncompressed_sha256": "6124cabdde053256b6a9dd23f8809549f37985bf3d17f45a1a608e9bc3e7afea",
+      "artifact_sha256": "b1f7a10e6daf49f7499f3c71a26abe57b67e92b7fba08518cf2dfa00f25345ad"
+    },
+    "logs/enabled.jsonl.gz": {
+      "original_sha256": "6ea1fa81b0bbcbe7a992280564a5fbe2156f2d2522733c1440e0a26578df91b0",
+      "sanitized_uncompressed_sha256": "6ea1fa81b0bbcbe7a992280564a5fbe2156f2d2522733c1440e0a26578df91b0",
+      "artifact_sha256": "3c28cf30638b51afaf55f5a13e93b233ad368294c0d137c5c982ee27a6e9e925"
+    },
+    "logs/disabled.jsonl.gz": {
+      "original_sha256": "f083e798a7ded9f07d8afb1823a61eb0970711125271c6308ac615f4877e3d0d",
+      "sanitized_uncompressed_sha256": "f083e798a7ded9f07d8afb1823a61eb0970711125271c6308ac615f4877e3d0d",
+      "artifact_sha256": "e13ea2ea0e72e33ff36b8702f2deb036a7cd30353b7a9e18e52049d7cc58ced1"
+    },
+    "logs/policy-set.jsonl.gz": {
+      "original_sha256": "fe7d9e6004e991783615f9eda21839ba5875edb2c75f01b1af645e56112c0caa",
+      "sanitized_uncompressed_sha256": "fe7d9e6004e991783615f9eda21839ba5875edb2c75f01b1af645e56112c0caa",
+      "artifact_sha256": "fb7ddc9d31a7d4c55b27a5f29258d70ed78c020880dd93bc0af60d9a49fed417"
+    },
+    "logs/policy-restart.jsonl.gz": {
+      "original_sha256": "008e4257375fe521906fc09f3b90a0a661af87a6e26d2997154dfb5d5766d7d3",
+      "sanitized_uncompressed_sha256": "008e4257375fe521906fc09f3b90a0a661af87a6e26d2997154dfb5d5766d7d3",
+      "artifact_sha256": "646d9cba2ec8e359695590061e4a8b35cc681ad2b23ab92f643f13db499891e7"
+    }
+  }
+}
