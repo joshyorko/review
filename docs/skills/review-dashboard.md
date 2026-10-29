@@ -184,9 +184,10 @@ Normal Review commands provide recovery without claim-file or Factory archaeolog
 Review keeps the latest unresolved warning or error visible in the below-editor
 banner and the workbench, with the recovery command on a separate `Next:` row.
 The full diagnostic is sent once through OMP's notification API, which the
-current extension host renders in the transcript. The current OMP extension API
-does not expose its internal `StatusNotice` native-toast component. Notices do
-not move focus or start work.
+current extension host renders in the transcript. A Review-owned widget uses
+the public OMP component `describe()` contract to emit a native toast when the
+terminal advertises TSP toast support; ANSI terminals use the persistent banner
+and transcript. Notices do not move focus or start work.
 Running `/review status` acknowledges and clears that persistent banner; it
 does not release claims or resume work.
 

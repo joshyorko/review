@@ -3142,8 +3142,15 @@ test("dashboard reports unexpected custom-UI rejection and Alt+B can reopen it",
 	assert.doesNotMatch(dashboardNotice, /dashboard renderer failed/, "long diagnostic details stay in the transcript instead of repeating in the banner");
 	assert.match(dashboardNotice, /Next: \/review status/, "the recovery command stays visible even when failure details are long");
 	assert.equal(ctx.notifications.filter(({ message }) => /dashboard renderer failed/.test(message)).length, 1, "the full diagnostic appears once");
+	const nativeNoticeFactory = ctx.widgets.get("review-native-notice");
+	assert.equal(typeof nativeNoticeFactory, "function", "the persistent failure also registers a passive native widget");
+	const nativeNotice = nativeNoticeFactory();
+	assert.deepEqual(nativeNotice.describe({ supports: (kind) => kind === "toast" }), {
+		k: "toast", p: { text: "Review workbench action failed", sub: "Next: /review status", ttl: 2400 },
+	});
 	await pi.commands.get("review").handler("status", ctx);
 	assert.doesNotMatch(ctx.overlays[0].render(100).join("\n"), /Review workbench action failed/, "reading status acknowledges and clears the persistent notice");
+	assert.equal(ctx.widgets.get("review-native-notice"), undefined, "status acknowledgement removes the native widget too");
 	const next = fakeCtx();
 	next.sessionId = "session-2";
 	pi.events.get("session_switch")({}, next);

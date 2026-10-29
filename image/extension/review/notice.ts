@@ -20,6 +20,10 @@ export interface NoticeHost {
 	notify(message: string, level?: NoticeLevel): void;
 }
 
+interface NativeToastDescribeContext {
+	supports(kind: "toast"): boolean;
+}
+
 interface SharedNoticeState {
 	sessionId?: string;
 	current?: ReviewNotice;
@@ -47,6 +51,25 @@ export function renderNoticeBanner(notice: ReviewNotice | undefined, painter: No
 		`${label} ${painter.fg("dim", "·")} ${painter.fg(notice.level, safeMessage(notice.summary))}`,
 		painter.bold(painter.fg(notice.level, `Next: ${safeMessage(notice.action)}`)),
 	];
+}
+
+/** Public TSP component contract; ANSI hosts render the persistent banner instead. */
+export function createNativeToastWidget(getCurrent: () => ReviewNotice | undefined) {
+	const kind: "toast" = "toast";
+	let currentId: string | undefined;
+	let toast: { k: "toast"; p: { text: string; sub: string; ttl: number } } | undefined;
+	return {
+		render: (_width: number): readonly string[] => [],
+		describe: (context: NativeToastDescribeContext) => {
+			const notice = getCurrent();
+			if (!notice || !context.supports("toast")) return null;
+			if (notice.id !== currentId) {
+				currentId = notice.id;
+				toast = { k: kind, p: { text: notice.summary, sub: `Next: ${notice.action}`, ttl: 2400 } };
+			}
+			return toast ?? null;
+		},
+	};
 }
 
 /**

@@ -8,7 +8,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
-import { createReviewNoticeComponent } from "./notice.ts";
+import { createNativeToastWidget, createReviewNoticeComponent } from "./notice.ts";
 import { loadWave, saveWave } from "./wave-store.ts";
 import type { CiEvidenceSource, QueueItem } from "./github.ts";
 import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, isForwardHead, orgScope, parseScope, resolveToken } from "./github.ts";
@@ -779,11 +779,22 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let activeDashboard: ReviewDashboard | undefined;
 	let activeCtx: CtxLike | undefined;
 	const noticeSessionId = (ctx: CtxLike): string => ctx.sessionManager?.getSessionId?.() ?? "unknown-session";
-	const updateNoticeSession = (ctx: CtxLike): void => {
-		if (nativeNotices.sessionChanged(noticeSessionId(ctx))) tui?.requestRender();
+	const updateNativeNoticeWidget = (ctx: CtxLike): void => {
+		if (ctx.hasUI && nativeNotices.current) {
+			ctx.ui.setWidget("review-native-notice", () => createNativeToastWidget(() => nativeNotices.current), { placement: "belowEditor" });
+		}
 	};
-	const acknowledgeNotice = (): void => {
+	const clearNativeNoticeWidget = (ctx: CtxLike): void => {
+		if (ctx.hasUI) ctx.ui.setWidget("review-native-notice", undefined, { placement: "belowEditor" });
+	};
+	const updateNoticeSession = (ctx: CtxLike): void => {
+		if (!nativeNotices.sessionChanged(noticeSessionId(ctx))) return;
+		clearNativeNoticeWidget(ctx);
+		tui?.requestRender();
+	};
+	const acknowledgeNotice = (ctx: CtxLike): void => {
 		nativeNotices.clear();
+		clearNativeNoticeWidget(ctx);
 		tui?.requestRender();
 	};
 	const notifyUser = (ctx: CtxLike, message: string, level: "info" | "warning" | "error" = "info", action?: string, summary?: string): void => {
@@ -803,7 +814,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const sessionId = noticeSessionId(ctx);
 		const noticeId = `${level}:${message}`;
 		const accepted = nativeNotices.publish({ id: noticeId, sessionId, level, message, summary: recoverySummary, action: recoveryAction });
-		if (accepted) ctx.ui.notify(message, level);
+		if (accepted) {
+			ctx.ui.notify(message, level);
+			if (nativeNotices.current?.id === noticeId) updateNativeNoticeWidget(ctx);
+		}
 		tui?.requestRender();
 	};
 	let reviewerTrustFailure: ReturnType<typeof reviewerDefinitionTrusted> | undefined;
@@ -2150,7 +2164,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (args === "" || args === "status") {
 			// Reading Review status is the explicit acknowledgement for the latest
 			// persistent banner; the read does not release claims or resume work.
-			acknowledgeNotice();
+			acknowledgeNotice(ctx);
 			restoreClaimWaves();
 			const claims = resourceClaims().list().filter((claim) => claim.owner.startsWith("review:"));
 			const skippedSummary = (batch: PersistedRepositoryBatch): string => {

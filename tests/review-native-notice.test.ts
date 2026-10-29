@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createReviewNoticeComponent, renderNoticeBanner } from "../image/extension/review/notice.ts";
+import { createNativeToastWidget, createReviewNoticeComponent, renderNoticeBanner } from "../image/extension/review/notice.ts";
 
 test("notice state is shared and repeated lifecycle notices are delivered once", () => {
 	const delivered: string[] = [];
@@ -60,6 +60,27 @@ test("banner is compact and uses native theme ANSI styling", () => {
 		"**<warning>Next: /review reconcile</warning>**",
 	]);
 	assert.deepEqual(renderNoticeBanner(undefined, { fg: (_role, text) => text, bold: (text) => text }), []);
+});
+
+test("native notice widget uses the public TSP toast node and stays quiet in ANSI", () => {
+	const notice = createReviewNoticeComponent();
+	notice.sessionChanged("session-toast-node");
+	notice.publish({ id: "blocked", sessionId: "session-toast-node", level: "error", message: "Full diagnostic", summary: "Review action failed", action: "/review status" });
+	const current = notice.current;
+	if (!current) throw new Error("notice was not retained");
+	const widget = createNativeToastWidget(() => notice.current);
+	const toastNode = widget.describe({ supports: (kind) => kind === "toast" });
+	assert.deepEqual(toastNode, {
+		k: "toast",
+		p: { text: "Review action failed", sub: "Next: /review status", ttl: 2400 },
+	});
+	assert.equal(widget.describe({ supports: (kind) => kind === "toast" }), toastNode, "unchanged notices reuse the same native node identity");
+	assert.equal(widget.describe({ supports: () => false }), null);
+	assert.deepEqual(widget.render(80), []);
+	notice.publish({ id: "next", sessionId: "session-toast-node", level: "warning", message: "Other blocker", summary: "Review action needs attention", action: "/review status" });
+	assert.equal(widget.describe({ supports: (kind) => kind === "toast" }), toastNode, "a lower-severity warning does not replace the unresolved error toast");
+	notice.clear();
+	assert.equal(widget.describe({ supports: (kind) => kind === "toast" }), null, "acknowledgement removes a pending toast description");
 });
 
 test("long failures keep their recovery command on a separate visible banner row", () => {
