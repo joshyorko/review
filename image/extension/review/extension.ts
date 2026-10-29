@@ -801,7 +801,8 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 	const notifyUser = (ctx: CtxLike, message: string, level: "info" | "warning" | "error" = "info", action?: string, summary?: string): void => {
 		if (!ctx.hasUI) {
-			ctx.ui.notify(message, level);
+			const headlessMessage = level === "info" ? message : safePreview(message, 1_200, "head").text || "Review needs attention; no diagnostic was available.";
+			ctx.ui.notify(headlessMessage, level);
 			return;
 		}
 		if (level === "info") {

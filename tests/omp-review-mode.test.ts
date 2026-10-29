@@ -8584,6 +8584,22 @@ test("Review missing native lifecycle capability blocks mutation before claims",
 	assert.match(await pi.commands.get("review").handler("details", ctx), /upgrade to the packaged Review OMP/);
 });
 
+test("headless Review retains bounded diagnostics when a persistent notice card cannot render", async () => {
+	const pi = fakeHost();
+	pi.sessionShutdownLifecycleVersion = undefined;
+	const ctx = fakeCtx();
+	ctx.hasUI = false;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: { ...ISOLATED_ENV, REVIEW_MODE: "review" } });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await pi.commands.get("review").handler("slay", ctx);
+	const output = ctx.notifications.map((notice) => notice.message).join("\n");
+	assert.match(output, /Review mutations require OMP session shutdown lifecycle/);
+	assert.ok(output.length < 1_500, "headless diagnostics remain bounded");
+	assert.equal(pi.messages.length, 0);
+	assert.equal(ctx.widgets.has("review-native-notice"), false, "headless execution does not register a visual card");
+});
+
 test("Review restart offers saved paused work and preserves stop proof across unrelated chat", async () => {
 	const { pi, ctx, env, states } = await exitFixture();
 	pi.events.get("session_shutdown")({}, ctx);
