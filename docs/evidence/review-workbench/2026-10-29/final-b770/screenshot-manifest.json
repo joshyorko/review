@@ -1,0 +1,90 @@
+{
+  "source_commit": "b7703314eafca250e95233d822bdaf253e1986d6",
+  "source_manifest_sha256": "a2b03d9fec3c9de8f0e5e0e4bba4310630b461ced46f783fc511d0880d65b9d2",
+  "screenshots": [
+    {
+      "path": "screenshots/01-baseline-100x32.png",
+      "sha256": "30d7b2c00459cb72129ba9a1a71e72a89875df850139742d56f8785fcb68b298",
+      "width": 1280,
+      "height": 720,
+      "bytes": 46313
+    },
+    {
+      "path": "screenshots/02-selected-100x32.png",
+      "sha256": "1bc2e30501189d098d82f795da2f2a157833e79576317619f83287f6aa8478fe",
+      "width": 1280,
+      "height": 720,
+      "bytes": 47009
+    },
+    {
+      "path": "screenshots/03-error-100x32.png",
+      "sha256": "6d9b3e7791e7e8eb2cddb88d4837222982e0cc8d14efdd20d9ddb2edc732498a",
+      "width": 1280,
+      "height": 720,
+      "bytes": 43790
+    },
+    {
+      "path": "screenshots/04-error-dashboard-100x32.png",
+      "sha256": "2fd33f3801cfe8d52096aa72390703c9e68f1aa087bca98fce5f9b05d891c6b4",
+      "width": 1280,
+      "height": 720,
+      "bytes": 55629
+    },
+    {
+      "path": "screenshots/05-error-after-warning-100x32.png",
+      "sha256": "1ed8f1f31a16caa4d276aeca28e767f07a2de4a707fd27b1ee5bb1c4d0ef5e8e",
+      "width": 1280,
+      "height": 720,
+      "bytes": 67942
+    },
+    {
+      "path": "screenshots/06-ack-100x32.png",
+      "sha256": "8c3b95e236857a675e17c69ee8cec51a7a9a0b612c4334cb2a2dfbbc105beb7e",
+      "width": 1280,
+      "height": 720,
+      "bytes": 53949
+    },
+    {
+      "path": "screenshots/narrow-01-baseline-80x24.png",
+      "sha256": "7a2aebeb02eaa936e714e255da1c649bae42bc641a8a3161c4ef487c65d8dcce",
+      "width": 680,
+      "height": 460,
+      "bytes": 51376
+    },
+    {
+      "path": "screenshots/narrow-02-selected-80x24.png",
+      "sha256": "6d364cbdffaab9536b39ec3370538dbf7af29eee895337482268a5af5f0568b0",
+      "width": 680,
+      "height": 460,
+      "bytes": 52490
+    },
+    {
+      "path": "screenshots/narrow-03-error-80x24.png",
+      "sha256": "dbda7843c54a3423f1be5abd54553a2c558097ddd7b0bce0651c82bda3f7c25e",
+      "width": 680,
+      "height": 460,
+      "bytes": 56144
+    },
+    {
+      "path": "screenshots/narrow-04-error-dashboard-80x24.png",
+      "sha256": "e723da31af862101c099dd9c8f4a5be6224756fe796daf4042115a208da079b1",
+      "width": 680,
+      "height": 460,
+      "bytes": 65975
+    },
+    {
+      "path": "screenshots/narrow-05-error-after-warning-80x24.png",
+      "sha256": "7d06b580d97ae7568a02ec492943d6cf665fa7f0606285c930a6b63535e9efb8",
+      "width": 680,
+      "height": 460,
+      "bytes": 70531
+    },
+    {
+      "path": "screenshots/narrow-06-ack-80x24.png",
+      "sha256": "9b4f7d175a0708c251ee6f31144b47bf6e28075f1cbeeafa20c3a46a84a77543",
+      "width": 680,
+      "height": 460,
+      "bytes": 74487
+    }
+  ]
+}
