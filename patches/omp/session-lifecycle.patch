@@ -144,7 +144,7 @@ index 29645f2..7683670 100644
  		return abortCleanupPromise;
  	};
  	const abortCurrentExecution = () => {
-@@ -737,6 +779,13 @@ export async function executeBash(command: string, options?: BashExecutorOptions
+@@ -737,4 +779,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
  				}
  			},
  		);
@@ -156,8 +156,6 @@ index 29645f2..7683670 100644
 +			.finally(() => executingShells.delete(executionShell));
 +		trackShellWork(sessionKey, nativeSettlement);
  		options?.onStart?.(() => executionShell.pids());
- 
- 		const ey = new ExponentialYield();
 @@ -868,7 +917,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
  				// turns; it is reaped once its last job exits and still dies with the
  				// harness. Skip on resetSession (cancel/error) — those tear down.
