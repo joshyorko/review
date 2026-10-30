@@ -67,8 +67,11 @@ assert_provider_env_names() {
 }
 assert_review_scope_env_names() {
   local call="$1" context="${2:-launcher}" name
-  for name in REVIEW_MODE REVIEW_DEFAULT_SCOPE REVIEW_SKIP_REPOS; do
+  for name in REVIEW_DEFAULT_SCOPE REVIEW_SKIP_REPOS; do
     [[ "$call" == *"--env $name"* ]] || fail "$context did not forward generic Review setting $name by name: $call"
+  done
+  for name in REVIEW_MODE HIVE_HUB; do
+    [[ "$call" != *"--env $name"* ]] || fail "$context forwarded retired Review setting $name: $call"
   done
 }
 
@@ -171,7 +174,7 @@ assert_eq "$standalone_out" "--repo projectbluefin/review --pr 463 --issues --ad
 scratch="$(mktemp -d)"
 trap '[[ -z "${audio_pid:-}" ]] || kill "$audio_pid" 2>/dev/null || true; rm -rf "$scratch"' EXIT
 
-mkdir -p "$scratch/bin" "$scratch/home/.config/hive"
+mkdir -p "$scratch/bin" "$scratch/home"
 # Keep Python available when the runtime fixtures deliberately narrow PATH.
 ln -s "$(command -v python3)" "$scratch/bin/python3"
 version_fixture="$scratch/version-package"
@@ -298,9 +301,9 @@ for arg in "\$@"; do
   previous="\$arg"
 done
 if [[ "\${EXPECT_APPTAINER_REVIEW_SCOPE:-}" == 1 ]]; then
-  [[ "\${APPTAINERENV_REVIEW_MODE:-}" == review ]] || exit 19
   [[ "\${APPTAINERENV_REVIEW_DEFAULT_SCOPE:-}" == acme/widgets ]] || exit 19
   [[ "\${APPTAINERENV_REVIEW_SKIP_REPOS:-}" == acme/skip ]] || exit 19
+  [[ ! -v APPTAINERENV_REVIEW_MODE && ! -v APPTAINERENV_HIVE_HUB ]] || exit 19
 fi
 if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
   injected=()
@@ -308,12 +311,6 @@ if [[ "\${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
     source_name="APPTAINERENV_\${name}"
     [[ -v "\$source_name" ]] && injected+=("\$name=\${!source_name}")
   done
-  if [[ "\${EXPECT_APPTAINER_HIVE:-}" == 1 ]]; then
-    [[ "\${APPTAINERENV_HIVE_HUB:-}" == https://hive.example.test ]] || exit 19
-  fi
-if [[ "\${EXPECT_APPTAINER_NO_HIVE:-}" == 1 ]]; then
-  [[ ! -v APPTAINERENV_HIVE_HUB ]] || exit 19
-fi
   env -i "\${injected[@]}" /bin/bash -c '
     [[ "\$GH_TOKEN" == mock-token &&
        "\$GITHUB_TOKEN" == mock-token &&
@@ -395,7 +392,6 @@ export HOME="$scratch/home"
 export XDG_STATE_HOME="$scratch/home/.local/state"
 export REVIEW_TEST_KVM_DEVICE="$kvm"
 export GH_TOKEN=mock-token GITHUB_TOKEN=mock-token
-unset HIVE_HUB
 unset REVIEW_INHERIT_OMP_CONFIG REVIEW_INHERIT_OMP_CONFIG
 unset RTK_DISABLED APPTAINERENV_RTK_DISABLED EXPECT_RTK_DISABLED
 export REVIEW_TEST_RUNTIME_DIR="$scratch/no-runtime"
@@ -616,7 +612,7 @@ set -e
 # The installed package uses the generic Review scope/mode interface.
 : >"$mock_podman_log"
 REVIEW_APPLIANCE_IMAGE="ghcr.io/joshyorko/review-appliance:sha-1234567890abcdef1234567890abcdef1234567890" \
-  REVIEW_MODE=review REVIEW_DEFAULT_SCOPE=acme/widgets REVIEW_SKIP_REPOS=acme/ignored \
+  REVIEW_DEFAULT_SCOPE=acme/widgets REVIEW_SKIP_REPOS=acme/ignored \
   "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
   fail "Review OCI override launch failed"
 oci_call="$(grep '^run ' "$mock_podman_log")"
@@ -665,7 +661,7 @@ mv "$scratch/bin/krun" "$scratch/krun"
 export PATH="$scratch/bin:/usr/bin:/bin"
 : >"$mock_apptainer_log"
 fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_NO_HIVE=1 EXPECT_APPTAINER_REVIEW_SCOPE=1 \
-  REVIEW_MODE=review REVIEW_DEFAULT_SCOPE=acme/widgets REVIEW_SKIP_REPOS=acme/skip \
+  REVIEW_DEFAULT_SCOPE=acme/widgets REVIEW_SKIP_REPOS=acme/skip \
   COPILOT_GITHUB_TOKEN=test-copilot-token GITHUB_COPILOT_TOKEN=test-github-copilot-token \
   COPILOT_INTEGRATION_ID=test-copilot-integration ANTHROPIC_API_KEY=test-anthropic-key \
   ANTHROPIC_OAUTH_TOKEN=test-anthropic-oauth OPENAI_API_KEY=test-provider-token \

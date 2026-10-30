@@ -14,7 +14,7 @@ just review-queue org:acme
 bin/review-source acme/widgets
 ```
 
-A fresh interactive session without a configured or restored scope asks for one. Headless use without a scope reports that `owner/repo` or `org:<name>` is required. `REVIEW_DEFAULT_SCOPE` sets an explicit generic default; `REVIEW_MODE=hive` opts into the optional Hive read-side integration. Normal Review mode is GitHub-only and does not discover Hive contributor configuration.
+A fresh interactive session without a configured or restored scope asks for one. Headless use without a scope reports that `owner/repo` or `org:<name>` is required. `REVIEW_DEFAULT_SCOPE` sets an explicit generic default.
 
 Authentication comes from the GitHub CLI credential or `GH_TOKEN`, `GITHUB_TOKEN`, or `COPILOT_GITHUB_TOKEN`. Review does not grant permissions: GitHub remains the authority for repository access, reviews, workflow changes, and landing.
 
@@ -46,12 +46,11 @@ Standalone Review uses **local attention order**: returned author repairs, perso
 
 Personal review requests are direct GitHub user requests, matched case-insensitively to your authenticated login. Team requests and missing reviewer evidence do not create personal priority.
 
-The dashboard and ordinary Slay/Autoslay use the same ordered queue. Explicit selections define the Slay scope and retain selection order. Optional Hive ranks take precedence within the existing author-repair and remaining-work lanes; local categories and safety gates remain visible. With Hive absent, disabled, or offline, local attention ordering remains active. Ranking only reads the captured GitHub snapshot, current user, policy, and staleness time. It does not dispatch work or change Factory admission, convergence, or mutation authority.
+The dashboard and ordinary Slay/Autoslay use the same ordered GitHub queue. Explicit selections define the Slay scope and retain selection order. Local attention categories order work while preserving the existing safety gates. Ranking only reads the captured GitHub snapshot, current user, policy, and staleness time. It does not dispatch work or change Factory admission, convergence, or mutation authority.
 
 
 Luna Factory is selected from Review when available, and owns its worker execution, claims, and durable state. Use Review to inspect and select GitHub work; use Factory for bounded worker operations. See the [Factory operating model](docs/factory/agentic-model.md).
 
-Hive remains an optional, explicitly selected read-side integration for existing users. It is not required for Review, and the default mode makes no Hive requests or contributor-registration discovery.
 
 ## Guides
 

@@ -1,9 +1,9 @@
 {
-	"name": "hive-workbench",
+	"name": "review-workbench",
 	"version": "1.0.0",
 	"private": true,
 	"type": "module",
-	"description": "OMP-native workbench for Hive-ranked mass review.",
+	"description": "OMP-native GitHub review workbench.",
 	"omp": {
 		"extensions": ["./index.ts"]
 	}

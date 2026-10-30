@@ -32,7 +32,7 @@ OMP discovers the companion agent definitions in `image/extension/review/agents/
 2. Review agents are read-only. Their tool allowlists must not include comment, submit-review, approval, push, or merge capabilities.
 3. Verdicts and specialist findings inform the human/coordinator; they never authorize GitHub mutation or turn missing evidence into approval.
 4. Use the target repository's own instructions. Do not route by owner prefix or add organization-specific labels, doctrine, or policy defaults.
-5. Review tools and prompts consume live GitHub evidence. Optional Hive projections are available only in explicitly selected Hive mode and do not assign work.
+5. Review tools and prompts consume live GitHub evidence.
 6. Delete a specialist when its responsibility is fully duplicated by OMP or another agent; do not keep wrappers for compatibility.
 
 ## Verification

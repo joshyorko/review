@@ -12,7 +12,7 @@ def test_wrapper_uses_review_scoped_controls_and_keeps_sif_fallback():
     assert "REVIEW_APPLIANCE_IMAGE" in wrapper
     assert "ghcr.io/joshyorko/review:sha-" in script
     assert "REVIEW_APPLIANCE_FALLBACK_SIF" in wrapper
-    assert "export REVIEW_MODE=review" in wrapper
+    assert "REVIEW_MODE" not in wrapper
     assert "BLUEFIN_REVIEW_IMAGE" not in wrapper
     assert "BLUEFIN_REVIEW_MODE" not in wrapper
     assert "BLUEFIN_REVIEW_PERSONAL_MODE" not in wrapper

@@ -105,7 +105,7 @@ async function recoveredInspector(batch: ReturnType<typeof wave>, snapshot: unkn
 		saveWave(claimsRoot, batch as never);
 		const pi = host();
 		const branch = [{ type: "custom", customType: BATCH_ENTRY, data: batch }];
-		const review = createReviewExtension(pi as never, { org: "example", env: { REVIEW_MODE: "review", REVIEW_DEFAULT_SCOPE: "org:example", HOME: "/nonexistent", XDG_STATE_HOME: stateRoot, LUNA_FACTORY_CLAIMS_ROOT: claimsRoot }, fetchImpl: async () => ({ ok: true, status: 200, statusText: "OK", json: async () => ({ data: { viewer: { login: "reviewer" }, search: { pageInfo: { hasNextPage: false }, nodes: [] } } }) }) });
+		const review = createReviewExtension(pi as never, { org: "example", env: { REVIEW_DEFAULT_SCOPE: "org:example", HOME: "/nonexistent", XDG_STATE_HOME: stateRoot, LUNA_FACTORY_CLAIMS_ROOT: claimsRoot }, fetchImpl: async () => ({ ok: true, status: 200, statusText: "OK", json: async () => ({ data: { viewer: { login: "reviewer" }, search: { pageInfo: { hasNextPage: false }, nodes: [] } } }) }) });
 		const ctx = context(branch, snapshot);
 		await pi.events.get("session_start")?.({}, ctx);
 		await review.whenStarted();

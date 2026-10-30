@@ -91,7 +91,8 @@ if [[ "${1:-}" == run && "${EXPECT_PODMAN_AWS_FORWARDING:-}" == 1 ]]; then
   [[ "$*" != *test-bedrock-bearer* && "$*" != *test-access-key* && "$*" != *test-secret-key* && "$*" != *test-session-token* && "$*" != *us-east-1* ]] || exit 19
 fi
 if [[ "${1:-}" == run && "${EXPECT_PODMAN_REVIEW_SCOPE:-}" == 1 ]]; then
-  [[ "$*" == *"--env REVIEW_DEFAULT_SCOPE"* && "$*" == *"--env REVIEW_MODE"* ]] || exit 19
+  [[ "$*" == *"--env REVIEW_DEFAULT_SCOPE"* ]] || exit 19
+  [[ "$*" != *"--env REVIEW_MODE"* && "$*" != *"--env HIVE_HUB"* ]] || exit 19
   [[ "$*" == *"review-review-org-acme-"* ]] || exit 19
 fi
 if [[ "${1:-}" == run && -n "${EXPECT_EXTENSION:-}" ]]; then
@@ -171,20 +172,15 @@ for arg in "$@"; do
 done
 if [[ "${EXPECT_APPTAINER_CREDENTIALS:-}" == 1 ]]; then
   injected=()
-  for name in GH_TOKEN OPENAI_API_KEY CONTEXT7_API_KEY HIVE_HUB AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
+  for name in GH_TOKEN OPENAI_API_KEY CONTEXT7_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
     source_name="APPTAINERENV_${name}"
     [[ -v "$source_name" ]] && injected+=("$name=${!source_name}")
   done
   injected+=("EXPECT_CONTEXT7_CREDENTIAL=${EXPECT_CONTEXT7_CREDENTIAL:-0}")
-  injected+=("EXPECT_APPTAINER_HIVE=${EXPECT_APPTAINER_HIVE:-0}")
   env -i "${injected[@]}" /bin/bash -c '
     [[ "$GH_TOKEN" == test-gh-token ]] || { echo "contained GH_TOKEN mismatch" >&2; exit 1; }
     [[ "$OPENAI_API_KEY" == "test-provider-token" ]] || { echo "contained OPENAI_API_KEY mismatch" >&2; exit 1; }
-    if [[ "$EXPECT_APPTAINER_HIVE" == 1 ]]; then
-      [[ "$HIVE_HUB" == https://hive.example.test ]] || { echo "contained HIVE_HUB mismatch" >&2; exit 1; }
-    else
-      [[ -z "$HIVE_HUB" ]] || { echo "unexpected Hive configuration in default Review" >&2; exit 1; }
-    fi
+    [[ ! -v HIVE_HUB ]] || { echo "unexpected Hive configuration in Review" >&2; exit 1; }
     [[ -z "$AWS_BEARER_TOKEN_BEDROCK" || "$AWS_BEARER_TOKEN_BEDROCK" == "test-bedrock-token" ]] || { echo "contained AWS bearer mismatch" >&2; exit 1; }
     [[ -z "$AWS_ACCESS_KEY_ID" || "$AWS_ACCESS_KEY_ID" == "test-access-key" ]] || { echo "contained AWS access-key mismatch" >&2; exit 1; }
     [[ -z "$AWS_SECRET_ACCESS_KEY" || "$AWS_SECRET_ACCESS_KEY" == "test-secret-key" ]] || { echo "contained AWS secret-key mismatch" >&2; exit 1; }
@@ -205,8 +201,7 @@ if [[ "${EXPECT_APPTAINER_AWS_FORWARDING:-}" == 1 ]]; then
 fi
 if [[ "${EXPECT_APPTAINER_REVIEW_SCOPE:-}" == 1 ]]; then
   [[ "${APPTAINERENV_REVIEW_DEFAULT_SCOPE:-}" == "org:acme" ]] || exit 19
-  [[ "${APPTAINERENV_REVIEW_MODE:-}" == "hive" ]] || exit 19
-  [[ "${APPTAINERENV_HIVE_HUB:-}" == "https://hive.example.test" ]] || exit 19
+  [[ ! -v APPTAINERENV_REVIEW_MODE && ! -v APPTAINERENV_HIVE_HUB ]] || exit 19
 fi
 exit 18
 EOF
@@ -430,7 +425,7 @@ unset EXPECT_APPTAINER_AWS_FORWARDING AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID
 scenario="KVM preflight failure falls back to Apptainer"
 : >"$apptainer_log"
 set +e
-output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token CONTEXT7_API_KEY=test-context7-token HIVE_HUB= EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=0 EXPECT_CONTEXT7_CREDENTIAL=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token CONTEXT7_API_KEY=test-context7-token EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_CONTEXT7_CREDENTIAL=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
 status=$?
 set -e
 [[ "$status" -eq 18 ]] || fail "expected fake Apptainer exit 18, got $status"
@@ -514,12 +509,10 @@ done
 
 scenario="Bedrock bearer-token credentials reach the contained Apptainer process"
 : >"$apptainer_log"
-export EXPECT_APPTAINER_HIVE=1
 set +e
-bedrock_apptainer_output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token HIVE_HUB=https://hive.example.test AWS_BEARER_TOKEN_BEDROCK=test-bedrock-token AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2 EXPECT_APPTAINER_CREDENTIALS=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
+bedrock_apptainer_output="$(env HOME="$home" PATH="$fake_bin:/usr/bin:/bin" PODMAN_LOG="$podman_log" KUBECTL_LOG="$kubectl_log" APPTAINER_LOG="$apptainer_log" REVIEW_TEST_KVM_DEVICE="$kvm" GH_TOKEN=test-gh-token OPENAI_API_KEY=test-provider-token AWS_BEARER_TOKEN_BEDROCK=test-bedrock-token AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-key AWS_SESSION_TOKEN=test-session-token AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2 EXPECT_APPTAINER_CREDENTIALS=1 FAKE_PODMAN_INFO_FAIL=1 "$real_just" --justfile "$root/justfile" review-queue owner/repo 2>&1)"
 bedrock_apptainer_status=$?
 set -e
-unset EXPECT_APPTAINER_HIVE
 [[ "$bedrock_apptainer_status" -eq 18 ]] || fail "expected fake Apptainer exit 18 with Bedrock credentials, got $bedrock_apptainer_status: $bedrock_apptainer_output"
 log_contains 'run --containall' "$apptainer_log"
 for bedrock_value in test-bedrock-token test-access-key test-secret-key test-session-token us-west-2; do
@@ -549,12 +542,12 @@ log_not_contains "$home/" "$podman_log"
 [[ "$one_review_call" != "$two_review_call" ]] || fail "different review targets must not collide"
 
 scenario="configured Review scope and mode reach Podman"
-EXPECT_PODMAN_REVIEW_SCOPE=1 REVIEW_DEFAULT_SCOPE=org:acme REVIEW_MODE=review run_just review-queue
+EXPECT_PODMAN_REVIEW_SCOPE=1 REVIEW_DEFAULT_SCOPE=org:acme run_just review-queue
 [[ "$status" -eq 17 ]] || fail "configured Review scope did not launch: $output"
 
-scenario="configured scope and explicit Hive mode reach Apptainer"
+scenario="legacy Hive settings are not forwarded to Apptainer"
 EXPECT_APPTAINER_REVIEW_SCOPE=1 REVIEW_DEFAULT_SCOPE=org:acme REVIEW_MODE=hive HIVE_HUB=https://hive.example.test FAKE_PODMAN_INFO_FAIL=1 run_just review-queue
-[[ "$status" -eq 18 ]] || fail "explicit Hive configuration did not reach the Apptainer fallback: $output"
+[[ "$status" -eq 18 ]] || fail "legacy Hive settings affected Apptainer fallback: $output"
 [[ ! -s "$kubectl_log" ]] || fail "GitHub-only Review invoked Kubernetes"
 if ((failures)); then
   printf 'just-onboarding: %d failure(s)\n' "$failures" >&2

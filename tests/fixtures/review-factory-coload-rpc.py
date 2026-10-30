@@ -23,7 +23,7 @@ def main():
     env = {
         "HOME": "/home/review", "XDG_CONFIG_HOME": "/host-xdg",
         "XDG_STATE_HOME": "/home/review/.local/state", "XDG_CACHE_HOME": "/home/review/.cache",
-        "REVIEW_DEFAULT_SCOPE": "example/repo", "REVIEW_MODE": "review",
+        "REVIEW_DEFAULT_SCOPE": "example/repo",
         "GH_TOKEN": "", "GITHUB_TOKEN": "",
     }
     if factory == "enabled":

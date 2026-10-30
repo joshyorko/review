@@ -20,7 +20,7 @@ The OMP extension at `image/extension/review/` is the GitHub-generic Review surf
 
 ## Mode and authority
 
-Review defaults to GitHub-only mode. `REVIEW_MODE=hive` explicitly enables optional Hive read-side context and `HIVE_HUB` must be configured directly. Normal Review does not fetch Hive, discover contributor registration, show Hive controls, or inject Hive knowledge. Hive mode remains read-only and never assigns or completes worker tasks.
+Review uses GitHub for its queue and current repository evidence.
 
 - GitHub owns repository, issue, pull-request, check, and permission state.
 - OMP owns sessions, agents, tasks, tools, workflowz workpools, and cancellation.
@@ -43,10 +43,9 @@ Review defaults to GitHub-only mode. `REVIEW_MODE=hive` explicitly enables optio
 | `F` | Open the Luna Factory action picker for selected work when Factory is loaded |
 | `d` | Inspect bounded PR diff or issue discussion |
 | `p` | Pause or resume later wave admission |
-| `r` | Refresh GitHub evidence and explicitly enabled read-side projections |
+| `r` | Refresh GitHub evidence |
 | `o` | Change repository or organization scope |
 | `/` | Filter the queue |
-| `H` / `L` | Hive-only filter/stages; available only in explicit Hive mode |
 | `t`, `g` / `G`, `h` / `l` | Focus trace, jump to ends, or collapse/expand a trace span |
 | `c` | Comment only after confirmation and live revalidation |
 | `v` | Open the focused GitHub item |
@@ -83,7 +82,7 @@ unavailable. Native totals are shown only when OMP supplied
 `details.meta.truncation` totals, and `details.meta.artifactError` suppresses the
 full-output link.
 
-The normal Review help and status bars omit Hive controls and status. Do not add controls that imply optional integrations are required.
+The Review help and status bars describe GitHub queue state. Do not add controls that imply optional integrations are required.
 
 ## Bounded execution
 
@@ -264,7 +263,7 @@ terminal status is observed. The rail, plain-text trace, and
 
 Use the generic workbench policy for every owner/repository. Do not route based on `projectbluefin/`, `joshyorko/`, or another organization prefix, and do not restore Blueberry or product-specific label gates.
 
-Review mode registers `review_workbench_*` tools for GitHub status, queue, diff, trace, and issue inspection. Explicit Hive mode uses the corresponding `hive_workbench_*` read-side tools. Keep missing-scope, permission, stale-head, and unavailable-integration reasons truthful.
+Review registers `review_workbench_*` tools for GitHub status, queue, diff, trace, and issue inspection. Keep missing-scope, permission, and stale-head reasons truthful.
 
 ## Verification
 

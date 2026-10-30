@@ -7,7 +7,6 @@
  * no repaints.
  */
 
-import { hiveFailureStatus } from "./hive.ts";
 import { GLYPH, SPINNER_TICK_MS, type PaintRole, type Painter, formatDuration, statusIcon, statusRole } from "./glyphs.ts";
 import { type ReviewMode, ciGlyph } from "./mode.ts";
 import type { Priority, PriorityCategory } from "./priority.ts";
@@ -27,15 +26,11 @@ export function keymapBar(painter: Painter, keys: readonly RailKey[], width: num
 }
 
 /**
- * Status bar for Review and the optional Hive read-side integration.
+ * Status bar for the GitHub Review workbench.
  */
 export function tmuxReviewStatusBar(mode: ReviewMode, painter: Painter, width: number, now: number): string {
-	const hive = mode.hive;
-	const hiveEnabled = mode.isHiveMode();
-	const hiveMode = hive.online ? "HIVE" : (hive.configured ? "OFFLINE" : "LOCAL");
 	const blueBg = "\x1b[48;2;30;41;59m";
 	const reviewBadge = "\x1b[48;2;37;99;235m\x1b[38;2;255;255;255m\x1b[1m review \x1b[0m";
-	const hiveBadge = hiveEnabled ? `\x1b[48;2;30;64;175m\x1b[38;2;191;219;254m ${hiveMode} \x1b[0m` : "";
 	const item = mode.selected();
 	let activeTaskStr = "";
 	if (item) {
@@ -44,26 +39,19 @@ export function tmuxReviewStatusBar(mode: ReviewMode, painter: Painter, width: n
 		activeTaskStr = `${blueBg}\x1b[38;2;96;165;250mTask: \x1b[1m\x1b[38;2;255;255;255m${kind} #${item.id}\x1b[0m${blueBg}\x1b[38;2;147;197;253m (${repo}) \x1b[38;2;59;130;246m| `;
 	}
 
-	const tally = mode.ciTally();
-	const issuesCount = mode.queueMode === "issues" ? mode.visibleItems().length : (hiveEnabled ? hive.actionableItems ?? "-" : "-");
-	const prsCount = mode.queueMode === "prs" ? mode.visibleItems().length : (hiveEnabled ? tally.success + tally.failure + tally.pending : "-");
+	const issuesCount = mode.queueMode === "issues" ? mode.visibleItems().length : "-";
+	const prsCount = mode.queueMode === "prs" ? mode.visibleItems().length : "-";
 
 	let stats = `${blueBg}\x1b[38;2;147;197;253mIssues: \x1b[1m\x1b[38;2;255;255;255m${issuesCount}\x1b[0m${blueBg}\x1b[38;2;147;197;253m \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mPRs: \x1b[1m\x1b[38;2;255;255;255m${prsCount}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
-	if (hiveEnabled && hive.workers) {
-		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mWorkers: \x1b[1m\x1b[38;2;255;255;255m${hive.workers}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
-	}
-	if (hiveEnabled && hive.reviewers) {
-		stats += ` \x1b[38;2;59;130;246m| \x1b[38;2;147;197;253mReviewers: \x1b[1m\x1b[38;2;255;255;255m${hive.reviewers}\x1b[0m${blueBg}\x1b[38;2;147;197;253m`;
-	}
 	const date = new Date(now);
 	const hours = String(date.getHours()).padStart(2, "0");
 	const minutes = String(date.getMinutes()).padStart(2, "0");
 	const timeStr = `\x1b[38;2;59;130;246m| \x1b[38;2;191;219;254m${hours}:${minutes}\x1b[0m`;
 
-	const content = `${reviewBadge}${hiveBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}\x1b[0m`;
+	const content = `${reviewBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}\x1b[0m`;
 	const contentWidth = visibleWidth(content);
 	const fillSpaces = Math.max(0, width - contentWidth);
-	const bar = `${reviewBadge}${hiveBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}${" ".repeat(fillSpaces)}\x1b[0m`;
+	const bar = `${reviewBadge}${blueBg} ${activeTaskStr}${stats} ${timeStr}${" ".repeat(fillSpaces)}\x1b[0m`;
 	return truncateToWidth(bar, width);
 }
 
@@ -114,43 +102,17 @@ export function priorityChip(painter: Painter, priority: Priority | undefined): 
 		const label = priority.reason ? `blocked · ${priority.reason}` : "blocked";
 		return painter.fg(CATEGORY_ROLE.blocked, label);
 	}
-	const label = priority.category === "repair-requested" || priority.hiveRank === undefined
-		? CATEGORY_LABEL[priority.category]
-		: `${CATEGORY_LABEL[priority.category]} · hive#${priority.hiveRank + 1}`;
-	return painter.fg(CATEGORY_ROLE[priority.category], label);
+	return painter.fg(CATEGORY_ROLE[priority.category], CATEGORY_LABEL[priority.category]);
 }
 
-/**
- * Where the order came from.
- *
- * "Hive says nothing is urgent" and "we could not ask Hive" are different
- * facts, and a maintainer acting on the wrong one wastes a morning.
- */
+/** The local GitHub attention order needs no external queue authority. */
 export function orderSourceLabel(mode: ReviewMode): { text: string; role: PaintRole } {
-	const hive = mode.hive;
-	if (!hive.configured) return { text: "LOCAL · attention order", role: "dim" };
-	if (hive.error) return { text: `LOCAL · attention order · ${hiveFailureStatus(hive.error)}`, role: "error" };
-	const coverage = mode.hiveCoverage();
-	if (mode.orderSource() === "hive") {
-		const actionable = hive.actionableItems === undefined ? "" : ` \u00b7 ${hive.actionableItems} actionable`;
-		// present/total, not a bare count: a queue missing half of Hive's work
-		// looks identical to a short queue unless it says so.
-		const queued = `${coverage.present}/${coverage.total} queued`;
-		return { text: `hive \u25b8 ${queued}${actionable}`, role: "accent" };
-	}
-	if (coverage.total > 0) {
-		return { text: `hive \u25b8 0/${coverage.total} queued \u00b7 none reachable here`, role: "error" };
-	}
-	return { text: "Hive online · no ranked work in this view", role: "dim" };
+	void mode;
+	return { text: "LOCAL · attention order", role: "dim" };
 }
 
 export function workbenchProgressBar(mode: ReviewMode, painter: Painter, width: number): string {
 	const source = orderSourceLabel(mode);
-	const connection = mode.hive.online
-		? painter.fg("success", "HIVE LIVE")
-		: mode.hive.configured
-			? painter.fg("error", "HIVE OFFLINE")
-			: mode.isReviewMode() ? "" : painter.fg("warning", "HIVE UNCONFIGURED");
 	const selected = painter.fg("text", `${mode.selectedKeys.size} selected`);
 	const pause = mode.paused ? painter.fg("warning", "PAUSED") : painter.fg("success", "RUNNING");
 	const progress = mode.batchProgress;
@@ -161,7 +123,7 @@ export function workbenchProgressBar(mode: ReviewMode, painter: Painter, width: 
 			)
 		: painter.fg("dim", "no active slay");
 	return truncateToWidth(
-		`${connection ? `${connection} ${painter.fg("dim", GLYPH.dot)} ` : ""}${painter.fg(source.role, source.text)} ${painter.fg("dim", GLYPH.dot)} ${selected} ${painter.fg("dim", GLYPH.dot)} ${pause} ${painter.fg("dim", GLYPH.dot)} ${slay}`,
+		`${painter.fg(source.role, source.text)} ${painter.fg("dim", GLYPH.dot)} ${selected} ${painter.fg("dim", GLYPH.dot)} ${pause} ${painter.fg("dim", GLYPH.dot)} ${slay}`,
 		width,
 	);
 }
@@ -180,16 +142,12 @@ export function renderRail(
 		const spinner = painter.fg("warning", statusIcon("running", frame));
 		let reasonText = "queue empty";
 		if (mode.loading) reasonText = "loading queue…";
-		else if (mode.hiveOnly && mode.hive.online && mode.items.length > 0) {
-			reasonText = `no Hive-ranked ${mode.queueMode} (${mode.items.length} unranked open — H shows all)`;
-		}
 		const reason = mode.queueError
 			? painter.fg("error", `${statusIcon("failure")} list unavailable`)
 			: mode.loading
 				? `${spinner} ${painter.fg("warning", reasonText)}`
 				: painter.fg("dim", `${statusIcon("pending")} ${reasonText}`);
-	const surface = mode.isReviewMode() ? "review" : "hive";
-	return [truncateToWidth(`${painter.fg("accent", `${GLYPH.hex} ${surface}`)} ${reason}  │  ${painter.fg("dim", "alt+b: workbench")}`, width)];
+	return [truncateToWidth(`${painter.fg("accent", `${GLYPH.hex} review`)} ${reason}  │  ${painter.fg("dim", "alt+b: workbench")}`, width)];
 	}
 	const ci = ciGlyph(item.ciStatus);
 	const priority = mode.priorityFor(item);
@@ -207,9 +165,8 @@ export function renderRail(
 	const live = liveLine(mode, painter, now, frame);
 	if (live && mode.session.active()) return [truncateToWidth(live, width)];
 	const source = orderSourceLabel(mode);
-	const connection = mode.hive.online ? "HIVE LIVE" : mode.hive.configured ? "HIVE OFFLINE" : mode.isReviewMode() ? "LOCAL" : "HIVE UNCONFIGURED";
 	const leftParts = [check, number, title, author, chip, icon].filter(Boolean);
-	const status = [painter.fg(source.role, `${connection} ${source.text}`), ageBadge].filter(Boolean).join(` ${painter.fg("dim", GLYPH.dot)} `);
+	const status = [painter.fg(source.role, source.text), ageBadge].filter(Boolean).join(` ${painter.fg("dim", GLYPH.dot)} `);
 	const itemLine = `${leftParts.join(" ")}  │  ${painter.fg("dim", "alt+b: workbench")} ${pos}`;
 	return [truncateToWidth(status, width), truncateToWidth(itemLine, width)];
 

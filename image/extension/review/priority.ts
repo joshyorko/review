@@ -1,14 +1,12 @@
 /**
  * What to look at first.
  *
- * Pull requests returned to the authenticated author form a local repair-only
- * lane before other work. Hive rank is authoritative within that lane and for
- * the remaining queue. Local categories, demotion, recency, and item key order
- * work without an external rank. This module never selects or assigns work.
+ * Pull requests returned to the authenticated author form a repair-only lane
+ * before other work. Local categories, demotion, recency, and item key order
+ * produce a deterministic GitHub queue without assigning work.
  */
 
 import type { QueueItem } from "./github.ts";
-import type { HiveSnapshot } from "./hive.ts";
 
 export type PriorityCategory =
 	| "blocked"
@@ -22,17 +20,13 @@ export type PriorityCategory =
 	| "triage";
 export interface Priority {
 	category: PriorityCategory;
-	source: "hive" | "local";
 	/** Short human reason, shown next to the item. */
 	reason: string;
-	/** Hive's own position, when Hive supplied it. */
-	hiveRank?: number;
 	/** Sinks bot bumps and abandoned branches within their category. */
 	demotion: number;
 }
 
 export interface PrioritizeContext {
-	hive: HiveSnapshot;
 	now: number;
 	currentUserLogin?: string;
 	/** Personal/self-hosted policy may explicitly permit workflow PR actions. */
@@ -41,9 +35,7 @@ export interface PrioritizeContext {
 export interface PrioritizedQueue {
 	items: QueueItem[];
 	priorities: ReadonlyMap<string, Priority>;
-	source: "hive" | "local";
-	/** How many items Hive ranked, for the headline. */
-	hiveRanked: number;
+	source: "local";
 }
 
 
@@ -150,51 +142,17 @@ export function demotionFor(item: QueueItem, now: number): number {
 }
 
 /**
- * Hive's rank for an item.
- *
- * A pull request is rarely queued by Hive directly — Hive queues the issue. The
- * link is the pull request's own closing references, so a change that closes
- * prioritized work inherits that priority instead of sinking into date order.
- */
-export function hiveRankFor(item: QueueItem, hive: HiveSnapshot): number | undefined {
-	const candidates = [itemKey(item), ...(item.closingIssues ?? [])];
-	let best: number | undefined;
-	for (const key of candidates) {
-		const rank = hive.ranks.get(key);
-		if (rank === undefined) continue;
-		if (best === undefined || rank < best) best = rank;
-	}
-	return best;
-}
-
-function hiveReason(item: QueueItem, hive: HiveSnapshot, rank: number): string {
-	const match = hive.items.find(
-		(candidate) => candidate.key === itemKey(item) || (item.closingIssues ?? []).includes(candidate.key),
-	);
-	const level = match?.level;
-	const via = match && match.key !== itemKey(item) ? ` via ${match.key}` : "";
-	return level ? `hive ${level} #${rank + 1}${via}` : `hive #${rank + 1}${via}`;
-}
-
-/**
- * Put returned author work first, preserve Hive order inside each lane, and
- * otherwise apply deterministic local attention order to the captured snapshot.
+ * Apply deterministic local attention order to the captured GitHub snapshot.
  */
 export function prioritize(items: readonly QueueItem[], context: PrioritizeContext): PrioritizedQueue {
 	const priorities = new Map<string, Priority>();
-	let hiveRanked = 0;
 
 	for (const item of items) {
 		const key = itemKey(item);
 		const demotion = demotionFor(item, context.now);
-		const rank = context.hive.online ? hiveRankFor(item, context.hive) : undefined;
 		const local = categorize(item, context);
-		if (rank !== undefined) hiveRanked += 1;
 		priorities.set(key, {
 			...local,
-			source: rank === undefined ? "local" : "hive",
-			reason: rank === undefined ? local.reason : `${local.reason} · ${hiveReason(item, context.hive, rank)}`,
-			hiveRank: rank,
 			demotion,
 		});
 	}
@@ -205,12 +163,6 @@ export function prioritize(items: readonly QueueItem[], context: PrioritizeConte
 		const aRepair = a.category === "repair-requested";
 		const bRepair = b.category === "repair-requested";
 		if (aRepair !== bRepair) return aRepair ? -1 : 1;
-		if (a.hiveRank !== undefined || b.hiveRank !== undefined) {
-			// Preserve Hive's relative order inside each lane.
-			if (a.hiveRank === undefined) return 1;
-			if (b.hiveRank === undefined) return -1;
-			if (a.hiveRank !== b.hiveRank) return a.hiveRank - b.hiveRank;
-		}
 		const category = LOCAL_ATTENTION_ORDER[a.category] - LOCAL_ATTENTION_ORDER[b.category];
 		if (category !== 0) return category;
 		if (a.demotion !== b.demotion) return a.demotion - b.demotion;
@@ -220,16 +172,7 @@ export function prioritize(items: readonly QueueItem[], context: PrioritizeConte
 		return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
 	});
 
-	if (!context.hive.online) {
-		return { items: ordered, priorities, source: "local", hiveRanked: 0 };
-	}
-
-	return {
-		items: ordered,
-		priorities,
-		source: "hive",
-		hiveRanked,
-	};
+	return { items: ordered, priorities, source: "local" };
 }
 /** Counts per category, for the headline. */
 export function categoryTally(priorities: ReadonlyMap<string, Priority>): Record<PriorityCategory, number> {

@@ -32,9 +32,8 @@ This skill does not make ClawPatch a Review dependency, start automatic audits,
 or grant GitHub write access.
 
 Do not use it for a Review-owned pin, patch, launcher, image, or integration
-defect. Fix those here. Normal Review does not send reports to Hive Commons or
-make Hive calls; consult [`hive-read-side.md`](hive-read-side.md) only for an
-explicitly selected Hive integration issue.
+defect. Fix those here. Normal Review does not send reports to upstream services
+or make external queue calls.
 
 ## Identify the owner
 

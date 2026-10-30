@@ -149,7 +149,7 @@ function textCompletion(text) {
 
 function responseForNormalReview(body) {
 	const previous = lastTool(body) ?? lastAssistantTool(body);
-	if (previous === undefined) return functionCall("hive_workbench_trace", {});
+	if (previous === undefined) return functionCall("review_workbench_trace", {});
 	return textCompletion("ordinary Review trace completed while Luna Factory remained inactive");
 }
 

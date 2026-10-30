@@ -13,11 +13,9 @@ import {
 	type QueueMode,
 	type QueueResult,
 	type QueueScope,
-	fetchItemsByKey,
 	fetchQueue,
 	orgScope,
 } from "./github.ts";
-import { type HiveSnapshot, type HiveWorkItem, EMPTY_HIVE, fetchHive, fetchHiveKnowledge, fetchHiveMe } from "./hive.ts";
 import { type PrioritizedQueue, type Priority, isRepairRequested, itemKey, prioritize } from "./priority.ts";
 import { type LandingState, landingState } from "./landing.ts";
 import { GENERIC_WORKBENCH_POLICY, type WorkbenchPolicy } from "./policy.ts";
@@ -43,16 +41,6 @@ export interface ReviewModeOptions {
  * starts being a queue of its own, with a context window to match.
  */
 export const BATCH_LIMIT = 25;
-
-const GITHUB_PULL_URL = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)(?:[/?#]|$)/;
-
-function pullRequestKey(item: HiveWorkItem): string | undefined {
-	const direct = GITHUB_PULL_URL.exec(item.url);
-	if (direct) return `${direct[1]}#${direct[2]}`;
-	if (!item.pr || item.pr.state.toLowerCase() !== "open") return undefined;
-	const linked = GITHUB_PULL_URL.exec(item.pr.url);
-	return linked ? `${linked[1]}#${item.pr.number}` : `${item.repo}#${item.pr.number}`;
-}
 
 function canonicalSelectedKey(repo: string, number: number): string {
 	return `${repo.toLowerCase()}#${number}`;
@@ -81,21 +69,10 @@ export interface PersistedSelection {
 	repo?: string;
 	id?: number;
 	filter?: string;
-	hiveOnly?: boolean;
-	hiveLevel?: string;
 	scope?: QueueScope;
 	paused?: boolean;
 	selected?: QueueItem[];
 	selectedKeys?: string[];
-}
-
-export type WorkbenchMode = "review" | "hive";
-
-function workbenchMode(env: NodeJS.ProcessEnv): WorkbenchMode {
-	const value = (env.REVIEW_MODE)?.trim().toLowerCase();
-	if (value === undefined || value === "" || value === "review") return "review";
-	if (value === "hive") return value;
-	throw new Error(`REVIEW_MODE must be review or hive, got ${value}`);
 }
 
 export class ReviewMode {
@@ -106,9 +83,6 @@ export class ReviewMode {
 	items: QueueItem[] = [];
 	cursor = 0;
 	filter = "";
-	hiveOnly = false;
-	/** Hive triage stage the queue is drilled into; undefined is all of it. */
-	hiveLevel?: string;
 	queueError?: string;
 	queueTruncated = false;
 	fetchedAt = 0;
@@ -120,9 +94,7 @@ export class ReviewMode {
 	paused = false;
 	batchProgress?: WorkbenchBatchProgress;
 
-	hive: HiveSnapshot = EMPTY_HIVE;
 	readonly session = new SessionTrace();
-	readonly workbenchMode: WorkbenchMode;
 
 	private token?: string;
 	private fetchImpl?: typeof fetch;
@@ -131,7 +103,7 @@ export class ReviewMode {
 	private operatorPolicies = new Map<string, OperatorPolicySnapshot>();
 	private operatorLanding = new Map<string, { head: string | undefined; decision: OperatorLandingDecision }>();
 	private inflight?: AbortController;
-	private ranked: PrioritizedQueue = { items: [], priorities: new Map(), source: "local", hiveRanked: 0 };
+	private ranked: PrioritizedQueue = { items: [], priorities: new Map(), source: "local" };
 	skipRepos: Set<string>;
 
 	constructor(options: ReviewModeOptions) {
@@ -139,7 +111,6 @@ export class ReviewMode {
 		this.scope = options.scope ?? orgScope(options.org);
 		this.fetchImpl = options.fetchImpl;
 		this.env = options.env ?? process.env;
-		this.workbenchMode = workbenchMode(this.env);
 		this.policy = options.policy ?? GENERIC_WORKBENCH_POLICY;
 		const envSkip = (this.env.REVIEW_SKIP_REPOS ?? "")
 			.split(",")
@@ -161,15 +132,6 @@ export class ReviewMode {
 	scopeLabel(): string {
 		return this.scope.value || "choose scope";
 	}
-	/** Review is GitHub-only; Hive mode adds hub ordering and knowledge. */
-	isReviewMode(): boolean {
-		return this.workbenchMode === "review";
-	}
-
-	isHiveMode(): boolean {
-		return this.workbenchMode === "hive";
-	}
-
 	/** Point the queue at another organization or repository. */
 	setScope(scope: QueueScope): void {
 		this.inflight?.abort();
@@ -178,7 +140,7 @@ export class ReviewMode {
 		this.scope = scope;
 		this.cursor = 0;
 		this.items = [];
-		this.ranked = { items: [], priorities: new Map(), source: "local", hiveRanked: 0 };
+		this.ranked = { items: [], priorities: new Map(), source: "local" };
 		this.queueError = undefined;
 		this.queueTruncated = false;
 	}
@@ -233,8 +195,8 @@ export class ReviewMode {
 		return observed && observed.head === item.headSha && !observed.decision.allowed ? observed.decision.reason : undefined;
 	}
 
-	/** Which provider ordered the queue: Hive's priority, or local categories. */
-	orderSource(): "hive" | "local" {
+	/** The queue uses deterministic local attention categories. */
+	orderSource(): "local" {
 		return this.ranked.source;
 	}
 
@@ -254,10 +216,6 @@ export class ReviewMode {
 		if (changed) this.reprioritize();
 	}
 
-	hiveRankedCount(): number {
-		return this.ranked.hiveRanked;
-	}
-
 	/**
 	 * Recompute the order.
 	 *
@@ -266,61 +224,13 @@ export class ReviewMode {
 	 */
 	reprioritize(now = Date.now()): void {
 		this.ranked = prioritize(this.items, {
-			hive: this.hive,
 			now,
 			currentUserLogin: this.currentUserLogin,
 			allowWorkflowSlay: this.policy.allowWorkflowSlay,
 		});
 	}
 
-	/**
-	 * The Hive work item behind a queue row, if there is one.
-	 *
-	 * A pull request is rarely queued by Hive directly, so the link is usually
-	 * the issue it closes — the same path `hiveRankFor` ranks it through.
-	 */
-	hiveWorkFor(item: QueueItem): HiveWorkItem | undefined {
-		const keys = [itemKey(item), ...(item.closingIssues ?? [])];
-		for (const key of keys) {
-			const match = this.hive.items.find((candidate) => candidate.key === key);
-			if (match) return match;
-		}
-		return undefined;
-	}
-
-	/** Hive's triage levels, in the hub's own order, for stepping through. */
-	hiveLevels(): string[] {
-		return this.hive.triage.map((group) => group.level).filter(Boolean);
-	}
-
-	/**
-	 * Step the queue to Hive's next triage stage, then back to all of it.
-	 *
-	 * Drilling down a backlog is stage by stage — what is ready to implement is a
-	 * different sitting from what is still being triaged.
-	 */
-	cycleHiveLevel(): string | undefined {
-		const levels = this.hiveLevels();
-		if (levels.length === 0) {
-			this.hiveLevel = undefined;
-			return undefined;
-		}
-		const at = this.hiveLevel === undefined ? -1 : levels.indexOf(this.hiveLevel);
-		this.hiveLevel = at + 1 >= levels.length ? undefined : levels[at + 1];
-		this.cursor = 0;
-		return this.hiveLevel;
-	}
-
-	/** The contributor whose worker holds this item right now, if any. */
-	claimFor(item: QueueItem): string | undefined {
-		for (const key of [itemKey(item), ...(item.closingIssues ?? [])]) {
-			const who = this.hive.claims.get(key);
-			if (who) return who;
-		}
-		return undefined;
-	}
-
-	/** Items in priority order, after hive-only, level, and substring filters. */
+	/** Items in priority order, after the substring filter. */
 	visibleItems(): QueueItem[] {
 		let base = this.ranked.items.length === this.items.length ? this.ranked.items : this.items;
 		if (this.skipRepos.size > 0) {
@@ -330,13 +240,7 @@ export class ReviewMode {
 				return !this.skipRepos.has(repoLower) && !this.skipRepos.has(shortName);
 			});
 		}
-		let candidates = this.hiveOnly && this.hive.online
-			? base.filter((item) => this.priorityFor(item)?.hiveRank !== undefined)
-			: base;
-		if (this.hiveLevel !== undefined) {
-			const level = this.hiveLevel;
-			candidates = candidates.filter((item) => this.hiveWorkFor(item)?.level === level);
-		}
+		const candidates = base;
 		if (!this.filter) return candidates;
 		const needle = this.filter.toLowerCase();
 		return candidates.filter(
@@ -346,8 +250,7 @@ export class ReviewMode {
 				item.author.toLowerCase().includes(needle) ||
 				String(item.id).includes(needle) ||
 				item.labels.some((label) => label.toLowerCase().includes(needle)) ||
-				(this.priorityFor(item)?.category ?? "").includes(needle) ||
-				(this.hiveWorkFor(item)?.level ?? "").includes(needle),
+				(this.priorityFor(item)?.category ?? "").includes(needle),
 		);
 	}
 
@@ -383,11 +286,6 @@ export class ReviewMode {
 	setFilter(filter: string): void {
 		this.filter = filter;
 		this.cursor = 0;
-	}
-	toggleHiveOnly(): boolean {
-		this.hiveOnly = !this.hiveOnly;
-		this.cursor = 0;
-		return this.hiveOnly;
 	}
 	setPaused(paused: boolean): void {
 		this.paused = paused;
@@ -497,7 +395,7 @@ export class ReviewMode {
 	}
 
 	/** The evidence provider that ordered the queue. */
-	orderSource(): "hive" | "local" { return this.ranked.source; }
+	orderSource(): "local" { return this.ranked.source; }
 
 	factorySelection(action: FactoryAction): SelectedItem[] {
 		return [...this.selectedKeys].map((key) => {
@@ -518,8 +416,7 @@ export class ReviewMode {
 	}
 	/**
 	 * Items available for slay execution: chosen items first, then visible items,
-	 * falling back to unranked items in local priority order when the Hive-only
-	 * filter leaves zero items.
+	 * falling back to local priority order when filters leave zero items.
 	 */
 	slayableItems(limit = BATCH_LIMIT): QueueItem[] {
 		const chosen = this.chosenItems();
@@ -535,40 +432,8 @@ export class ReviewMode {
 
 
 	/**
-	 * Ask the hub what the project needs first.
-	 *
-	 * Read-only and never fatal: an unreachable hub leaves the queue ordered by
-	 * the local categories, with the reason kept for display.
-	 */
-	async refreshHive(signal?: AbortSignal): Promise<HiveSnapshot> {
-		if (this.isReviewMode()) {
-			this.hive = EMPTY_HIVE;
-			this.reprioritize();
-			return this.hive;
-		}
-		this.hive = await fetchHive({ env: this.env, signal, fetchImpl: this.fetchImpl });
-		this.reprioritize();
-		return this.hive;
-	}
-	/**
-	 * Programmatically fetch the authenticated Hive knowledge base markdown export.
-	 */
-	async getHiveKnowledge(signal?: AbortSignal): Promise<string | undefined> {
-		if (this.isReviewMode()) return undefined;
-		return await fetchHiveKnowledge({ env: this.env, signal, fetchImpl: this.fetchImpl });
-	}
-
-	async getHiveMe(signal?: AbortSignal): Promise<Record<string, unknown> | undefined> {
-		if (this.isReviewMode()) return undefined;
-		return await fetchHiveMe({ env: this.env, signal, fetchImpl: this.fetchImpl });
-	}
-
-	/**
 	 * Fetch the queue, cancelling any fetch still in flight.
-	 *
-	 * Two sources, one queue: a search for what is nearby, then Hive's own work
-	 * by name. The search alone cannot serve Hive — it is ordered by recency and
-	 * cut off by a ceiling, and Hive's backlog is neither recent nor small.
+	 * The GitHub search is the complete source for this scoped queue.
 	 */
 	async refreshQueue(): Promise<QueueResult> {
 		if (!this.scope.value) {
@@ -603,17 +468,12 @@ export class ReviewMode {
 				return result;
 			}
 
-			const missing = await this.missingHiveWork(result.items, options, controller);
-			if (this.inflight !== controller || controller.signal.aborted) {
-				return { items: result.items, cancelled: true, fetchedAt: result.fetchedAt };
-			}
-
 			this.queueError = result.error;
 			this.queueTruncated = result.truncated === true;
 			this.fetchedAt = result.fetchedAt;
 			if (result.viewerLogin) this.currentUserLogin = result.viewerLogin;
 			const previousKey = this.selectedKey();
-			this.items = [...result.items, ...missing];
+			this.items = result.items;
 			this.refreshOperatorPolicies();
 			this.reprioritize();
 			if (previousKey) {
@@ -627,63 +487,6 @@ export class ReviewMode {
 				this.inflight = undefined;
 			}
 		}
-	}
-
-	/**
-	 * Hive's queued work that the search did not return.
-	 *
-	 * Scope is respected: a repository-scoped queue stays that repository's, so
-	 * asking for one project never drags in another project's Hive work.
-	 */
-	private hiveKeysForMode(): string[] {
-		const keys = new Set<string>();
-		for (const item of this.hive.items) {
-			if (this.queueMode === "issues") {
-				if (!GITHUB_PULL_URL.test(item.url) && this.inScope(item.key)) keys.add(item.key);
-				continue;
-			}
-
-			const key = pullRequestKey(item);
-			if (key && this.inScope(key)) keys.add(key);
-		}
-		return [...keys];
-	}
-
-	private async missingHiveWork(
-		fetched: readonly QueueItem[],
-		options: FetchOptions,
-		controller: AbortController,
-	): Promise<QueueItem[]> {
-		if (this.inflight !== controller || controller.signal.aborted || !this.hive.online) return [];
-		const present = new Set(fetched.map(itemKey));
-		const wanted = this.hiveKeysForMode().filter((key) => !present.has(key));
-		if (wanted.length === 0) return [];
-		// Named PR reads carry expensive file/check evidence; admit only one
-		// bounded wave here so an org-wide refresh never hydrates all PR work.
-		const keys = this.queueMode === "prs" ? wanted.slice(0, BATCH_LIMIT) : wanted;
-		const result = await fetchItemsByKey(keys, this.queueMode, options);
-		if (this.inflight !== controller || controller.signal.aborted) return [];
-		return result.items;
-	}
-
-	private inScope(key: string): boolean {
-		const repo = key.slice(0, key.indexOf("#"));
-		return this.scope.kind === "org" ? repo.startsWith(`${this.scope.value}/`) : repo === this.scope.value;
-	}
-
-	/**
-	 * How much of Hive's mode-matching queue this session can actually act on.
-	 *
-	 * Issue mode covers Hive's issue keys. Pull-request mode covers direct Hive
-	 * pull requests, explicit open linked pull requests, and pull requests the
-	 * GitHub search already linked to ranked issues through closing references.
-	 */
-	hiveCoverage(): { present: number; total: number } {
-		const expected = new Set(this.hiveKeysForMode());
-		for (const item of this.items) {
-			if (this.priorityFor(item)?.source === "hive") expected.add(itemKey(item));
-		}
-		return { present: this.hiveRankedCount(), total: expected.size };
 	}
 
 
@@ -709,7 +512,7 @@ export class ReviewMode {
 
 	toPersisted(): PersistedSelection {
 		const item = this.selected();
-		return { mode: this.queueMode, repo: item?.repo, id: item?.id, filter: this.filter || undefined, hiveOnly: this.hiveOnly, hiveLevel: this.hiveLevel, scope: this.scope, paused: this.paused ? true : undefined, selectedKeys: [...this.selectedKeys], selected: [...this.selectedSnapshots.values()].map((value) => structuredClone(value)) };
+		return { mode: this.queueMode, repo: item?.repo, id: item?.id, filter: this.filter || undefined, scope: this.scope, paused: this.paused ? true : undefined, selectedKeys: [...this.selectedKeys], selected: [...this.selectedSnapshots.values()].map((value) => structuredClone(value)) };
 	}
 
 	restore(persisted: PersistedSelection | undefined): void {
@@ -717,13 +520,6 @@ export class ReviewMode {
 		if (persisted.mode === "prs" || persisted.mode === "issues") this.queueMode = persisted.mode;
 		if (persisted.scope?.value && (persisted.scope.kind === "org" || persisted.scope.kind === "repo")) this.scope = persisted.scope;
 		if (persisted.filter) this.filter = persisted.filter;
-		if (this.isHiveMode()) {
-			if (typeof persisted.hiveOnly === "boolean") this.hiveOnly = persisted.hiveOnly;
-			if (typeof persisted.hiveLevel === "string") this.hiveLevel = persisted.hiveLevel;
-		} else {
-			this.hiveOnly = false;
-			this.hiveLevel = undefined;
-		}
 		for (const key of persisted.selectedKeys ?? []) if (typeof key === "string") this.selectedKeys.add(key);
 		for (const item of persisted.selected ?? []) {
 			const key = itemKey(item);

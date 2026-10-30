@@ -41,24 +41,6 @@
       "doc_type": "policy"
     },
     {
-      "id": "hive-read-side",
-      "name": "hive-read-side",
-      "one_line_purpose": "Maintain Review's explicit optional Hive read-side integration.",
-      "entry_point": "docs/skills/hive-read-side.md",
-      "category": "ci-ops",
-      "status": "active",
-      "tags": [
-        "hive",
-        "review",
-        "read-side",
-        "configuration"
-      ],
-      "description": "Documents the optional Hive projections available only when Review mode and HIVE_HUB are explicitly selected.",
-      "version": "1.0",
-      "last_updated": "2026-09-23",
-      "doc_type": "runbook"
-    },
-    {
       "id": "image-build",
       "name": "image-build",
       "one_line_purpose": "Build and pin the single Review appliance.",
