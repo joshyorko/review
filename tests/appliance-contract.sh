@@ -116,10 +116,12 @@ fi
 
 # shellcheck disable=SC2016 # Literal Containerfile text, not shell expansions.
 require "$containerfile" \
+  'ARG OMP_MEMORYD_SHIM=0' \
   'FROM ${RUNTIME_BUILDER_IMAGE} AS build' \
   'FROM scratch' \
   'COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp' \
   'COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts' \
+  'COPY scripts/derived-omp-lifecycle-canary.ts /usr/local/libexec/derived-omp-lifecycle-canary.ts' \
   'COPY patches/omp/memory-backend-registration.patch /usr/local/share/review/omp/memory-backend-registration.patch' \
   'COPY patches/omp/clipboard-truthful.patch /usr/local/share/review/omp/clipboard-truthful.patch' \
   'COPY patches/omp/session-lifecycle.patch /usr/local/share/review/omp/session-lifecycle.patch' \
@@ -130,6 +132,7 @@ require "$containerfile" \
   'OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT="$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT"' \
   'OMP_CLIPBOARD_PATCH_SHA256="$OMP_CLIPBOARD_PATCH_SHA256"' \
   'OMP_SESSION_LIFECYCLE_PATCH_SHA256="$OMP_SESSION_LIFECYCLE_PATCH_SHA256"' \
+  'OMP_MEMORYD_SHIM="$OMP_MEMORYD_SHIM"' \
   'OMP_OUTPUT_PATH=/out/usr/bin/omp' \
   '/usr/local/libexec/build-derived-omp;' \
   'OMP_OUTPUT_PATH=/out/usr/bin/omp' \
@@ -174,7 +177,8 @@ require "$containerfile" \
   'org.opencontainers.image.version="${REVIEW_VERSION}"' \
   'org.opencontainers.image.revision="${REVIEW_REVISION}"' \
   'io.github.joshyorko.review.omp.source.commit="${OMP_SOURCE_COMMIT}"' \
-  'io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}"' \
+  'io.github.joshyorko.review.omp.memoryd.shim="${OMP_MEMORYD_SHIM}"' \
+  'OMP_MEMORYD_SHIM=${OMP_MEMORYD_SHIM}' \
   'io.github.joshyorko.review.omp.clipboard.patch.source.commit="${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT}"' \
   'io.github.joshyorko.review.omp.session.lifecycle.patch.source.commit="${OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT}"' \
   'io.github.joshyorko.review.omp.clipboard.patch.sha256="${OMP_CLIPBOARD_PATCH_SHA256}"' \
@@ -253,6 +257,7 @@ PY
 
 # shellcheck disable=SC2016 # These are literal source strings, not expansions.
 require scripts/build-derived-omp.sh \
+  'memoryd_shim="${OMP_MEMORYD_SHIM:-0}"' \
   'git ls-remote --exit-code' \
   'sha256sum --check --status' \
   'sha256sum "$OMP_CLIPBOARD_PATCH_PATH"' \
@@ -270,7 +275,11 @@ require scripts/build-derived-omp.sh \
   'bun --cwd=packages/coding-agent test test/session-exit-lifecycle.test.ts' \
   'bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"' \
   'install -D -m 0755 "$workdir/bin/bun" /usr/local/bin/bun' \
-  'bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/canary"'
+  'bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/memoryd-canary"'
+# shellcheck disable=SC2016 # These are literal source strings, not expansions.
+require scripts/build-derived-omp.sh \
+  'bun "$script_dir/derived-omp-lifecycle-canary.ts" "$candidate" "$workdir/lifecycle-canary"' \
+  'if [[ "$memoryd_shim" == 1 ]]; then'
 # shellcheck disable=SC2016 # Search for literal source text, not shell expansion.
 memory_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply "$OMP_PATCH_PATH"' scripts/build-derived-omp.sh | cut -d: -f1)"
 # shellcheck disable=SC2016 # Search for literal source text, not shell expansion.
@@ -278,6 +287,17 @@ clipboard_patch_apply_line="$(grep -nF 'git -C "$source_dir" apply "$OMP_CLIPBOA
 [[ -n "$memory_patch_apply_line" && -n "$clipboard_patch_apply_line" && "$memory_patch_apply_line" -lt "$clipboard_patch_apply_line" ]] ||
   fail "the clipboard patch must apply after the unchanged MemoryBackend patch"
 require .github/workflows/release.yml 'arch: x86_64' 'arch: aarch64'
+require .github/workflows/qualify-memoryd.yml \
+  'workflow_dispatch:' \
+  'OMP_MEMORYD_SHIM: "1"' \
+  '--build-arg OMP_MEMORYD_SHIM=1' \
+  'localhost/review-memoryd-candidate:' \
+  'This workflow does not publish, activate, or distribute the candidate.'
+forbid .github/workflows/qualify-memoryd.yml \
+  'packages: write' \
+  'podman push' \
+  'upload-artifact' \
+  'gh release create'
 
 # shellcheck disable=SC2016 # These are literal source strings, not expansions.
 require image/appliance/entrypoint.sh \
@@ -884,10 +904,11 @@ import json,sys
 document = json.load(sys.stdin)
 print(" ".join(sorted(package["name"] for package in document["packages"])))
 ')"
-for component in omp omp-source omp-memory-backend-patch omp-native-addon node bun gh rtk rtk-omp-hook rtk-license review-workbench; do
+for component in omp omp-source omp-native-addon node bun gh rtk rtk-omp-hook rtk-license review-workbench; do
   grep -qwF -- "$component" <<<"$sbom_packages" ||
     fail "the in-image SBOM does not record ${component}"
 done
+grep -qwF -- omp-memory-backend-patch <<<"$sbom_packages" && fail "the default image SBOM records the optional MemoryD patch"
 grep -qF -- headroom <<<"$sbom_packages" && fail "the in-image SBOM still records Headroom"
 
 # The deliverable itself: the shipped entrypoint, with its profile and extension

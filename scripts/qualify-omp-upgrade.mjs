@@ -52,27 +52,21 @@ function runDerivedBuild({ root, args, env }) {
 	});
 }
 
-function updateQualifiedPins(source, path, pins) {
-	let updated = source;
-	updated = replaceArg(updated, "OMP_PATCH_SHA256", pins.memorySha256, path);
-	updated = replaceArg(updated, "OMP_CLIPBOARD_PATCH_SHA256", pins.clipboardSha256, path);
-	updated = replaceArg(updated, "OMP_SESSION_LIFECYCLE_PATCH_SHA256", pins.sessionLifecycleSha256, path);
-	updated = replaceArg(updated, "OMP_CLIPBOARD_PATCH_SOURCE_COMMIT", pins.sourceCommit, path);
-	return replaceArg(updated, "OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT", pins.sourceCommit, path);
-}
-
-export async function qualifyOmpUpgrade({ root = process.cwd(), record = false, ifStale = false, runBuild = runDerivedBuild } = {}) {
+export async function qualifyOmpUpgrade({ root = process.cwd(), record = false, ifStale = false, memorydShim: requestedShim, runBuild = runDerivedBuild } = {}) {
 	const containerfilePath = join(root, "image/appliance/Containerfile");
 	const containerfile = await readFile(containerfilePath, "utf8");
 	const value = name => readArg(containerfile, name, "image/appliance/Containerfile");
 	const sourceCommit = value("OMP_SOURCE_COMMIT");
 	const version = value("OMP_VERSION");
+	const memorydShim = requestedShim ?? process.env.OMP_MEMORYD_SHIM ?? value("OMP_MEMORYD_SHIM");
+	if (memorydShim !== "0" && memorydShim !== "1") throw new Error(`invalid OMP_MEMORYD_SHIM value: ${memorydShim} (expected 0 or 1)`);
 	if (!/^\d+\.\d+\.\d+$/.test(version) || !/^[0-9a-f]{40}$/.test(sourceCommit)) {
 		throw new Error("OMP source version or commit pin is invalid");
 	}
 
+	const memoryPath = join(root, "patches/omp/memory-backend-registration.patch");
 	const paths = [
-		join(root, "patches/omp/memory-backend-registration.patch"),
+		...(memorydShim === "1" ? [memoryPath] : []),
 		localPatchPath(root, containerfile, "OMP_CLIPBOARD_PATCH_PATH"),
 		localPatchPath(root, containerfile, "OMP_SESSION_LIFECYCLE_PATCH_PATH"),
 	];
@@ -80,17 +74,13 @@ export async function qualifyOmpUpgrade({ root = process.cwd(), record = false, 
 	const pins = {
 		version,
 		sourceCommit,
-		memorySha256: hashes[0],
-		clipboardSha256: hashes[1],
-		sessionLifecycleSha256: hashes[2],
+		memorydShim,
+		...(memorydShim === "1" ? { memorySha256: hashes[0] } : {}),
+		clipboardSha256: hashes[memorydShim === "1" ? 1 : 0],
+		sessionLifecycleSha256: hashes[memorydShim === "1" ? 2 : 1],
 	};
-	const alreadyQualified =
-		value("OMP_CLIPBOARD_PATCH_SOURCE_COMMIT") === sourceCommit &&
-		value("OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT") === sourceCommit &&
-		value("OMP_PATCH_SHA256") === pins.memorySha256 &&
-		value("OMP_CLIPBOARD_PATCH_SHA256") === pins.clipboardSha256 &&
-		value("OMP_SESSION_LIFECYCLE_PATCH_SHA256") === pins.sessionLifecycleSha256;
-	if (ifStale && alreadyQualified) return { ...pins, recorded: false, skipped: true };
+	// Patch pins alone do not prove that OMP_VERSION still resolves to OMP_SOURCE_COMMIT.
+	// Until a source-tag-bound receipt exists, --if-stale always reruns qualification.
 
 	const outputRoot = await mkdtemp(join(tmpdir(), "review-omp-qualification-"));
 	const outputPath = join(outputRoot, "must-not-install-omp");
@@ -99,22 +89,25 @@ export async function qualifyOmpUpgrade({ root = process.cwd(), record = false, 
 		OMP_VERSION: version,
 		OMP_SOURCE_COMMIT: sourceCommit,
 		OMP_SOURCE_SHA256: value("OMP_SOURCE_SHA256"),
-		OMP_PATCH_SHA256: pins.memorySha256,
+		...(memorydShim === "1" ? { OMP_PATCH_SHA256: pins.memorySha256 } : {}),
 		OMP_CLIPBOARD_PATCH_SOURCE_COMMIT: value("OMP_CLIPBOARD_PATCH_SOURCE_COMMIT"),
 		OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT: value("OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT"),
 		OMP_CLIPBOARD_PATCH_SHA256: pins.clipboardSha256,
 		OMP_SESSION_LIFECYCLE_PATCH_SHA256: pins.sessionLifecycleSha256,
-		OMP_CLIPBOARD_PATCH_PATH: paths[1],
-		OMP_SESSION_LIFECYCLE_PATCH_PATH: paths[2],
+		OMP_CLIPBOARD_PATCH_PATH: paths[memorydShim === "1" ? 1 : 0],
+		OMP_SESSION_LIFECYCLE_PATCH_PATH: paths[memorydShim === "1" ? 2 : 1],
 		OMP_BUN_VERSION: value("OMP_BUN_VERSION"),
 		OMP_BUN_X86_64_SHA256: value("OMP_BUN_X86_64_SHA256"),
 		OMP_BUN_AARCH64_SHA256: value("OMP_BUN_AARCH64_SHA256"),
 		OMP_NATIVES_VERSION: value("OMP_NATIVES_VERSION"),
 		OMP_NATIVES_X86_64_SHA512: value("OMP_NATIVES_X86_64_SHA512"),
 		OMP_NATIVES_AARCH64_SHA512: value("OMP_NATIVES_AARCH64_SHA512"),
-		MEMORYD_SOURCE_COMMIT: value("MEMORYD_SOURCE_COMMIT"),
-		MEMORYD_SOURCE_SHA256: value("MEMORYD_SOURCE_SHA256"),
-		OMP_PATCH_PATH: paths[0],
+		OMP_MEMORYD_SHIM: memorydShim,
+		...(memorydShim === "1" ? {
+			MEMORYD_SOURCE_COMMIT: value("MEMORYD_SOURCE_COMMIT"),
+			MEMORYD_SOURCE_SHA256: value("MEMORYD_SOURCE_SHA256"),
+			OMP_PATCH_PATH: memoryPath,
+		} : {}),
 		OMP_OUTPUT_PATH: outputPath,
 	};
 
@@ -132,7 +125,11 @@ export async function qualifyOmpUpgrade({ root = process.cwd(), record = false, 
 			throw new Error("OMP qualification inputs changed during the build; rerun qualification");
 		}
 		if (record) {
-			const updated = updateQualifiedPins(containerfile, containerfilePath, pins);
+			let updated = replaceArg(containerfile, "OMP_CLIPBOARD_PATCH_SHA256", pins.clipboardSha256, containerfilePath);
+			updated = replaceArg(updated, "OMP_SESSION_LIFECYCLE_PATCH_SHA256", pins.sessionLifecycleSha256, containerfilePath);
+			updated = replaceArg(updated, "OMP_CLIPBOARD_PATCH_SOURCE_COMMIT", pins.sourceCommit, containerfilePath);
+			updated = replaceArg(updated, "OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT", pins.sourceCommit, containerfilePath);
+			if (memorydShim === "1") updated = replaceArg(updated, "OMP_PATCH_SHA256", pins.memorySha256, containerfilePath);
 			const temporaryRoot = await mkdtemp(join(dirname(containerfilePath), ".omp-qualification-"));
 			try {
 				const temporaryPath = join(temporaryRoot, "Containerfile");
@@ -158,12 +155,8 @@ async function main() {
 		record: args.includes("--record"),
 		ifStale: args.includes("--if-stale"),
 	});
-	if (result.skipped) {
-		process.stdout.write(`OMP ${result.version} patch pins already match source ${result.sourceCommit}; qualification skipped.\n`);
-		return;
-	}
 	process.stdout.write(
-		`OMP ${result.version} patch qualification passed for ${result.sourceCommit}: memory=${result.memorySha256}, clipboard=${result.clipboardSha256}, session-lifecycle=${result.sessionLifecycleSha256}${result.recorded ? "; provenance recorded" : ""}\n`,
+		`OMP ${result.version} patch qualification passed for ${result.sourceCommit}: memoryd-shim=${result.memorydShim}, ${result.memorydShim === "1" ? `memory=${result.memorySha256}, ` : ""}clipboard=${result.clipboardSha256}, session-lifecycle=${result.sessionLifecycleSha256}${result.recorded ? "; provenance recorded" : ""}\n`,
 	);
 }
 

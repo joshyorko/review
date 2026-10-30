@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 const sourceCheckout = process.env.REVIEW_OMP_SOURCE;
 const cachedArchive = process.env.ISSUE140_OMP_ARCHIVE;
 const qualificationMode = process.env.REVIEW_OMP_PATCH_QUALIFICATION === "1";
+const memorydShim = process.env.OMP_MEMORYD_SHIM ?? "0";
+assert.ok(memorydShim === "0" || memorydShim === "1", "OMP_MEMORYD_SHIM must be 0 or 1");
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const containerfile = await readFile(path.join(repoRoot, "image/appliance/Containerfile"), "utf8");
 function pinnedArg(name) {
@@ -20,7 +22,6 @@ function pinnedArg(name) {
 
 const expectedArchiveSha256 = pinnedArg("OMP_SOURCE_SHA256");
 const expectedSourceCommit = pinnedArg("OMP_SOURCE_COMMIT");
-const expectedMemoryPatchSha256 = pinnedArg("OMP_PATCH_SHA256");
 const expectedPatchSha256 = pinnedArg("OMP_CLIPBOARD_PATCH_SHA256");
 const expectedOmpVersion = pinnedArg("OMP_VERSION");
 const memoryPatchPath = path.join(repoRoot, "patches/omp/memory-backend-registration.patch");
@@ -36,12 +37,12 @@ if (!qualificationMode) {
 assert.ok(!(sourceCheckout && cachedArchive), "set REVIEW_OMP_SOURCE or ISSUE140_OMP_ARCHIVE, not both");
 const patch = await readFile(patchPath);
 const actualPatchSha256 = createHash("sha256").update(patch).digest("hex");
-const memoryPatchBytes = await readFile(memoryPatchPath);
-const actualMemoryPatchSha256 = createHash("sha256").update(memoryPatchBytes).digest("hex");
-const memoryPatch = memoryPatchBytes.toString("utf8");
+const memoryPatchBytes = memorydShim === "1" ? await readFile(memoryPatchPath) : undefined;
+const actualMemoryPatchSha256 = memoryPatchBytes && createHash("sha256").update(memoryPatchBytes).digest("hex");
+const memoryPatch = memoryPatchBytes?.toString("utf8") ?? "";
 if (!qualificationMode) {
 	assert.equal(actualPatchSha256, expectedPatchSha256, "OMP clipboard patch pin");
-	assert.equal(actualMemoryPatchSha256, expectedMemoryPatchSha256, "OMP MemoryBackend patch pin");
+	if (memorydShim === "1") assert.equal(actualMemoryPatchSha256, pinnedArg("OMP_PATCH_SHA256"), "OMP MemoryBackend patch pin");
 }
 
 const tempRoot = await mkdtemp(path.join(tmpdir(), "review-issue-140-omp-"));
@@ -54,7 +55,7 @@ assert.ok(freeBytes >= 128 * 1024 * 1024, `need at least 128 MiB free in the tem
 
 const patchFiles = source => [...source.matchAll(/^--- a\/(\S+)$/gm)].map((match) => match[1]);
 const sourceMembers = [...new Set([
-	...patchFiles(memoryPatch),
+	...(memorydShim === "1" ? patchFiles(memoryPatch) : []),
 	...patchFiles(patch.toString("utf8")),
 	"packages/coding-agent/package.json",
 	"packages/coding-agent/src/session/session-dump-format.ts",
@@ -105,10 +106,12 @@ assert.equal(sourcePackage.version, expectedOmpVersion, "OMP source package vers
 const initialize = spawnSync("git", ["-C", sourceRoot, "init", "-q"], { encoding: "utf8" });
 assert.equal(initialize.status, 0, `initialize temporary patch target: ${initialize.stderr}`);
 
-const applyMemory = spawnSync("git", ["-C", sourceRoot, "apply", "--check", memoryPatchPath], { encoding: "utf8" });
-assert.equal(applyMemory.status, 0, `check OMP MemoryBackend patch: ${applyMemory.stderr}`);
-const installMemory = spawnSync("git", ["-C", sourceRoot, "apply", memoryPatchPath], { encoding: "utf8" });
-assert.equal(installMemory.status, 0, `apply OMP MemoryBackend patch: ${installMemory.stderr}`);
+if (memorydShim === "1") {
+	const applyMemory = spawnSync("git", ["-C", sourceRoot, "apply", "--check", memoryPatchPath], { encoding: "utf8" });
+	assert.equal(applyMemory.status, 0, `check OMP MemoryBackend patch: ${applyMemory.stderr}`);
+	const installMemory = spawnSync("git", ["-C", sourceRoot, "apply", memoryPatchPath], { encoding: "utf8" });
+	assert.equal(installMemory.status, 0, `apply OMP MemoryBackend patch: ${installMemory.stderr}`);
+}
 if (process.env.ISSUE140_APPLY_PATCH !== "0") {
 	const applyClipboard = spawnSync("git", ["-C", sourceRoot, "apply", "--check", patchPath], { encoding: "utf8" });
 	assert.equal(applyClipboard.status, 0, `check OMP clipboard patch after MemoryBackend: ${applyClipboard.stderr}`);

@@ -26,6 +26,7 @@ ARG OMP_NATIVES_X86_64_SHA512=01e8683fd285a181c03eb43eaf2861a66de89f08857bb1640a
 ARG OMP_NATIVES_AARCH64_SHA512=a95f44f1e857880b07df61220512043deddd88f73c2feba3d11e4ee11d6b0a9c96bd383b412f04c65c4683fac48223d61214cf6e34de4201e0903d726768342a
 ARG MEMORYD_SOURCE_COMMIT=e7f8d431797973afbdf4d0530aa14a25f43acf35
 ARG MEMORYD_SOURCE_SHA256=155ec09537e941e4c71a65b738650b0419ae86f12cc86e28761d10553627d692
+ARG OMP_MEMORYD_SHIM=0
 ARG TYPESAFE_VERSION=0.13.0
 ARG TYPESAFE_SHA256=0c354e5dc4e9fc12e18e624bfb2da38f0ceaf1b7fa79c7acc06346766b2e1744
 ARG TYPESAFE_SDK_VERSION=0.7.0
@@ -96,6 +97,7 @@ ARG OMP_NATIVES_X86_64_SHA512
 ARG OMP_NATIVES_AARCH64_SHA512
 ARG MEMORYD_SOURCE_COMMIT
 ARG MEMORYD_SOURCE_SHA256
+ARG OMP_MEMORYD_SHIM
 ARG TYPESAFE_VERSION
 ARG TYPESAFE_SHA256
 ARG TYPESAFE_SDK_VERSION
@@ -135,6 +137,7 @@ RUN set -eu; \
 # build input is checked before the derived executable is installed.
 COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp
 COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts
+COPY scripts/derived-omp-lifecycle-canary.ts /usr/local/libexec/derived-omp-lifecycle-canary.ts
 COPY patches/omp/memory-backend-registration.patch /usr/local/share/review/omp/memory-backend-registration.patch
 COPY patches/omp/clipboard-truthful.patch /usr/local/share/review/omp/clipboard-truthful.patch
 COPY patches/omp/session-lifecycle.patch /usr/local/share/review/omp/session-lifecycle.patch
@@ -158,6 +161,7 @@ RUN set -eu; \
     OMP_NATIVES_AARCH64_SHA512="$OMP_NATIVES_AARCH64_SHA512" \
     MEMORYD_SOURCE_COMMIT="$MEMORYD_SOURCE_COMMIT" \
     MEMORYD_SOURCE_SHA256="$MEMORYD_SOURCE_SHA256" \
+    OMP_MEMORYD_SHIM="$OMP_MEMORYD_SHIM" \
     OMP_PATCH_PATH=/usr/local/share/review/omp/memory-backend-registration.patch \
     OMP_OUTPUT_PATH=/out/usr/bin/omp \
     /usr/local/libexec/build-derived-omp; \
@@ -306,7 +310,8 @@ RUN arch="$(uname -m)"; \
       --omp-sha256 "$(cat /out/usr/share/review/omp-derived-sha256)" \
       --omp-source-commit "$OMP_SOURCE_COMMIT" \
       --omp-source-sha256 "$OMP_SOURCE_SHA256" \
-      --omp-patch-sha256 "$OMP_PATCH_SHA256" \
+      --omp-memoryd-shim "$OMP_MEMORYD_SHIM" \
+      --omp-memoryd-patch-sha256 "$OMP_PATCH_SHA256" \
       --omp-clipboard-patch-source-commit "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" \
       --omp-session-lifecycle-patch-source-commit "$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT" \
       --omp-clipboard-patch-sha256 "$OMP_CLIPBOARD_PATCH_SHA256" \
@@ -385,7 +390,7 @@ ARG REVIEW_REVISION
 ARG RUNTIME_BUILDER_IMAGE
 ARG OMP_VERSION
 ARG OMP_SOURCE_COMMIT
-ARG OMP_PATCH_SHA256
+ARG OMP_MEMORYD_SHIM
 ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT
 ARG OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT
 ARG OMP_CLIPBOARD_PATCH_SHA256
@@ -414,7 +419,8 @@ ENV HOME=/home/review \
     SHELL=/usr/bin/bash \
     TERM=xterm-256color \
     COLORTERM=truecolor \
-    REVIEW_APPLIANCE=1
+    REVIEW_APPLIANCE=1 \
+    OMP_MEMORYD_SHIM=${OMP_MEMORYD_SHIM}
 
 LABEL org.opencontainers.image.title="Review" \
       org.opencontainers.image.description="GitHub Review workbench for OMP, packaged with Luna Factory." \
@@ -431,7 +437,7 @@ LABEL org.opencontainers.image.title="Review" \
       io.github.joshyorko.review.omp.source.commit="${OMP_SOURCE_COMMIT}" \
       io.github.joshyorko.review.node.version="${NODE_VERSION}" \
       io.github.joshyorko.review.bun.version="${OMP_BUN_VERSION}" \
-      io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}" \
+      io.github.joshyorko.review.omp.memoryd.shim="${OMP_MEMORYD_SHIM}" \
       io.github.joshyorko.review.omp.clipboard.patch.source.commit="${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT}" \
       io.github.joshyorko.review.omp.session.lifecycle.patch.source.commit="${OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT}" \
       io.github.joshyorko.review.omp.clipboard.patch.sha256="${OMP_CLIPBOARD_PATCH_SHA256}" \

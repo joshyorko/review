@@ -46,7 +46,6 @@ BASE_ARGS = {
     "--omp-sha256": OMP_X86,
     "--omp-source-commit": SOURCE_COMMIT,
     "--omp-source-sha256": OMP_SOURCE,
-    "--omp-patch-sha256": OMP_PATCH,
     "--omp-clipboard-patch-source-commit": SOURCE_COMMIT,
     "--omp-clipboard-patch-sha256": OMP_CLIPBOARD_PATCH,
     "--omp-clipboard-patch-path": "/usr/local/share/review/omp/clipboard-truthful.patch",
@@ -179,7 +178,6 @@ class PerArchitectureDigests(unittest.TestCase):
             "omp",
             "omp-session-lifecycle-patch",
             "omp-source",
-            "omp-memory-backend-patch",
             "omp-clipboard-truthfulness-patch",
             "gh",
             "rtk",
@@ -195,16 +193,17 @@ class PerArchitectureDigests(unittest.TestCase):
         self.assertEqual(found["bun"]["checksums"][0]["algorithm"], "SHA256")
         self.assertNotIn("checksums", found["review-workbench"])
 
-    def test_derived_binary_records_its_exact_source_patch_and_bun_inputs(self):
+    def test_default_derived_binary_records_only_selected_patches_and_bun_inputs(self):
         found = packages_by_name(generate(self, "x86_64"))
         comment = found["omp"]["comment"]
+        self.assertNotIn("omp-memory-backend-patch", found)
         self.assertEqual(
             found["omp-clipboard-truthfulness-patch"]["checksums"][0]["checksumValue"],
             OMP_CLIPBOARD_PATCH,
         )
         self.assertIn(SOURCE_COMMIT, comment)
         self.assertIn(OMP_SOURCE, comment)
-        self.assertIn(OMP_PATCH, comment)
+        self.assertNotIn(OMP_PATCH, comment)
         self.assertIn(OMP_CLIPBOARD_PATCH, comment)
         self.assertIn(OMP_SESSION_LIFECYCLE_PATCH, comment)
         patch = found["omp-session-lifecycle-patch"]
@@ -217,6 +216,22 @@ class PerArchitectureDigests(unittest.TestCase):
         self.assertEqual(patch["downloadLocation"], f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/session-lifecycle.patch")
         self.assertIn("Bun 1.4.2", comment)
 
+    def test_memoryd_candidate_records_memory_patch_only_when_enabled(self):
+        document = generate(
+            self,
+            "x86_64",
+            **{
+                "--omp-memoryd-shim": "1",
+                "--omp-memoryd-patch-sha256": OMP_PATCH,
+            },
+        )
+        found = packages_by_name(document)
+        self.assertEqual(
+            found["omp-memory-backend-patch"]["checksums"][0]["checksumValue"],
+            OMP_PATCH,
+        )
+        self.assertIn(OMP_PATCH, found["omp"]["comment"])
+        self.assertIn("memoryd-shim-1", document["documentNamespace"])
 
 class DigestValidation(unittest.TestCase):
     def assert_rejected(self, fragment: str, **overrides: str):
@@ -230,7 +245,10 @@ class DigestValidation(unittest.TestCase):
     def test_sha256_fields_reject_bad_case_length_and_alphabet(self):
         self.assert_rejected("omp_sha256", **{"--omp-sha256": "A" * 64})
         self.assert_rejected("omp_source_sha256", **{"--omp-source-sha256": "c" * 63})
-        self.assert_rejected("omp_patch_sha256", **{"--omp-patch-sha256": "z" * 64})
+        self.assert_rejected(
+            "omp_memoryd_patch_sha256",
+            **{"--omp-memoryd-shim": "1", "--omp-memoryd-patch-sha256": "z" * 64},
+        )
         self.assert_rejected(
             "omp_clipboard_patch_sha256",
             **{"--omp-clipboard-patch-sha256": "z" * 64},
@@ -241,6 +259,13 @@ class DigestValidation(unittest.TestCase):
         self.assert_rejected("rtk_license_sha256", **{"--rtk-license-sha256": "z" * 64})
         self.assert_rejected("node_sha256", **{"--node-sha256": "Z" * 64})
         self.assert_rejected("bun_sha256", **{"--bun-sha256": "Z" * 64})
+
+    def test_memoryd_mode_requires_a_digest_and_rejects_unknown_modes(self):
+        self.assert_rejected("omp_memoryd_patch_sha256", **{"--omp-memoryd-shim": "1"})
+        self.assert_rejected(
+            "omp_memoryd_shim must be 0 or 1",
+            **{"--omp-memoryd-shim": "true", "--omp-memoryd-patch-sha256": OMP_PATCH},
+        )
 
     def test_native_sha512_must_be_exact_hex(self):
         self.assert_rejected("omp_native_sha512", **{"--omp-native-sha512": "e" * 127})
@@ -289,10 +314,7 @@ class DownloadLocations(unittest.TestCase):
             found["omp-source"]["downloadLocation"],
             f"https://github.com/can1357/oh-my-pi/archive/{SOURCE_COMMIT}.tar.gz",
         )
-        self.assertEqual(
-            found["omp-memory-backend-patch"]["downloadLocation"],
-            f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/memory-backend-registration.patch",
-        )
+        self.assertNotIn("omp-memory-backend-patch", found)
         self.assertEqual(
             found["omp-clipboard-truthfulness-patch"]["downloadLocation"],
             f"https://github.com/joshyorko/review/blob/{REVIEW_REVISION}/patches/omp/clipboard-truthful.patch",
@@ -377,7 +399,6 @@ class PackageIdentity(unittest.TestCase):
                 "node",
                 "omp",
                 "omp-clipboard-truthfulness-patch",
-                "omp-memory-backend-patch",
                 "omp-native-addon",
                 "omp-session-lifecycle-patch",
                 "omp-source",
@@ -389,7 +410,6 @@ class PackageIdentity(unittest.TestCase):
         )
         self.assertEqual(found["omp"]["versionInfo"], "1.2.3")
         self.assertEqual(found["omp-source"]["versionInfo"], SOURCE_COMMIT)
-        self.assertEqual(found["omp-memory-backend-patch"]["versionInfo"], REVIEW_REVISION)
         self.assertEqual(found["omp-clipboard-truthfulness-patch"]["versionInfo"], SOURCE_COMMIT)
         self.assertEqual(found["omp-native-addon"]["versionInfo"], "1.2.3")
         self.assertEqual(found["gh"]["versionInfo"], "2.80.1")
@@ -420,10 +440,7 @@ class PackageIdentity(unittest.TestCase):
             locator("omp-source"),
             f"pkg:github/can1357/oh-my-pi@{SOURCE_COMMIT}?checksum=sha256:{OMP_SOURCE}",
         )
-        self.assertEqual(
-            locator("omp-memory-backend-patch"),
-            f"pkg:generic/omp-memory-backend-registration-patch@{REVIEW_REVISION}?checksum=sha256:{OMP_PATCH}",
-        )
+        self.assertNotIn("omp-memory-backend-patch", found)
         self.assertEqual(
             locator("omp-clipboard-truthfulness-patch"),
             f"pkg:generic/omp-clipboard-truthfulness-patch@{SOURCE_COMMIT}?checksum=sha256:{OMP_CLIPBOARD_PATCH}",
