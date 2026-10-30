@@ -6,6 +6,7 @@
       "just-onboarding",
       "ci-runner-contract",
       "source-snapshot-contract",
+      "ci-registry-invocation-test",
       "ci-shellcheck",
       "static-hygiene"
     ],

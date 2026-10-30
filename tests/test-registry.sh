@@ -32,34 +32,7 @@ done < <(
   grep -oE 'tests/[A-Za-z0-9_.-]+\.(sh|py|mjs|test\.ts)' "$workflow" | sed 's|^tests/||' | sort -u
 )
 
-# Dagger owns tests through verifier-approved step IDs in ci/suites.json. Resolve
-# those IDs against its closed Go step map so the registry follows the actual
-# invoked test files rather than YAML comments or descriptive labels.
-dagger_roots="$(
-  python3 - "$repo_root" <<'PY'
-import json
-import re
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-suites = json.loads((root / "ci/suites.json").read_text())
-module = (root / ".dagger/main.go").read_text()
-step_pattern = re.compile(r'"([a-z0-9-]+)"\s*:\s*"([^"\n]+)"')
-steps = dict(step_pattern.findall(module))
-roots = set()
-for profile, selected in suites["profiles"].items():
-    for step in selected:
-        command = steps.get(step)
-        if command is None:
-            raise SystemExit(f"suite profile {profile!r} names unmapped Dagger step {step!r}")
-        match = re.search(r'(?:^|\s)(tests/[A-Za-z0-9_.-]+\.(?:sh|py|mjs|test\.ts))(?:\s|$)', command)
-        if match:
-            roots.add(Path(match.group(1)).name)
-for name in sorted(roots):
-    print(name)
-PY
-)" || {
+dagger_roots="$(python3 "$repo_root/scripts/ci/dagger-registry.py" "$repo_root")" || {
   fail "Dagger suite manifest cannot be resolved through .dagger/main.go"
   exit 1
 }

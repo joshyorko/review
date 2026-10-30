@@ -59,6 +59,7 @@ func (m *ReviewCi) Check(ctx context.Context, source *dagger.Directory, profile 
 // In particular, ci/suites.json is data and cannot inject shell text.
 var supportedSteps = map[string]string{
 	"ci-runner-contract":      "bash tests/ci-runner-contract.sh",
+	"ci-registry-invocation-test": "python3 tests/ci_manifest_registry_test.py",
 	"ci-shellcheck":           "shellcheck --exclude=SC1090 --exclude=SC2034 bin/ci tests/ci-runner-contract.sh",
 	"static-hygiene":          "SKIP=check-skill-frontmatter,generate-skills,omp-review-mode,appliance-contract pre-commit run --all-files --show-diff-on-failure",
 	"source-snapshot-contract": "python3 tests/ci_source_snapshot_test.py",
@@ -79,7 +80,7 @@ var supportedSteps = map[string]string{
 }
 
 var requiredProfiles = map[string][]string{
-	"contract": {"check-commit-message", "just-onboarding", "ci-runner-contract", "source-snapshot-contract", "ci-shellcheck", "static-hygiene"},
+	"contract": {"check-commit-message", "just-onboarding", "ci-runner-contract", "source-snapshot-contract", "ci-registry-invocation-test", "ci-shellcheck", "static-hygiene"},
 	"portable": {"skill-frontmatter", "generate-skills", "test-registry", "check-commit-message", "omp-review-mode", "just-onboarding", "appliance-contract", "package-review-contract", "package-oci-contract", "appliance-sbom-contract", "version-derivation", "update-omp-pins", "update-derived-pins", "luna-factory", "static-hygiene"},
 }
 
