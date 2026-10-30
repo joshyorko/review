@@ -26,5 +26,5 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         with:
           version: '0.21.11'
-          verb: run
-          args: ./bin/ci --profile pr-title --title "$PR_TITLE"
+          verb: call
+          args: pr-title --title "$PR_TITLE"

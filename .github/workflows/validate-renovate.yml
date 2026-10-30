@@ -18,10 +18,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
 
-      - name: Run Renovate configuration validation
+      - name: Install pinned Dagger CLI
         uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
           version: '0.21.11'
-          verb: run
-          args: ./bin/ci --profile portable
+
+      - name: Run Renovate configuration validation
+        run: ./bin/ci --profile portable

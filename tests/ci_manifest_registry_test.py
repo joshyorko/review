@@ -16,6 +16,24 @@ ACTION = f"dagger/dagger-for-github@{'a' * 40}"
 
 
 class DaggerRegistryTest(unittest.TestCase):
+    def test_shared_cli_is_not_wrapped_in_a_dagger_run_session(self) -> None:
+        root = MODULE_PATH.parents[2]
+        for workflow in (root / ".github/workflows").glob("*.yml"):
+            for block in dagger_registry._step_blocks(workflow.read_text()):
+                if "dagger/dagger-for-github@" not in block:
+                    continue
+                self.assertFalse(
+                    "verb: run" in block and "bin/ci" in block,
+                    f"{workflow.name}: bin/ci starts its own Dagger client",
+                )
+
+    def test_title_client_contract_runs_outside_the_engine(self) -> None:
+        workflow = (MODULE_PATH.parents[2] / ".github/workflows/validate.yml").read_text()
+        self.assertTrue(
+            "run: bash tests/ci_pr_title_contract.sh" in workflow,
+            "the title integration test needs the host Dagger client",
+        )
+
     def test_only_workflow_invoked_profiles_contribute_test_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

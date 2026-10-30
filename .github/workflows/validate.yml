@@ -38,6 +38,8 @@ jobs:
           version: '0.21.11'
           verb: call
           args: contract --source=${{ runner.temp }}/review-ci-source
+      - name: Verify Dagger title client contract
+        run: bash tests/ci_pr_title_contract.sh
       - name: Verify explicitly dispatched release pull request
         if: github.event_name == 'workflow_dispatch'
         env:
