@@ -59,6 +59,7 @@ class PathPlanTest(unittest.TestCase):
             (root / ".dagger/main.go").write_text("pipeline\n")
             (root / "tests").mkdir()
             (root / "tests/luna_factory_dogfood_contract.test.ts").write_text("contract\n")
+            (root / "tests/ci_native_adapter_contract.py").write_text("portable native adapter contract\n")
 
             selected = path_plan.plan(root, "main")
 
@@ -68,6 +69,7 @@ class PathPlanTest(unittest.TestCase):
             self.assertIn("docs/guide.md", selected["changedPaths"])
             self.assertIn("docs/renamed.md", selected["changedPaths"])
             self.assertIn(".dagger/main.go", selected["changedPaths"])
+            self.assertIn("tests/ci_native_adapter_contract.py", selected["changedPaths"])
             self.assertEqual(selected["native"], "not-required")
 
     def test_native_runtime_probe_files_use_the_artifact_adapter(self) -> None:

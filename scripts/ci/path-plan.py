@@ -53,6 +53,7 @@ NATIVE_PATHS = {
     "tests/fixtures/review-factory-coload-rpc.py",
 }
 NATIVE_TEST_MARKERS = ("native", "krun", "apptainer", "sif", "coload", "runtime")
+PORTABLE_TEST_PATHS = {"tests/ci_native_adapter_contract.py"}
 APPLIANCE_ARTIFACT_PATHS = {
     "image",
     "patches",
@@ -149,6 +150,10 @@ def plan(root: Path, base: str | None, ref: str = "HEAD", require_native: bool =
     portable = False
     docs_only = bool(paths)
     for path in paths:
+        if path in PORTABLE_TEST_PATHS:
+            portable = True
+            docs_only = False
+            continue
         if _matches(path, NATIVE_PATHS) or (path.startswith("tests/") and any(marker in path.lower() for marker in NATIVE_TEST_MARKERS)):
             native = "required"
             native_paths.add(path)

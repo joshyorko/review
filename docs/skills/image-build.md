@@ -42,8 +42,10 @@ architecture-specific package proof.
 The local appliance-artifact adapter requires a clean committed source. It
 exports one Dagger OCI archive and verifies that same artifact through Podman
 and Apptainer/SIF; the Dagger function checks the snapshot tree against its
-bundled commit before building. Its job-local archive is never a publication
-input.
+bundled commit before building. Release candidates use that same Dagger-built
+archive for package/SIF assembly; only the main-bound publish job receives
+write credentials, and Skopeo must preserve the verified architecture manifest
+digest. A local pre-push archive is never a publication input.
 `just ci` runs only the bootstrap contract smoke and is not a release or
 publication gate; use the changed-path pre-push profile before release work.
 
