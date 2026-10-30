@@ -62,12 +62,12 @@ contract is demonstrably broken.
 
 1. Read the current source of the pin and its use, including the appliance
    `Containerfile`, relevant workflow, updater, and contract test as applicable.
-   Reproduce the smallest failing case at the exact dependency pin. Run the
-   dependency directly outside Review where possible; retain the command or
-   fixture and say when an independent reproduction was not possible. For
-   actions, package builds, hosted runners, or hardware/security capabilities,
-   test the specific layer that failed. Mark attribution **unconfirmed** while
-   the evidence cannot isolate an owner.
+   Reproduce the smallest failure using the actual pinned artifact/source in a
+   clean isolated environment at the failing layer. Retain the command or
+   fixture. A second platform can strengthen the result but is not required.
+   For actions, package builds, hosted runners, or hardware/security
+   capabilities, isolate that exact layer. Mark attribution **unconfirmed** if
+   the pinned artifact or owner cannot be established.
 2. Record the Review commit, dependency version and source commit or immutable
    action ref, artifact digest when available, OS/distribution, architecture,
    and runtime boundary that materially affects the result. Capture expected
@@ -80,17 +80,23 @@ contract is demonstrably broken.
    new evidence when useful; do not open a duplicate. Verify the current base
    branch, templates, disclosure route, and contribution requirements before
    preparing a patch.
-4. Prepare the smallest maintainer-readable report. State observations and
-   reproduction, not a required design. Mention Review only for concrete
-   consumer impact, with a commit permalink to its test or integration. If a
-   real upstream fix is clear and in scope, prepare a narrow upstream patch
-   with an upstream-owned regression test; leave prioritization to maintainers.
-5. Keep a downstream record when the defect affects Review. Distinguish the
-   local workaround and its removal condition, a proposed upstream patch,
-   merge, release, and **consumed-and-qualified** state. An upstream merge or
-   release alone is not proof that Review consumes the fix. Follow up on new
-   evidence, maintainer questions, release, downstream qualification, or a
-   disproven attribution; do not post timer-driven nudges.
+4. Report only after both the defect and owner are confirmed; otherwise return
+   the unconfirmed finding and the next investigation. Prepare the smallest
+   maintainer-readable report with observations and reproduction, not a
+   required design. Mention Review only for concrete consumer impact, with a
+   commit permalink to its test or integration. For a confirmed defect with a
+   feasible in-scope fix, prepare a narrow upstream patch and regression test
+   that fails before and passes after the fix. Run the target's required checks
+   and record any omissions. Leave prioritization to maintainers.
+5. If Review is affected, search for and update one deduplicated downstream
+   tracking record. Keep its owner attribution, upstream issue/PR links, exact
+   fix commit or release, Review pin change, and evidence from qualification of
+   the newly consumed artifact together. Track local workaround owner and
+   removal condition separately. Keep the record open until Review consumes
+   and qualifies the fix, or a verified local fix/no-defect reclassification
+   resolves the failure; upstream rejection alone does not resolve it. Follow
+   up on new evidence, maintainer questions, release, qualification, or
+   disproven attribution, not on a timer.
 
 ### Report shape
 
@@ -112,19 +118,28 @@ contract is demonstrably broken.
 
 ## Write and follow-through boundary
 
-Preparing a diagnosis or draft does not authorize an external write. Before
-creating or commenting on an upstream issue, PR, or local tracking issue,
-confirm that the current task authorizes that specific repository and
-operation, and follow any tool approval. Without it, leave a complete draft.
-Read the target's security policy first; never publish credentials, private
-data, or vulnerability details through a public issue. Do not assign, label,
-milestone, merge, or approve on behalf of upstream maintainers.
+An explicit task or report-skill invocation that requests a report or focused
+PR to a named repository authorizes that scoped write; do not ask again when
+authorization already covers it. Loading this skill or asking only for
+diagnosis does not authorize a write. Submit when the scoped authorization is
+present; otherwise return the finished report or patch as a draft. Follow any
+tool approval. Read the target's security policy first; never publish
+credentials, private data, or vulnerability details through a public issue.
+Do not assign, label, milestone, merge, or approve on behalf of upstream
+maintainers.
 
 Keep the status explicit: **unconfirmed**, **Review-owned**, **reported**,
 **patch proposed**, **merged**, **released**, **consumed-and-qualified**, or
 **not upstream**. When a temporary local workaround exists, name its owner,
 tests, and removal condition. Do not silently make a permanent compatibility
 fork or call a merged upstream change fixed downstream.
+
+## Final handoff
+
+State the owner and attribution; upstream issue/PR or why the finished draft
+was not sent; the single downstream tracking record; tests and results; the
+current report/fix/consumption state; and the next gate, usually a pin update
+and qualification of the consumed artifact.
 
 ## Verification
 
