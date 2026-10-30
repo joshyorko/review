@@ -27,6 +27,11 @@ class ReleaseVersionTest(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), expected)
         self.assertNotEqual(self.check_version('patch', existing='v0.1.4\n').returncode, 0)
 
+    def test_unpublished_current_release_can_request_the_next_patch(self):
+        result = self.check_version('patch', current='0.1.6', existing='v0.1.5\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '0.1.7')
+
     def test_rejects_invalid_current_version(self):
         self.assertNotEqual(self.check_version('0.1.4', current='broken').returncode, 0)
 
