@@ -3,6 +3,12 @@
 Release notes for the Review appliance. New sections are drafted with git-cliff
 and reviewed in the version-bump pull request.
 
+## [0.1.8]
+
+### Bug Fixes
+
+- **review**: retain issue PR-ready ownership (#111) ([959fc99](https://github.com/joshyorko/review/commit/959fc9992d6abf8eba3d96706eadbc76d59e5591))
+
 ## [0.1.7]
 
 ### Bug Fixes
