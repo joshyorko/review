@@ -37,11 +37,7 @@ sudo apt-get install -y "apptainer:$arch"
 
 profile=/etc/apparmor.d/apptainer
 test -r "$profile" || { echo "missing upstream AppArmor profile: $profile" >&2; exit 1; }
-grep -Fq '/usr/bin/apptainer' "$profile" || {
+grep -Fq '/usr/{bin/apptainer,libexec/apptainer/bin/starter{,-suid}}' "$profile" || {
   echo "upstream AppArmor profile does not authorize the Apptainer binary" >&2
-  exit 1
-}
-grep -Fq '/usr/libexec/apptainer/bin/starter' "$profile" || {
-  echo "upstream AppArmor profile does not match the installed starter" >&2
   exit 1
 }
