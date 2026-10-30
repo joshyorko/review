@@ -12,6 +12,7 @@ SPEC = importlib.util.spec_from_file_location("dagger_registry", MODULE_PATH)
 assert SPEC and SPEC.loader
 dagger_registry = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(dagger_registry)
+ACTION = f"dagger/dagger-for-github@{'a' * 40}"
 
 
 class DaggerRegistryTest(unittest.TestCase):
@@ -22,7 +23,13 @@ class DaggerRegistryTest(unittest.TestCase):
             (root / ".dagger").mkdir()
             (root / "ci").mkdir()
             (root / ".github/workflows/validate.yml").write_text(
-                "jobs:\n  validate:\n    steps:\n      - with:\n          args: contract --source=.\n"
+                f"jobs:\n  validate:\n    steps:\n      - uses: {ACTION}\n"
+                "        with:\n          verb: call\n          args: contract --source=.\n"
+                "      - uses: unrelated/action@v1\n"
+                "        with:\n          args: portable --source=.\n"
+                f"      - uses: {ACTION}\n"
+                "        if: false\n"
+                "        with:\n          verb: call\n          args: portable --source=.\n"
             )
             (root / "ci/suites.json").write_text(
                 json.dumps(
@@ -48,11 +55,31 @@ class DaggerRegistryTest(unittest.TestCase):
             (root / ".github/workflows").mkdir(parents=True)
             (root / ".dagger").mkdir()
             (root / "ci").mkdir()
-            (root / ".github/workflows/validate.yml").write_text("  args: missing-profile --source=.\n")
+            (root / ".github/workflows/validate.yml").write_text(
+                f"jobs:\n  validate:\n    steps:\n      - uses: {ACTION}\n"
+                "        with:\n          verb: call\n          args: missing-profile --source=.\n"
+            )
             (root / "ci/suites.json").write_text('{"profiles":{}}')
             (root / ".dagger/main.go").write_text("")
 
             with self.assertRaisesRegex(dagger_registry.RegistryError, "missing or empty"):
+                dagger_registry.dagger_test_roots(root)
+
+    def test_fails_closed_for_conditional_dagger_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / ".dagger").mkdir()
+            (root / "ci").mkdir()
+            (root / ".github/workflows/validate.yml").write_text(
+                f"jobs:\n  validate:\n    steps:\n      - uses: {ACTION}\n"
+                "        if: github.event_name == 'pull_request'\n"
+                "        with:\n          verb: call\n          args: contract --source=.\n"
+            )
+            (root / "ci/suites.json").write_text('{"profiles":{"contract":["contract-test"]}}')
+            (root / ".dagger/main.go").write_text('\t"contract-test": "python3 tests/contract_test.py",\n')
+
+            with self.assertRaisesRegex(dagger_registry.RegistryError, "conditional Dagger"):
                 dagger_registry.dagger_test_roots(root)
 
 

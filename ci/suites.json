@@ -11,6 +11,7 @@
       "static-hygiene"
     ],
     "portable": [
+      "static-hygiene",
       "skill-frontmatter",
       "generate-skills",
       "test-registry",
@@ -19,13 +20,19 @@
       "just-onboarding",
       "appliance-contract",
       "package-review-contract",
+      "release-version",
+      "review-changelog",
       "package-oci-contract",
       "appliance-sbom-contract",
       "version-derivation",
       "update-omp-pins",
+      "qualify-omp-upgrade-tests",
       "update-derived-pins",
       "luna-factory",
-      "static-hygiene"
+      "luna-dogfood-contract",
+      "sdk-types",
+      "omp-source-regressions",
+      "renovate-config"
     ]
   }
 }

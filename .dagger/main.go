@@ -71,17 +71,24 @@ var supportedSteps = map[string]string{
 	"just-onboarding":          "bash tests/just-onboarding.sh",
 	"appliance-contract":       "bash tests/appliance-contract.sh",
 	"package-review-contract":  "python3 tests/package_review_contract.py",
+	"release-version":           "python3 tests/release_version_test.py",
+	"review-changelog":           "bash scripts/ci/run-review-changelog.sh",
 	"package-oci-contract":     "python3 tests/package_oci_contract.py",
 	"appliance-sbom-contract":  "python3 tests/appliance_sbom_contract.py",
 	"version-derivation":       "bash tests/version-derivation.sh",
 	"update-omp-pins":          "node --test tests/update-omp-pins.test.mjs",
+	"qualify-omp-upgrade-tests": "node --test tests/qualify-omp-upgrade.test.mjs",
 	"update-derived-pins":      "node --test tests/update-derived-pins.test.mjs",
 	"luna-factory":             "node --test tests/luna_factory.test.ts",
+	"luna-dogfood-contract":    "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/luna_factory_dogfood_contract.test.ts",
+	"sdk-types":                "bash scripts/ci/run-sdk-type-checks.sh",
+	"omp-source-regressions":   "bash scripts/ci/run-omp-source-regressions.sh",
+	"renovate-config":          "@renovate-validator",
 }
 
 var requiredProfiles = map[string][]string{
 	"contract": {"check-commit-message", "just-onboarding", "ci-runner-contract", "source-snapshot-contract", "ci-registry-invocation-test", "ci-shellcheck", "static-hygiene"},
-	"portable": {"skill-frontmatter", "generate-skills", "test-registry", "check-commit-message", "omp-review-mode", "just-onboarding", "appliance-contract", "package-review-contract", "package-oci-contract", "appliance-sbom-contract", "version-derivation", "update-omp-pins", "update-derived-pins", "luna-factory", "static-hygiene"},
+	"portable": {"static-hygiene", "skill-frontmatter", "generate-skills", "test-registry", "check-commit-message", "omp-review-mode", "just-onboarding", "appliance-contract", "package-review-contract", "release-version", "review-changelog", "package-oci-contract", "appliance-sbom-contract", "version-derivation", "update-omp-pins", "qualify-omp-upgrade-tests", "update-derived-pins", "luna-factory", "luna-dogfood-contract", "sdk-types", "omp-source-regressions", "renovate-config"},
 }
 
 func run(ctx context.Context, source *dagger.Directory, commands []string) (string, error) {
@@ -103,12 +110,63 @@ func run(ctx context.Context, source *dagger.Directory, commands []string) (stri
 		WithUser("node").
 		WithWorkdir("/src").
 		WithExec([]string{"bash", "-lc", "if [ -f .ci-history.bundle ]; then git clone -q --bare .ci-history.bundle .git && git --git-dir=.git config core.bare false && git --git-dir=.git config core.worktree /src && git reset --mixed HEAD >/dev/null && rm .ci-history.bundle && git add -A && if [ -d .agents/skills/review-ci ]; then git add -f .agents/skills/review-ci; fi; fi"})
+	var extraOutput strings.Builder
 	for _, command := range commands {
+		if command == "@renovate-validator" {
+			output, err := runRenovate(ctx, source)
+			if err != nil {
+				return output, err
+			}
+			extraOutput.WriteString(output)
+			continue
+		}
 		container = container.WithExec([]string{"bash", "-lc", "set -euo pipefail; " + command})
 	}
 	output, err := container.Stdout(ctx)
 	if err != nil {
 		return output, fmt.Errorf("verification failed: %w\n%s", err, strings.TrimSpace(output))
 	}
-	return output, nil
+	return extraOutput.String() + output, nil
+}
+
+func runRenovate(ctx context.Context, source *dagger.Directory) (string, error) {
+	toolchainsJSON, err := source.File("ci/toolchains.json").Contents(ctx)
+	if err != nil {
+		return "", fmt.Errorf("read ci/toolchains.json: %w", err)
+	}
+	var toolchains struct {
+		Verification struct {
+			RenovateNodeImage string `json:"renovateNodeImage"`
+			Renovate          string `json:"renovate"`
+			RenovateRe2       string `json:"renovateRe2"`
+		} `json:"verification"`
+	}
+	if err := json.Unmarshal([]byte(toolchainsJSON), &toolchains); err != nil {
+		return "", fmt.Errorf("parse ci/toolchains.json: %w", err)
+	}
+	if toolchains.Verification.RenovateNodeImage != "node:24.15.0-bookworm-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d" || toolchains.Verification.Renovate != "44.181.2" || toolchains.Verification.RenovateRe2 != "1.27.0" {
+		return "", fmt.Errorf("Renovate toolchain pins do not match the reviewed runner contract")
+	}
+	packageJSON, err := json.Marshal(map[string]any{
+		"private": true,
+		"allowScripts": map[string]bool{"re2": true},
+		"dependencies": map[string]string{
+			"renovate": toolchains.Verification.Renovate,
+			"re2":      toolchains.Verification.RenovateRe2,
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode Renovate toolchain: %w", err)
+	}
+	return dag.Container().
+		From(toolchains.Verification.RenovateNodeImage).
+		WithExec([]string{"mkdir", "-p", "/tooling"}).
+		WithExec([]string{"node", "-e", "require('fs').writeFileSync('/tooling/package.json', process.argv[1])", string(packageJSON)}).
+		WithWorkdir("/tooling").
+		WithExec([]string{"npm", "install", "--no-save", "--no-package-lock", "--no-audit", "--no-fund"}).
+		WithEnvVariable("RENOVATE_NODE_MODULES", "/tooling/node_modules").
+		WithDirectory("/src", source).
+		WithWorkdir("/src").
+		WithExec([]string{"bash", "scripts/ci/run-renovate-validator.sh"}).
+		Stdout(ctx)
 }
