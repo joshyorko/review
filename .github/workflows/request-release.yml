@@ -50,11 +50,16 @@ jobs:
         run: |
           set -euo pipefail
           current="$(bash scripts/review-appliance-version.sh)"
-          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$RUNNER_TEMP/release-tags"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | [.tag_name, .draft, .prerelease] | @tsv' > "$RUNNER_TEMP/release-metadata"
+          awk -F '\t' '{ print $1 }' "$RUNNER_TEMP/release-metadata" > "$RUNNER_TEMP/release-tags"
+          awk -F '\t' '$2 == "false" && $3 == "false" { print $1 }' \
+            "$RUNNER_TEMP/release-metadata" > "$RUNNER_TEMP/published-stable-release-tags"
           git tag --list >> "$RUNNER_TEMP/release-tags"
           REQUESTED_VERSION="$(python3 scripts/validate-release-version.py "$current" "${REQUESTED_VERSION:-${REQUESTED_BUMP:-patch}}" < "$RUNNER_TEMP/release-tags")"
           export PATH="$RUNNER_TEMP/git-cliff:$PATH"
-          python3 scripts/review-changelog.py draft "$current" "$REQUESTED_VERSION" > "$RUNNER_TEMP/release-section"
+          python3 scripts/review-changelog.py draft "$current" "$REQUESTED_VERSION" \
+            "$RUNNER_TEMP/published-stable-release-tags" > "$RUNNER_TEMP/release-section"
           python3 scripts/review-changelog.py prepend "$REQUESTED_VERSION" < "$RUNNER_TEMP/release-section"
           branch="release/v$REQUESTED_VERSION"
           if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
@@ -69,6 +74,10 @@ jobs:
           git commit -m "chore: release $REQUESTED_VERSION"
           git push origin "HEAD:refs/heads/$branch"
           printf 'Bump VERSION to %s. After merge, successful main validation triggers publication.\n\n' "$REQUESTED_VERSION" > "$RUNNER_TEMP/release-body"
+          if ! grep -Fxq "v$current" "$RUNNER_TEMP/published-stable-release-tags"; then
+            printf 'Supersedes unpublished v%s; these notes include changes since the last published stable release.\n\n' \
+              "$current" >> "$RUNNER_TEMP/release-body"
+          fi
           cat "$RUNNER_TEMP/release-section" >> "$RUNNER_TEMP/release-body"
           gh pr create --base main --head "$branch" --title "chore: release $REQUESTED_VERSION" \
             --body-file "$RUNNER_TEMP/release-body"
