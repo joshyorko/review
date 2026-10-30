@@ -3045,6 +3045,88 @@ test("dashboard releases its open slot before a closed dialog finishes its actio
 	ctx.overlays[1].handleInput("q");
 });
 
+test("GitHub autoslay repairs returned pull requests before implementing issue waves", async () => {
+	let repairHead = "a".repeat(40);
+	let issueHasPullRequest = false;
+	const repairNode = () => ({
+		number: 41,
+		title: "address requested changes",
+		url: "https://github.com/projectbluefin/review/pull/41",
+		updatedAt: new Date(NOW).toISOString(),
+		isDraft: false,
+		mergeable: "MERGEABLE",
+		reviewDecision: "CHANGES_REQUESTED",
+		headRefOid: repairHead,
+		changedFiles: 1,
+		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] },
+		author: { login: "jorge" },
+		repository: { nameWithOwner: "projectbluefin/review" },
+		labels: { nodes: [] },
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] },
+	});
+	const issueNode = () => ({
+		number: 77,
+		title: "repair existing behavior",
+		url: "https://github.com/projectbluefin/review/issues/77",
+		updatedAt: new Date(NOW - 1000).toISOString(),
+		author: { login: "maintainer" },
+		repository: { nameWithOwner: "projectbluefin/review" },
+		labels: { nodes: [] },
+		closedByPullRequestsReferences: { nodes: issueHasPullRequest
+			? [{ number: 88, state: "OPEN", merged: false, repository: { nameWithOwner: "projectbluefin/review" } }]
+			: [] },
+	});
+	const fetchImpl = async (url, init) => {
+		const target = String(url);
+		if (target === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => "repo" }, json: async () => ({}) };
+		}
+		if (target.includes("/repos/")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ permissions: { push: true } }) };
+		}
+		if (!target.includes("/graphql")) {
+			return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		}
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		if (body.variables?.search !== undefined) {
+			const nodes = body.variables.search.includes("is:pr") ? [repairNode()] : [issueNode()];
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: { viewer: { login: "jorge" }, search: { pageInfo: { hasNextPage: false }, nodes } } }) };
+		}
+		const node = body.query.includes("... on PullRequest") ? repairNode() : issueNode();
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: { w0: { issueOrPullRequest: { ...node, closed: false } } } }) };
+	};
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /Repair .*projectbluefin\/review#41/);
+	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#77/);
+
+	repairHead = "b".repeat(40);
+	ctx.asyncJobs.recent = [{ id: "repair", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "repair");
+	await pi.events.get("agent_end")({}, ctx);
+	assert.equal(pi.messages.length, 2, JSON.stringify(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data));
+	assert.match(pi.messages[1], /Implement projectbluefin\/review#77/);
+	assert.match(pi.messages[1], /review_workbench_issue.*explicit.*issue.*repo/);
+	assert.match(pi.messages[1], /workflowz/);
+	assert.match(pi.messages[1], /Closes <owner\/repo>#<number>/);
+
+	issueHasPullRequest = true;
+	ctx.asyncJobs.recent = [{ id: "issue", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "issue");
+	await pi.events.get("agent_end")({}, ctx);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "complete");
+	assert.equal(batch.completedItems, 2);
+});
+
 test("host Alt-S uses issue autoslay and blocks without a submitted pull request", async () => {
 	const node = {
 		number: 77,

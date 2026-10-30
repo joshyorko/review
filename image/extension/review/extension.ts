@@ -2871,7 +2871,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			await startSlay(ctx, mode.visibleItems());
 			return;
 		}
-		await startSlay(ctx);
+		const repairs = mode.repairRequestedItems();
+		mode.toggleMode();
+		await refreshQueue(ctx);
+		await startSlay(ctx, [...repairs, ...mode.visibleItems()]);
 	};
 
 	/**

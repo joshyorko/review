@@ -17,13 +17,13 @@ This repository ships one OMP Review appliance, the GitHub-generic Review extens
 | Diagnose launch readiness | `just review-doctor` | Read-only preflight; starts no agent. |
 | Run bounded Factory work | Select Luna Factory from Review | Factory execution is opt-in and keeps its own admission, claims, receipts, and state. |
 
-Review defaults to GitHub-only mode. `REVIEW_MODE=hive` explicitly enables the optional Hive read-side integration, and `HIVE_HUB` must be explicit. Normal Review never discovers `~/.config/hive/contributor.env`, requires a Hive account, or injects Hive data into issue work.
+Review uses GitHub for its queue and current repository state. It does not discover contributor-registration files or use external queue configuration.
 
 ## Authority and execution
 
 GitHub remains authoritative for repository state and permissions. OMP owns agents, sessions, tools, tasks, and workflowz. Review agents return read-only evidence; only explicit human intent delegates a bounded mutating lifecycle. Preserve exact-head checks, live permission and ruleset checks, workflow-file safeguards, claims, and no-self-review/approval/merge boundaries.
 
-Luna Factory is packaged with Review but starts no work on load. `LUNA_FACTORY_ENABLED=1` opts into execution. Do not infer Factory admission from a visible queue item or optional Hive rank. Keep current-subject evidence, durable attempt identity, claims, and blocked/unknown reasons truthful.
+Luna Factory is packaged with Review but starts no work on load. `LUNA_FACTORY_ENABLED=1` opts into execution. Do not infer Factory admission from a visible GitHub queue item. Keep current-subject evidence, durable attempt identity, claims, and blocked/unknown reasons truthful.
 
 The appliance prefers Podman `krun` with KVM and falls back to isolated Apptainer when prerequisites are unavailable. Runs remain foreground and signal-responsive. Secrets use approved environment names only; host OMP configuration is isolated unless explicitly opted in with `REVIEW_INHERIT_OMP_CONFIG=1`.
 
