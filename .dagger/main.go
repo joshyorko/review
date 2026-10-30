@@ -170,6 +170,9 @@ var supportedSteps = map[string]string{
 	"ci-path-plan-contract":   "python3 tests/ci_path_plan_test.py",
 	"ci-registry-invocation-test": "python3 tests/ci_manifest_registry_test.py",
 	"release-dispatch-guard":      "python3 tests/release-dispatch-guard.py",
+	"release-request-plan":        "python3 tests/ci_release_request_plan_test.py",
+	"release-request-adapter":     "python3 tests/ci_release_request_test.py",
+	"agent-cli-contract":          "bash tests/ci_mcp_cli_fallback.sh",
 	"ci-shellcheck":           "shellcheck --exclude=SC1090 --exclude=SC2034 bin/ci scripts/ci/native-appliance.sh scripts/ci/check-oci-digest.sh scripts/validate-release-source.sh tests/ci-runner-contract.sh tests/release-publication-source.sh",
 	"static-hygiene":          "SKIP=check-skill-frontmatter,generate-skills,omp-review-mode,appliance-contract pre-commit run --all-files --show-diff-on-failure",
 	"source-snapshot-contract": "python3 tests/ci_source_snapshot_test.py && python3 tests/ci_appliance_subject_test.py && python3 tests/ci_native_adapter_contract.py",
@@ -182,7 +185,7 @@ var supportedSteps = map[string]string{
 	"appliance-contract":       "bash tests/appliance-contract.sh",
 	"package-review-contract":  "python3 tests/package_review_contract.py",
 	"release-version":           "python3 tests/release_version_test.py && bash tests/release-publication-source.sh",
-	"review-changelog":           "REVIEW_CI_TOOLS_DIR=/opt/review-ci-tools bash scripts/ci/run-review-changelog.sh",
+	"review-changelog":           "PATH=/opt/review-ci-tools:$PATH python3 tests/review_changelog_test.py",
 	"package-oci-contract":     "python3 tests/package_oci_contract.py",
 	"appliance-sbom-contract":  "python3 tests/appliance_sbom_contract.py",
 	"version-derivation":       "bash tests/version-derivation.sh",
@@ -197,8 +200,8 @@ var supportedSteps = map[string]string{
 }
 
 var requiredProfiles = map[string][]string{
-	"contract": {"check-commit-message", "just-onboarding", "ci-runner-contract", "ci-path-plan-contract", "source-snapshot-contract", "ci-registry-invocation-test", "ci-shellcheck", "static-hygiene"},
-	"portable": {"static-hygiene", "skill-frontmatter", "generate-skills", "test-registry", "check-commit-message", "release-dispatch-guard", "ci-path-plan-contract", "source-snapshot-contract", "omp-review-mode", "just-onboarding", "appliance-contract", "package-review-contract", "release-version", "review-changelog", "package-oci-contract", "appliance-sbom-contract", "version-derivation", "update-omp-pins", "qualify-omp-upgrade-tests", "update-derived-pins", "luna-factory", "luna-dogfood-contract", "sdk-types", "omp-source-regressions", "renovate-config"},
+	"contract": {"check-commit-message", "just-onboarding", "ci-runner-contract", "ci-path-plan-contract", "source-snapshot-contract", "ci-registry-invocation-test", "ci-shellcheck", "agent-cli-contract", "static-hygiene"},
+	"portable": {"static-hygiene", "skill-frontmatter", "generate-skills", "test-registry", "check-commit-message", "release-dispatch-guard", "release-request-plan", "release-request-adapter", "ci-path-plan-contract", "source-snapshot-contract", "omp-review-mode", "agent-cli-contract", "just-onboarding", "appliance-contract", "package-review-contract", "release-version", "review-changelog", "package-oci-contract", "appliance-sbom-contract", "version-derivation", "update-omp-pins", "qualify-omp-upgrade-tests", "update-derived-pins", "luna-factory", "luna-dogfood-contract", "sdk-types", "omp-source-regressions", "renovate-config"},
 }
 
 func run(ctx context.Context, source *dagger.Directory, commands []string) (string, error) {

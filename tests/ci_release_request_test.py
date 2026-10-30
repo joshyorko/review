@@ -37,13 +37,13 @@ class ReleaseRequestBoundaryTest(unittest.TestCase):
         self.git("config", "user.name", "Fixture")
         self.git("config", "user.email", "fixture@example.invalid")
         self.git("add", "VERSION", "CHANGELOG.md", "unrelated.txt")
-        self.git("commit", "-qm", "feat: stable baseline")
-        self.git("tag", "v0.1.5")
+        self.git("commit", "-qm", "chore: release 0.1.7")
+        self.git("tag", "v0.1.7")
         self.git("commit", "--allow-empty", "-qm", "fix: current source")
         self.source_sha = self.git("rev-parse", "HEAD").strip()
-        self.baseline_sha = self.git("rev-parse", "v0.1.5^{commit}").strip()
-        self.releases = [{"tag_name": "v0.1.5", "draft": False, "prerelease": False}]
-        self.tags = [{"name": "v0.1.5", "objectSha": self.baseline_sha, "commitSha": self.baseline_sha}]
+        self.baseline_sha = self.git("rev-parse", "v0.1.7^{commit}").strip()
+        self.releases = [{"tag_name": "v0.1.7", "draft": False, "prerelease": False}]
+        self.tags = [{"name": "v0.1.7", "objectSha": self.baseline_sha, "commitSha": self.baseline_sha}]
         self.plan = self.valid_plan()
 
     def git(self, *args):
@@ -70,8 +70,8 @@ class ReleaseRequestBoundaryTest(unittest.TestCase):
             "currentVersion": "0.1.7",
             "requestedVersion": "0.1.8",
             "plannedTag": "v0.1.8",
-            "publishedStableBaseline": {"tag": "v0.1.5", "commit": self.baseline_sha, "objectSha": self.baseline_sha},
-            "supersedesUnpublishedVersion": True,
+            "publishedStableBaseline": {"tag": "v0.1.7", "commit": self.baseline_sha, "objectSha": self.baseline_sha},
+            "supersedesUnpublishedVersion": False,
             "observed": {
                 "releaseMetadataSha256": sha(REQUEST.canonical_json(releases)),
                 "knownTagsSha256": sha(REQUEST.canonical_json(sorted(self.tags, key=lambda item: item["name"]))),
@@ -187,9 +187,12 @@ class ReleaseRequestBoundaryTest(unittest.TestCase):
 
     def test_workflow_keeps_request_logic_in_the_host_adapter(self):
         workflow = (ROOT / ".github/workflows/request-release.yml").read_text()
+        entrypoint = (ROOT / "bin/ci").read_text()
         self.assertIn("dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77", workflow)
         self.assertIn("module: .dagger/release-request", workflow)
-        self.assertIn("run: python3 scripts/ci/github-release-request --apply", workflow)
+        self.assertIn("run: bin/ci --profile release-plan --apply", workflow)
+        self.assertIn('if [[ "$profile" == "release-plan" ]]; then', entrypoint)
+        self.assertIn('request_args+=(--apply)', entrypoint)
         self.assertNotIn("gh pr create", workflow)
         self.assertNotIn("gh workflow run", workflow)
 

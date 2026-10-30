@@ -6,6 +6,7 @@ repository root:
 ```sh
 bin/ci --profile contract
 bin/ci --profile portable
+bin/ci --profile release-plan --bump patch
 ```
 
 `contract` is the fast local contract set. `portable` includes the wider
@@ -24,6 +25,10 @@ The pre-push planner selects work from the diff. A blocked native requirement
 is not portable proof. `contract` and `portable` do not prove host OCI/SIF
 execution, two-architecture release readiness, GitHub Actions success, or
 publication. State those gates separately in reviews and handoffs.
+
+The `release-plan` profile is a read-only plan by default. Use `--apply` only
+when an authorized main-branch release request should create the source change,
+pull request, and exact-head validation dispatch.
 
 Do not configure Dagger's experimental generic MCP server for this repository.
 Its generic method dispatcher does not enforce the repo-only source and

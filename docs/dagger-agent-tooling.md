@@ -6,6 +6,7 @@ Use `bin/ci` from the repository root for local verification:
 bin/ci --profile contract
 bin/ci --profile portable
 bin/ci --profile pre-push --base origin/main
+bin/ci --profile release-plan --bump patch
 ```
 
 The contract and portable profiles snapshot the current working tree on every
@@ -14,6 +15,11 @@ propagate the selected suite's exit status. A later invocation therefore sees
 edits made after an earlier run. The pre-push profile requires an explicit
 `--base`; its planner can report a native gate as blocked, which is not a green
 native result.
+The release plan reads the current committed `main` source, its Git history
+bundle, published release metadata, and remote tag object identities. It prints
+a patch plan without changing files or creating a branch. Add `--apply` only
+when you intend to create and dispatch the release request; apply is restricted
+to current `main` and rechecks source and observations before writing.
 
 The official Dagger MCP command in v0.21.11 is experimental and presents a
 generic method dispatcher. This repository does not currently ship a tested
@@ -24,6 +30,6 @@ checkout. The repository agent skill is at
 
 Do not add this development integration to
 `image/extension/review/.mcp.json`; that file configures the shipped Review
-product. Do not configure MCP in user-global Codex settings. Use `bin/ci` until
-the repository can prove a bounded method surface, fresh source per call,
-failure propagation, and denial of native execution and publication paths.
+product. Do not configure MCP in user-global Codex settings. This repository
+keeps the experimental Dagger dispatcher disabled and uses the CLI-first local
+skill.

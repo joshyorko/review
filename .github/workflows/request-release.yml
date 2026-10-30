@@ -52,4 +52,4 @@ jobs:
           GITHUB_REF: ${{ github.ref }}
           REQUESTED_BUMP: ${{ inputs.bump }}
           REQUESTED_VERSION: ${{ inputs.version }}
-        run: python3 scripts/ci/github-release-request --apply
+        run: bin/ci --profile release-plan --apply

@@ -9,6 +9,7 @@
       "source-snapshot-contract",
       "ci-registry-invocation-test",
       "ci-shellcheck",
+      "agent-cli-contract",
       "static-hygiene"
     ],
     "portable": [
@@ -18,9 +19,12 @@
       "test-registry",
       "check-commit-message",
       "release-dispatch-guard",
+      "release-request-plan",
+      "release-request-adapter",
       "ci-path-plan-contract",
       "source-snapshot-contract",
       "omp-review-mode",
+      "agent-cli-contract",
       "just-onboarding",
       "appliance-contract",
       "package-review-contract",
