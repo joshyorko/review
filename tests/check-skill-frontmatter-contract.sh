@@ -251,6 +251,53 @@ expect_fail 'scalar tags' 'tags must be a list'
 
 new_repo
 write_skill alpha-skill
+python3 - "$fake/docs/skills/alpha-skill.md" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+path.write_text(
+    text.replace(
+        "metadata:\n",
+        "resources:\n  - references/guide.md\n  - references/scenarios.json\nmetadata:\n",
+    )
+)
+PY
+expect_ok 'explicit skill resources' --write
+python3 - "$fake/docs/skills/index.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+manifest = json.loads(Path(sys.argv[1]).read_text())
+if manifest["skills"][0].get("resources") != [
+    "references/guide.md",
+    "references/scenarios.json",
+]:
+    raise SystemExit("explicit resources did not reach the generated manifest")
+PY
+
+new_repo
+write_skill alpha-skill
+python3 - "$fake/docs/skills/alpha-skill.md" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+path.write_text(text.replace("metadata:\n", "resources: [references/../../outside.md]\nmetadata:\n"))
+PY
+expect_fail 'unsafe skill resource path' \
+  'resource must be a safe references/<file>.md or .json path'
+
+new_repo
+write_skill alpha-skill
+sed -i '/^metadata:/i resources: not-a-list' "$fake/docs/skills/alpha-skill.md"
+expect_fail 'scalar resources' 'resources must be a list'
+
+new_repo
+write_skill alpha-skill
 sed -i 's/^id: .*/id: other-skill/' "$fake/docs/skills/alpha-skill.md"
 expect_fail 'id does not match stem' "does not match filename stem 'alpha-skill'"
 

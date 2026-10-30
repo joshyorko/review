@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-24",
+  "generated_at": "2026-10-30",
   "schema_version": "1.0",
   "skills": [
     {
@@ -210,6 +210,30 @@
       "version": "1.2",
       "last_updated": "2026-09-15",
       "doc_type": "reference"
+    },
+    {
+      "id": "upstream-dependency-reporting",
+      "name": "upstream-dependency-reporting",
+      "one_line_purpose": "Investigate dependency findings and carry confirmed defects through Review qualification.",
+      "entry_point": "docs/skills/upstream-dependency-reporting.md",
+      "category": "ci-ops",
+      "status": "active",
+      "tags": [
+        "upstream",
+        "dependency",
+        "clawpatch",
+        "reproducibility",
+        "reporting",
+        "follow-up"
+      ],
+      "description": "Use when explicit ClawPatch discovery is requested, a Review build, hosted action, package, or runtime exposes a suspected upstream defect, or an existing upstream report needs follow-up.",
+      "version": "1.0",
+      "last_updated": "2026-10-30",
+      "resources": [
+        "references/upstream-clawpatch-discovery.md",
+        "references/upstream-clawpatch-discovery-scenarios.json"
+      ],
+      "doc_type": "procedure"
     }
   ]
 }

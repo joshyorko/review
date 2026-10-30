@@ -92,8 +92,8 @@ already decided to do.
 architectural changes, subsystem rewrites, and opportunistic refactors. When
 an assigned task can only be completed by one of those, the deliverable is a
 written finding that says so, with the evidence — not a speculative
-implementation. This is not task selection: Hive still assigns the work, and
-the report is the completed work.
+implementation. This is not task selection: follow the human operator's
+explicit task scope, and treat the report as completed work.
 
 ## No Grandfathering
 
