@@ -1,18 +1,27 @@
 name: Validate Renovate Config
+
 on:
   pull_request:
     paths: [renovate.json]
   push:
     branches: [main]
     paths: [renovate.json]
+
 permissions:
   contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          node-version: '24.15.0'
-      - run: bash scripts/ci/run-renovate-validator.sh
+          persist-credentials: false
+
+      - name: Run Renovate configuration validation
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
+        with:
+          version: '0.21.11'
+          verb: run
+          args: ./bin/ci --profile portable
