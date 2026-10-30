@@ -3,6 +3,17 @@
 Release notes for the Review appliance. New sections are drafted with git-cliff
 and reviewed in the version-bump pull request.
 
+## [0.1.6]
+
+### Bug Fixes
+
+- **review**: restore structured workbench outcomes (#94) ([ad0a9c4](https://github.com/joshyorko/review/commit/ad0a9c40c9f3eedbd907e051ccf8de6662bb2e82))
+
+### Dependencies
+
+- **deps**: update dependency platformdirs to v4.14.0 (#92) ([761e0a6](https://github.com/joshyorko/review/commit/761e0a67dea89837bd48014ac61744292a239c84))
+- **deps**: update dependency nodeenv to v1.11.1 (#96) ([13980b3](https://github.com/joshyorko/review/commit/13980b37440ab0518bb955bb5fe1cd08f52464b6))
+
 ## [0.1.5]
 
 ### Dependencies
