@@ -3,6 +3,29 @@
 Release notes for the Review appliance. New sections are drafted with git-cliff
 and reviewed in the version-bump pull request.
 
+## [0.1.7]
+
+### Bug Fixes
+
+- **review**: restore structured workbench outcomes (#94) ([ad0a9c4](https://github.com/joshyorko/review/commit/ad0a9c40c9f3eedbd907e051ccf8de6662bb2e82))
+- make the unused MemoryD shim opt-in at build time (#98) ([5d1b5ae](https://github.com/joshyorko/review/commit/5d1b5ae2df33992b7ef02ac50e2d19b01304befa))
+- refresh OMP lifecycle patch context for 18.14 (#102) ([41704bf](https://github.com/joshyorko/review/commit/41704bfb78c566003c5b631435de2af871d4be4c))
+- **ci**: select upstream Apptainer package on Ubuntu 26 (#99) ([66d6135](https://github.com/joshyorko/review/commit/66d613524c884d430a22587abec01f346f8f3c64))
+- package manifest-declared Review skill resources (#100) ([8f684eb](https://github.com/joshyorko/review/commit/8f684ebb31f10e327c565fd848e9d1429d1d7a59))
+- **release**: draft notes from published stable ancestor (#103) ([0200480](https://github.com/joshyorko/review/commit/0200480e9972b95b3cf30be94d617ae9188f2ad0))
+- **ci**: match release PR head owner in validation guard (#107) ([1d4b63c](https://github.com/joshyorko/review/commit/1d4b63ce66b70cfb75ed4cd430981ae621641980))
+
+### Dependencies
+
+- **deps**: update dependency platformdirs to v4.14.0 (#92) ([761e0a6](https://github.com/joshyorko/review/commit/761e0a67dea89837bd48014ac61744292a239c84))
+- **deps**: update dependency nodeenv to v1.11.1 (#96) ([13980b3](https://github.com/joshyorko/review/commit/13980b37440ab0518bb955bb5fe1cd08f52464b6))
+- **deps**: update dependency node to v26 (#101) ([0907b39](https://github.com/joshyorko/review/commit/0907b39dfea7ae3f534ca0088d235c9279dc2139))
+- **deps**: update dependency can1357/oh-my-pi to v18.14.0 (#95) ([bd510f8](https://github.com/joshyorko/review/commit/bd510f804962a600f11de3bd020e68f52dafaead))
+
+### Refactoring
+
+- remove optional Hive connector (#104) ([028f37b](https://github.com/joshyorko/review/commit/028f37b91702b89690367bc212ab68da15ed447f))
+
 ## [0.1.6]
 
 ### Bug Fixes
