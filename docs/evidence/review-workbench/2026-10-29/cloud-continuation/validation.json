@@ -1,0 +1,422 @@
+{
+  "venue": "replacement managed cloud environment; not installed appliance, live model or native UI acceptance",
+  "node": "26.1.0",
+  "just": "1.59.0",
+  "python": "3.12.14",
+  "runs": [
+    {
+      "log": "logs/integrated-baseline.log.gz",
+      "uncompressed_sha256": "f3db872b948687f1302b41052934f5ca6bcdad841b1a28c7feaad4c384539f8e",
+      "exit_code": 1,
+      "command": "bash tests/omp-review-mode.sh",
+      "note": "Starting df1e45e: two earlier-diagnostic assertion failures.",
+      "tap_totals": {
+        "tests": 426,
+        "pass": 422,
+        "fail": 2,
+        "skipped": 2
+      },
+      "source_sha": "df1e45edf44ef33ec65f3f54fdd5435e02c11b38",
+      "subject_binding": "Clean starting checkout."
+    },
+    {
+      "log": "logs/pagination-red.log.gz",
+      "uncompressed_sha256": "4f63e630325cab60f4aa5892626734b004ec69bc85e34aaf2b975b7a2f477908",
+      "exit_code": 1,
+      "command": "node --test tests/review-pr-files.test.ts",
+      "note": "Expected red reproduction of missing-count and malformed-node bugs.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": null,
+      "base_sha": "df1e45edf44ef33ec65f3f54fdd5435e02c11b38",
+      "subject_binding": "Intermediate uncommitted test/repair state; no immutable full tree recorded. Diagnostic evidence only; not final qualification."
+    },
+    {
+      "log": "logs/pagination-green.log.gz",
+      "uncompressed_sha256": "04dff05a920b9b3dd640d6f89742d9c0f85d815a5797bbbc75b133f82366d215",
+      "exit_code": 0,
+      "command": "node --test --test-reporter=tap tests/review-pr-files.test.ts tests/personal_policy.test.ts",
+      "note": "Focused repaired pagination and policy tests.",
+      "tap_totals": {
+        "tests": 56,
+        "pass": 56,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": null,
+      "base_sha": "df1e45edf44ef33ec65f3f54fdd5435e02c11b38",
+      "subject_binding": "Intermediate uncommitted test/repair state; no immutable full tree recorded. Diagnostic evidence only; not final qualification."
+    },
+    {
+      "log": "logs/integrated-current.log.gz",
+      "uncompressed_sha256": "0e2ccc693b0fbfa9e7be0c1d682abbe9e71c661ade000fad6bcb275c9afcac0c",
+      "exit_code": 1,
+      "command": "bash tests/omp-review-mode.sh",
+      "note": "First repair run exposed 45 fixture failures; successful fixtures omitted requested counts. Not acceptance.",
+      "tap_totals": {
+        "tests": 333,
+        "pass": 286,
+        "fail": 45,
+        "skipped": 2
+      },
+      "source_sha": null,
+      "base_sha": "df1e45edf44ef33ec65f3f54fdd5435e02c11b38",
+      "subject_binding": "Intermediate uncommitted test/repair state; no immutable full tree recorded. Diagnostic evidence only; not final qualification."
+    },
+    {
+      "log": "logs/integrated-current2.log.gz",
+      "uncompressed_sha256": "4df5fae2a773a6dbf7f7ab94bbae3a8bb766c3faf46a51d22c51afb91637fc40",
+      "exit_code": 0,
+      "command": "bash tests/omp-review-mode.sh",
+      "note": "Integrated working tree, later committed unchanged as c5d0f1f.",
+      "tap_totals": {
+        "tests": 859,
+        "pass": 855,
+        "fail": 0,
+        "skipped": 4
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/immutable-source.log.gz",
+      "uncompressed_sha256": "de3c9e5d3efa760d5e2d1407911738098ca4c30e3721539c6bd4d72f4f65a6c7",
+      "exit_code": 1,
+      "command": "bash tests/omp-review-mode.sh",
+      "note": "Archive-only run: repository-dependent Factory test failed because the archive has no .git. Not acceptance.",
+      "tap_totals": {
+        "tests": 623,
+        "pass": 620,
+        "fail": 1,
+        "skipped": 2
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/archive-git-control.log.gz",
+      "uncompressed_sha256": "9acf8058ee783dc13e1d9d3e72e732b117501a4332318d956896b768930a251d",
+      "exit_code": 0,
+      "command": "node --test --test-reporter=tap --test-name-pattern='converge command accepts only' tests/luna_factory.test.ts",
+      "note": "Same focused test passed in exact detached Git checkout.",
+      "tap_totals": {
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/exact-source-checkout.log.gz",
+      "uncompressed_sha256": "2af1a99b806002a4da1f9b87126f7594564ffb4d48528e1377e2789d8d9e794a",
+      "exit_code": 0,
+      "command": "bash tests/omp-review-mode.sh",
+      "note": "Full clean detached Git checkout at c5d0f1f, no post-run changes.",
+      "tap_totals": {
+        "tests": 859,
+        "pass": 855,
+        "fail": 0,
+        "skipped": 4
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/collector.log.gz",
+      "uncompressed_sha256": "3485b3e845923f73a3012a6ba5daf4d33f9f3e0ea4ec3823bc55cbd52c5f1e8b",
+      "exit_code": 0,
+      "command": "python3 tests/launcher_diagnostic_collector.py",
+      "note": "22 passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/sdk.log.gz",
+      "uncompressed_sha256": "75f55c73f9d013f7b934904d101667aa98c0ccd26a986ad444d0e4f9e5c2df8f",
+      "exit_code": 0,
+      "command": "OMP_SDK_NODE_MODULES=/workspace/.review-dev/sdk/node_modules bash tests/luna-factory-sdk-types.sh",
+      "note": "Pinned SDK typecheck and 5 tests passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/package.log.gz",
+      "uncompressed_sha256": "bb3b2c3c308f11fc45fcb845087f866c1f59517684fdcbee435dfdf4284d02b1",
+      "exit_code": 0,
+      "command": "python3 tests/package_review_contract.py",
+      "note": "16 passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/release-version.log.gz",
+      "uncompressed_sha256": "ec9cd21799e2f0c9033973abbf48563c08c87afc87e90d0941aff81a9f73faec",
+      "exit_code": 0,
+      "command": "python3 tests/release_version_test.py",
+      "note": "4 passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/pinned-source-clipboard.log.gz",
+      "uncompressed_sha256": "041c1547e28f7f2765a28892d50a9c00dd55277544d3d18ca68ad2a92e2afcc3",
+      "exit_code": 0,
+      "command": "REVIEW_OMP_SOURCE=/tmp/pr94-qualification-u84t03g1/omp-source node --test tests/fixtures/issue-140-clipboard-truth.test.mjs",
+      "note": "2 passed against unchanged pinned upstream source.",
+      "tap_totals": {
+        "tests": 2,
+        "pass": 2,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note.",
+      "upstream_source_sha": "413d278a87a69b453efabf8d1fedb9940385e8c6"
+    },
+    {
+      "log": "logs/pinned-source-jobs.log.gz",
+      "uncompressed_sha256": "ab32f3b0580443c7009639d3ca73093e362e5b800be530cf8e49c6774382efc0",
+      "exit_code": 1,
+      "command": "REVIEW_OMP_SOURCE=/tmp/pr94-qualification-u84t03g1/omp-source node --test --test-name-pattern=\"packaged OMP current pin delivers and evicts\" tests/omp-review-mode.test.ts",
+      "note": "Node 26 strip-only execution refused upstream parameter properties. Not source regression evidence.",
+      "tap_totals": {
+        "tests": 2,
+        "pass": 0,
+        "fail": 2,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note.",
+      "upstream_source_sha": "413d278a87a69b453efabf8d1fedb9940385e8c6"
+    },
+    {
+      "log": "logs/pinned-source-jobs-transpiled.log.gz",
+      "uncompressed_sha256": "d3a02dc7f1fd9f7098f2fb84bc113b8ad05688a2d734bcf7ae808b1af6ff7160",
+      "exit_code": 0,
+      "command": "REVIEW_OMP_SOURCE=/tmp/pr94-qualification-u84t03g1/omp-source node --import /tmp/pr94-qualification-u84t03g1/transpile-omp.mjs --test --test-name-pattern=\"packaged OMP current pin delivers and evicts\" tests/omp-review-mode.test.ts",
+      "note": "2 passed with already-installed TypeScript 5.9.3 compilation; upstream bytes unchanged.",
+      "tap_totals": {
+        "tests": 2,
+        "pass": 2,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note.",
+      "upstream_source_sha": "413d278a87a69b453efabf8d1fedb9940385e8c6"
+    },
+    {
+      "log": "logs/check-commit-message.sh.log.gz",
+      "uncompressed_sha256": "8ff15cea0a5a489f7e7f39a7b76302e0d4ed26f8b19ce7eb48e2d0f74928fc32",
+      "exit_code": 0,
+      "command": "bash tests/check-commit-message.sh",
+      "note": "Cloud-local check passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/check-skill-frontmatter.sh.log.gz",
+      "uncompressed_sha256": "9eb89eab5b950d7d1a13dfe18cceec284e2342ea3ce14e3b6676cca380af75da",
+      "exit_code": 0,
+      "command": "bash scripts/check-skill-frontmatter.sh",
+      "note": "Cloud-local check passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/generate-skills.sh.log.gz",
+      "uncompressed_sha256": "0151d1f7eedbff96ff1a4568e0b2811fa229d67399c9775862cc51e866ce1c81",
+      "exit_code": 0,
+      "command": "bash tests/generate-skills.sh",
+      "note": "Cloud-local check passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/appliance-contract.sh.log.gz",
+      "uncompressed_sha256": "62c578419423de729ae2f99991495f0a0c2f2d80d2b330d45d97c58475e76b08",
+      "exit_code": 0,
+      "command": "bash tests/appliance-contract.sh",
+      "note": "Cloud-local check passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/version-derivation.sh.log.gz",
+      "uncompressed_sha256": "7a23630d58663652c2e168b97b678962cb0f59dc36e99f6e09b0ffe804a98565",
+      "exit_code": 0,
+      "command": "bash tests/version-derivation.sh",
+      "note": "Cloud-local check passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/test-registry.sh.log.gz",
+      "uncompressed_sha256": "968cc7562fe3099cc520260c5bb3aba737acb3521078119f88dd380f24ff7da9",
+      "exit_code": 0,
+      "command": "bash tests/test-registry.sh",
+      "note": "Cloud-local check passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/just-onboarding.sh.log.gz",
+      "uncompressed_sha256": "7145935611619f97f37e873f874ac499ae871ecfccccdd21a30744bc7c1049af",
+      "exit_code": 0,
+      "command": "bash tests/just-onboarding.sh",
+      "note": "Cloud-local check passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/readme-quickstart.sh.log.gz",
+      "uncompressed_sha256": "f621d3ba9940cfbf528e6b22c73403b462f4f6c85854853ffa3f302652b4e5f7",
+      "exit_code": 0,
+      "command": "bash tests/readme-quickstart.sh",
+      "note": "Cloud-local check passed.",
+      "tap_totals": {
+        "tests": 0,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/update-omp-pins.test.mjs.log.gz",
+      "uncompressed_sha256": "d8eae5037277d6a583b449495657176aefb03b93dafd2a9813e5a347b00d86d3",
+      "exit_code": 0,
+      "command": "node --test tests/update-omp-pins.test.mjs",
+      "note": "Cloud-local test passed.",
+      "tap_totals": {
+        "tests": 8,
+        "pass": 8,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/qualify-omp-upgrade.test.mjs.log.gz",
+      "uncompressed_sha256": "10ba6e324ba35f4bf200a1c778befe904a76a053ce1ba81798c3b7b319ece5a5",
+      "exit_code": 0,
+      "command": "node --test tests/qualify-omp-upgrade.test.mjs",
+      "note": "Cloud-local test passed.",
+      "tap_totals": {
+        "tests": 5,
+        "pass": 5,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    },
+    {
+      "log": "logs/update-derived-pins.test.mjs.log.gz",
+      "uncompressed_sha256": "d0b8c649b3beb3dc1a7bca6e3e4fc6ffcfb007b5c995ae61ff583e8d347d6013",
+      "exit_code": 0,
+      "command": "node --test tests/update-derived-pins.test.mjs",
+      "note": "Cloud-local test passed.",
+      "tap_totals": {
+        "tests": 13,
+        "pass": 13,
+        "fail": 0,
+        "skipped": 0
+      },
+      "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+      "subject_binding": "Integrated source later committed unchanged as c5d0f1f, or exact committed checkout/archive as identified in the note."
+    }
+  ],
+  "additional_checks": [
+    {
+      "command": "PRE_COMMIT_HOME=/tmp/pr94-checks/pre-commit pre-commit validate-config .pre-commit-config.yaml",
+      "exit_code": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0
+    },
+    {
+      "command": "git apply --numstat docs/evidence/review-workbench/2026-10-29/file-pagination-wip/review-pr-files.patch",
+      "exit_code": 0
+    }
+  ],
+  "native_ui": "BLOCKED; see visual-preflight.json",
+  "full_pre_commit_hooks": "NOT RUN; hook environments absent; no installation authorized",
+  "qualified_source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+  "subject_note": "Per-run identities below take precedence. Red/baseline/intermediate runs are not acceptance evidence for the qualified source."
+}

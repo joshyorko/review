@@ -1,0 +1,104 @@
+[
+  {
+    "capture": "01-baseline.png"
+  },
+  {
+    "input": "q"
+  },
+  {
+    "input": "/visual-arm-refresh-failure<ENTER>"
+  },
+  {
+    "input": "DRAFT KEEP EXACTLY - refresh notes awaiting human approval."
+  },
+  {
+    "capture": "02-draft-before.png"
+  },
+  {
+    "input": "<ALT-B>"
+  },
+  {
+    "input": "r",
+    "wait": 1
+  },
+  {
+    "capture": "03-refresh-failed.png"
+  },
+  {
+    "input": "r",
+    "wait": 1
+  },
+  {
+    "capture": "04-refresh-recovered.png"
+  },
+  {
+    "input": "r",
+    "wait": 1
+  },
+  {
+    "capture": "04b-repeat-healthy-refresh.png"
+  },
+  {
+    "input": "q"
+  },
+  {
+    "capture": "05-draft-after.png"
+  },
+  {
+    "input": "\u0015",
+    "label": "audit draft saved in actions receipt; clear only to enter read-only command"
+  },
+  {
+    "input": "/review details<ENTER>"
+  },
+  {
+    "capture": "06-resolved-details.png"
+  },
+  {
+    "input": "q"
+  },
+  {
+    "input": "/review status<ENTER>"
+  },
+  {
+    "capture": "07-status-after-recovery.png"
+  },
+  {
+    "input": "q"
+  },
+  {
+    "input": "/visual-arm-refresh-failure<ENTER>"
+  },
+  {
+    "input": "<ALT-B>"
+  },
+  {
+    "input": "r",
+    "wait": 1
+  },
+  {
+    "capture": "08-new-identical-failure.png"
+  },
+  {
+    "input": "r",
+    "wait": 1
+  },
+  {
+    "capture": "09-second-recovery.png"
+  },
+  {
+    "input": "q"
+  },
+  {
+    "input": "/review details<ENTER>"
+  },
+  {
+    "capture": "10-second-resolved-details.png"
+  },
+  {
+    "input": "q"
+  },
+  {
+    "quit": true
+  }
+]

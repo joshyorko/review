@@ -1,0 +1,25 @@
+{
+  "commit": "516b28987a492fffba6040bc3a4bbcc83817ef4c",
+  "snapshot_manifest_sha256": "ea8d92a20a4d560f965f7888e5dd8d47573ed3948c74df45b136374fe229cc1f",
+  "ui_manifest_sha256": "3d5cf1fab729763176bfca09e2b1bcff6f896bade18fa165e1f17b4563c596fc",
+  "ui_files": [
+    {
+      "path": "image/extension/review/dashboard.ts",
+      "sha256": "3b042e134920ef46036f0943c3080d8d210c5b51b447c92a8b5d57ed3b103281"
+    },
+    {
+      "path": "image/extension/review/extension.ts",
+      "sha256": "2b0ee5cae0b93e1b030e12b541e6561943c22d812e24b78885e35bc0b9b2d69d"
+    },
+    {
+      "path": "image/extension/review/notice.ts",
+      "sha256": "b8b972e9c2dd0f347f3b0b7961a77a9b609cbdb3ff82ed6e4e2588ae07777592"
+    },
+    {
+      "path": "image/extension/review/rail.ts",
+      "sha256": "e78f4fd0bd15f80fff654347f3a24c4aecf7278a1e7a8963ea66dd8809870843"
+    }
+  ],
+  "snapshot_files": 77,
+  "capture_scope": "Normal ANSI VTE only; narrow-width and remaining failure-state captures are pending."
+}

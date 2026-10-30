@@ -16,6 +16,7 @@ eval:
     freshAgents: true
 
 task:
+  structured: true
   maxConcurrency: 4
   maxRecursionDepth: 1
   maxRuntimeMs: 3600000

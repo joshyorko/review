@@ -1,0 +1,120 @@
+{
+  "source_sha": "369957ec05c9647685256627f4df37a2d647d364",
+  "full_suite": {
+    "reported_tests": 859,
+    "passed": 855,
+    "failed": 0,
+    "skipped": 4,
+    "python_tests": 43,
+    "launcher": "passed"
+  },
+  "focused_notice_and_pagination": {
+    "passed": 370,
+    "skipped": 2,
+    "failed": 0
+  },
+  "patched_omp_lifecycle": {
+    "passed": 17,
+    "failed": 0,
+    "isolated_home": true
+  },
+  "visual_flows": [
+    {
+      "flow": "recovery-100x32",
+      "source_sha": "369957ec05c9647685256627f4df37a2d647d364",
+      "screenshots": 18,
+      "target": [
+        100,
+        32
+      ],
+      "all_vte_and_pty_measurements_match": true,
+      "all_png_dimensions_match_allocation": true,
+      "fresh_home_before_spawn": true
+    },
+    {
+      "flow": "recovery-80x24",
+      "source_sha": "369957ec05c9647685256627f4df37a2d647d364",
+      "screenshots": 18,
+      "target": [
+        80,
+        24
+      ],
+      "all_vte_and_pty_measurements_match": true,
+      "all_png_dimensions_match_allocation": true,
+      "fresh_home_before_spawn": true
+    },
+    {
+      "flow": "browser-100x32",
+      "source_sha": "369957ec05c9647685256627f4df37a2d647d364",
+      "screenshots": 11,
+      "target": [
+        100,
+        32
+      ],
+      "all_vte_and_pty_measurements_match": true,
+      "all_png_dimensions_match_allocation": true,
+      "fresh_home_before_spawn": true
+    },
+    {
+      "flow": "browser-80x24",
+      "source_sha": "369957ec05c9647685256627f4df37a2d647d364",
+      "screenshots": 11,
+      "target": [
+        80,
+        24
+      ],
+      "all_vte_and_pty_measurements_match": true,
+      "all_png_dimensions_match_allocation": true,
+      "fresh_home_before_spawn": true
+    },
+    {
+      "flow": "failures-100x32",
+      "source_sha": "369957ec05c9647685256627f4df37a2d647d364",
+      "screenshots": 9,
+      "target": [
+        100,
+        32
+      ],
+      "all_vte_and_pty_measurements_match": true,
+      "all_png_dimensions_match_allocation": true,
+      "fresh_home_before_spawn": true
+    },
+    {
+      "flow": "failures-80x24",
+      "source_sha": "369957ec05c9647685256627f4df37a2d647d364",
+      "screenshots": 9,
+      "target": [
+        80,
+        24
+      ],
+      "all_vte_and_pty_measurements_match": true,
+      "all_png_dimensions_match_allocation": true,
+      "fresh_home_before_spawn": true
+    },
+    {
+      "flow": "factory-100x32",
+      "source_sha": "369957ec05c9647685256627f4df37a2d647d364",
+      "screenshots": 5,
+      "target": [
+        100,
+        32
+      ],
+      "all_vte_and_pty_measurements_match": true,
+      "all_png_dimensions_match_allocation": true,
+      "fresh_home_before_spawn": true
+    },
+    {
+      "flow": "factory-80x24",
+      "source_sha": "369957ec05c9647685256627f4df37a2d647d364",
+      "screenshots": 5,
+      "target": [
+        80,
+        24
+      ],
+      "all_vte_and_pty_measurements_match": true,
+      "all_png_dimensions_match_allocation": true,
+      "fresh_home_before_spawn": true
+    }
+  ],
+  "native_tsp": "BLOCKED - compatible renderer unavailable; ANSI captures are not TSP evidence"
+}

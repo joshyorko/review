@@ -1,0 +1,9 @@
+{"file": "00-ready-check.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "01-baseline.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "02-refresh-failed.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "03-refresh-details.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "04-refresh-retry.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "05-dashboard-failed-editor.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "06-dashboard-uncertain.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "07-dashboard-details.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}
+{"file": "08-dashboard-status.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460}

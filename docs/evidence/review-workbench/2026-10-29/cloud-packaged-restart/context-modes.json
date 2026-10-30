@@ -1,0 +1,7 @@
+{
+  "archive_source": "bd143724883888d9c19695647c86b8b824a1d9b7",
+  "extraction": "git archive <source> | tar --same-permissions -x -C <disposable-source>",
+  "file_mode": "0o664",
+  "directory_mode": "0o775",
+  "all_source_manifest_hashes_match": true
+}

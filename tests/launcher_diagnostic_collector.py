@@ -385,6 +385,15 @@ exit 0
             time.sleep(0.01)
         self.assertTrue(path.exists(), f"fixture did not reach expected state: {path.name}")
 
+    def delay_collector_trap_for_process_group_test(self, launch_bin: Path) -> None:
+        bash = launch_bin / "bash"
+        bash.write_text(
+            "#!/usr/bin/bash\n"
+            'if [[ "${1:-}" == */bin/review-diagnostic-collector ]]; then /usr/bin/sleep 0.5; fi\n'
+            'exec /usr/bin/bash "$@"\n'
+        )
+        bash.chmod(0o700)
+
     def diagnostic_report_path(self, fixture: dict[str, str]) -> Path:
         report_roots = list(Path(fixture["state_home"]).glob("review/instances/*/diagnostics"))
         report_dirs = [path for root in report_roots for path in root.glob("review-launch-diagnostic.*")]
@@ -858,10 +867,13 @@ exit 0
     @unittest.skipUnless(COLLECTOR.is_file(), "collector implementation follows this red test")
     def test_launcher_preserves_tty_stdin_and_process_group_ctrl_c_once(self) -> None:
         fixture = self.launch_fixture(run_mode="tty", event_mode="clean")
+        self.delay_collector_trap_for_process_group_test(Path(fixture["launch_bin"]))
         pid, fd = pty.fork()
         if pid == 0:
             os.execve(str(LAUNCHER), [str(LAUNCHER), "owner/repo"], fixture["env"])
         self.wait_for_file(Path(fixture["started"]))
+        report_dir = self.launcher_diagnostic_dir(fixture)
+        self.wait_for_file(report_dir / "collector.identity")
         os.write(fd, b"x\n")
         output = bytearray()
         deadline = time.monotonic() + 8.0
@@ -893,6 +905,8 @@ exit 0
         if pid == 0:
             os.execve(str(LAUNCHER), [str(LAUNCHER), "owner/repo"], ctrl_c["env"])
         self.wait_for_file(Path(ctrl_c["started"]))
+        # The test-only Bash wrapper delays the collector before its ignored-signal
+        # trap. Send Ctrl-C during that startup window and require a final receipt.
         os.write(fd, b"\x03")
         output = bytearray()
         deadline = time.monotonic() + 8.0

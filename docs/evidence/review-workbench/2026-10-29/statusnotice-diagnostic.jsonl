@@ -1,0 +1,4 @@
+{"event":"delivery-start","generation":3,"sessionId":"<redacted-session-id>","currentSession":"<redacted-session-id>","currentNotice":"warning:<redacted-detail>"}
+{"event":"delivery-error","name":"ResolveMessage","message":"Cannot find package '@oh-my-pi/pi-tui' imported from /usr/share/review/extension/extension.ts","generation":3,"sessionId":"<redacted-session-id>"}
+{"event":"delivery-start","generation":4,"sessionId":"<redacted-session-id>","currentSession":"<redacted-session-id>","currentNotice":"error:Cannot admit slay for fixture/review#42: the effective OMP task tool does not expose outputSchema and schemaMode. Enable task.structured: true in the packaged Review config, then reopen the Review session before retrying."}
+{"event":"delivery-error","name":"ResolveMessage","message":"Cannot find package '@oh-my-pi/pi-tui' imported from /usr/share/review/extension/extension.ts","generation":4,"sessionId":"<redacted-session-id>"}

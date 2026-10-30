@@ -1,0 +1,84 @@
+{
+  "source_sha": "48fbaa8a0fa6929b261c1556e03dc0ffbdd7df6e",
+  "full_suite": {
+    "passed": 859,
+    "failed": 0,
+    "skipped": 4,
+    "python_passed": 43,
+    "launcher": "passed"
+  },
+  "focused": {
+    "passed": 374,
+    "failed": 0,
+    "skipped": 2
+  },
+  "captures": [
+    {
+      "flow": "100x32",
+      "source_sha": "48fbaa8a0fa6929b261c1556e03dc0ffbdd7df6e",
+      "screenshots": 12,
+      "vte_and_pty_match": true,
+      "png_allocation_match": true,
+      "fetch_statuses": [
+        200,
+        503,
+        200,
+        200,
+        503,
+        200
+      ],
+      "notice_history_resolved": [
+        false,
+        true,
+        false,
+        true
+      ],
+      "draft_preserved_during_insertion_and_clear": true,
+      "model_handoffs": 0
+    },
+    {
+      "flow": "80x24",
+      "source_sha": "48fbaa8a0fa6929b261c1556e03dc0ffbdd7df6e",
+      "screenshots": 12,
+      "vte_and_pty_match": true,
+      "png_allocation_match": true,
+      "fetch_statuses": [
+        200,
+        503,
+        200,
+        200,
+        503,
+        200
+      ],
+      "notice_history_resolved": [
+        false,
+        true,
+        false,
+        true
+      ],
+      "draft_preserved_during_insertion_and_clear": true,
+      "model_handoffs": 0
+    }
+  ],
+  "packaged_build": {
+    "source_sha": "0a6fca9594cde7e56be4360a4670dd6865c11b27",
+    "exit_code": 1,
+    "stage": "base manifest fetch before compilation",
+    "image_created": false,
+    "restart_executed": false,
+    "reason": "HEAD pinned registry.fedoraproject.org manifest returned Forbidden; required host absent from enforced allowlist"
+  },
+  "red_receipts": {
+    "idempotent-red.log.gz": "d0178ba implementation with extra repeated-recovery assertions, expected failures",
+    "refresh-red.log.gz": "baseline94308ae implementation with new regression tests, expected failures",
+    "refresh-session-red.log.gz": "0a6fca9 implementation with new session regression, expected failure"
+  },
+  "green_receipts": {
+    "refresh-green.log.gz": "0a6fca9 focused tests",
+    "refresh-session-green.log.gz": "f9e44bd focused tests",
+    "final-full-suite.log.gz": "f9e44bd full source suite",
+    "current-full-suite.log.gz": "48fbaa8 full source suite",
+    "idempotent-green.log.gz": "48fbaa8 focused tests"
+  },
+  "native_tsp": "BLOCKED - no public official renderer download found; vendor closed beta"
+}

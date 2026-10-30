@@ -1,0 +1,174 @@
+{
+  "source_commit": "516b289e08954bbb346f68a4b5d02beaa46e88f",
+  "ui_manifest_sha256": "3d5cf1fab729763176bfca09e2b1bcff6f896f4",
+  "screenshots": [
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-pr/screenshots/01-dashboard-baseline.png",
+      "sha256": "c1bcfa1fbdcd98285faab25a91649e5ce28262b677491f6af30c81c5d9613cae",
+      "geometry": {
+        "file": "01-dashboard-baseline.png",
+        "timestamp": "2026-10-29T16:45:54Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-pr/screenshots/02-editor-draft-before.png",
+      "sha256": "ea281d35b7026e42d45504c51c3f85f74590538b3cfb722d1eb1357d1426b9a0",
+      "geometry": {
+        "file": "02-editor-draft-before.png",
+        "timestamp": "2026-10-29T16:45:58Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-pr/screenshots/03-dashboard-pr.png",
+      "sha256": "df6c290440752273c0cdaf81d04d57854bf23aecf896d708dcfba19cb67c543e",
+      "geometry": {
+        "file": "03-dashboard-pr.png",
+        "timestamp": "2026-10-29T16:46:01Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-pr/screenshots/04-reader-before-browser.png",
+      "sha256": "37a8ef42a39a0a1652065c8c9144831ff5e6779893dd77130c0597083e8ae086",
+      "geometry": {
+        "file": "04-reader-before-browser.png",
+        "timestamp": "2026-10-29T16:46:04Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-pr/screenshots/05-browser-warning-reader.png",
+      "sha256": "b5105c52db430b12667917ea9970fa97a489ca8432ba56822e37ff1a8d0fd46b",
+      "geometry": {
+        "file": "05-browser-warning-reader.png",
+        "timestamp": "2026-10-29T16:46:07Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "/tmp/review-ui-audit-20261029-TopExq/final-516b289/browser-pr/screenshots/06-editor-draft-after.png",
+      "sha256": "c93c41b7d269f50811c72f06c2eadaf0d1bbffa0494718c3137219b57934ec5c",
+      "geometry": {
+        "file": "06-editor-draft-after.png",
+        "timestamp": "2026-10-29T16:46:10Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    }
+  ]
+}

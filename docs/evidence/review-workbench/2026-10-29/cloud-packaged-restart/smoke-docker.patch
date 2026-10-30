@@ -1,0 +1,23 @@
+--- a/tests/review-factory-coload-smoke.sh
++++ b/tests/review-factory-coload-smoke.docker.sh
+@@ -25,2 +25,2 @@
+-command -v podman >/dev/null 2>&1 || {
+-  echo "review-factory-coload-smoke: podman unavailable" >&2
++command -v docker >/dev/null 2>&1 || {
++  echo "review-factory-coload-smoke: docker unavailable" >&2
+@@ -29 +29 @@
+-podman image exists "$image" || {
++docker --host=unix:///var/run/docker.sock image inspect "$image" || {
+@@ -36 +36 @@
+-version="$(podman run "${runtime_args[@]}" --rm --entrypoint /usr/bin/omp "$image" --version)"
++version="$(docker --host=unix:///var/run/docker.sock run "${runtime_args[@]}" --rm --entrypoint /usr/bin/omp "$image" --version)"
+@@ -70,2 +70,2 @@
+-      timeout --signal=TERM --kill-after=5s 30s podman run --rm --interactive --network host \
+-        --userns keep-id:uid=65532,gid=65532 "${env_args[@]}" \
++      timeout --signal=TERM --kill-after=5s 30s docker --host=unix:///var/run/docker.sock run --rm --interactive --network host \
++        --user "$(id -u):$(id -g)" "${env_args[@]}" \
+@@ -132,2 +132,2 @@
+-      timeout --signal=TERM --kill-after=5s 30s podman run --rm --interactive --network host \
+-        --userns keep-id:uid=65532,gid=65532 \
++      timeout --signal=TERM --kill-after=5s 30s docker --host=unix:///var/run/docker.sock run --rm --interactive --network host \
++        --user "$(id -u):$(id -g)" \

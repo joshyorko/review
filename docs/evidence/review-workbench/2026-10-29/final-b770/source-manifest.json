@@ -1,0 +1,188 @@
+{
+  "base": "b23b09809b3c5c36b1e6afd9b40f0d83009ea545",
+  "head": "b7703314eafca250e95233d822bdaf253e1986d6",
+  "ui_manifest_sha256": "2fc4db22002e84218055b1080448c8c257599e8242c9ad409d2fc05625e967d2",
+  "full_source_manifest_sha256": "a2b03d9fec3c9de8f0e5e0e4bba4310630b461ced46f783fc511d0880d65b9d2",
+  "files": [
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshot-manifest.json",
+      "sha256": "da7036ed470306329281afe28c015a61f3cb5a903bde184bb5b10e9955157f90"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/01-dashboard-baseline.png",
+      "sha256": "4baa7289b6fe0cb12ccec4dbb1db542eb60998c4cf696fa2a13215508d80f2ae"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/02-dashboard-group-selected.png",
+      "sha256": "db54faae4b19ce11a9608ab3d33fde08f690fe1e195f52516cbb66429cd9bb72"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/03-slay-error-editor.png",
+      "sha256": "bd271ea3a728700eb8963250b6fded5a432d9d136ea5a342ceb3122b65cb1d59"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/04-slay-error-dashboard.png",
+      "sha256": "7e3314b483d1afe953c68129d3ba0b97ffcaa3a914135e00a2d2875d4c55112f"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/05-reader-before-warning.png",
+      "sha256": "6eabfd917461aeaa5b295f689ae9e79341997f9549ddeac2ac5ff31dddf87296"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/06-warning-early.png",
+      "sha256": "b782d476a744a99b8b9138dfef993db3398a87cb77dde880dd7ff59aa8d77460"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/07-error-retained-after-warning.png",
+      "sha256": "f6db19512fc152de558714e6fdffd31ad9aedf6cade3d2f52f1c1dd02fc2d98e"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/08-error-dashboard-after-reader.png",
+      "sha256": "19bdac2b71d836aa312c334792f5b2125b270f082d5b37841f23284a643a19da"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/09-error-persists-after-info.png",
+      "sha256": "ef2e289ddb47ec4301eae66574fe197ba1116be344d24517915fe5f850a31da0"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/10-status-ack.png",
+      "sha256": "7159a65c60b9fdb5601433dfe5ece787de2d473ee104495cf3520d2b6e04c379"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/11-review-completion.png",
+      "sha256": "a62a6770fe3a816056de75480caaa9bb2ab40d8afa7727a03d002a55eee2bbd6"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/12-draft-before-refresh-error.png",
+      "sha256": "2f0735c7bb7f5c98901b2cd175b7beb2ca703917cc6203a9d473719364b01441"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/13-refresh-error-early.png",
+      "sha256": "83cbdf6f6a67cf653c5de3f01ecadb167f637bf22d753345bfe6109434da9878"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/14-refresh-error-during-draft.png",
+      "sha256": "83cbdf6f6a67cf653c5de3f01ecadb167f637bf22d753345bfe6109434da9878"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/15-draft-continued.png",
+      "sha256": "d0818be0c0f81f91f49069a6dc3813d79ff5401315dcd71d5c3f5a0567f967e3"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-01-dashboard-baseline.png",
+      "sha256": "fc6547b12e5a0aea1712c60c95b58c35c1a50735281bfbf8a1e9b9d900015974"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-02-dashboard-group-selected.png",
+      "sha256": "5318ff58614937f235d2e1de9831976162949020c3978dbca160722397b6e09c"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-03-slay-error-editor.png",
+      "sha256": "6d93841563daefb288b1821a9717088bcfbe74b88f95d2dbccc90fc577e1eec4"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-04-slay-error-dashboard.png",
+      "sha256": "d92299f5de4cdba039437632d01773a12d0623a149d96134cfd137aad2993283"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-05-reader-before-warning.png",
+      "sha256": "be40c0b782262f22642c00e125f0afd6c89fdc329c3b71351d1a330c5a9a8fce"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-06-warning-early.png",
+      "sha256": "f1065f3765992a6e1619bf8080527eca4e9c6e9b73edd6eec8458f9bba2f46fc"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-07-error-retained-after-warning.png",
+      "sha256": "8c84e0b7eec7d49048483863a306cbfd8149945dd13d849fb15323a2525a300a"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-08-error-dashboard-after-reader.png",
+      "sha256": "99e1e335d109c2c62f8df130f400475726a30a5418332e1ddd6774a4fa96fd74"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-09-error-persists-after-info.png",
+      "sha256": "dd0a5c07796fe54fab210176dc09a766772c4085fe6420d9d0b8fb27173cb3c7"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-10-status-ack.png",
+      "sha256": "8bd8b77d50cf294c605d644803d304f1835c6f1a21fc2e53442764d30f6f7461"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-11-review-completion.png",
+      "sha256": "1da4812d4dbb737ad49cdc16a9b33714895590009b6d1cac1287e94b6be51128"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-12-draft-before-refresh-error.png",
+      "sha256": "f44f7b92c1c9088e351e99714e78b3ce113d57fd27a1eb881f2e47b12f911efb"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-13-refresh-error-early.png",
+      "sha256": "0879a54e7d224bfcc034b3027ad141816a3afee28ca666f3c694fde988e2a3f3"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-14-refresh-error-during-draft.png",
+      "sha256": "0879a54e7d224bfcc034b3027ad141816a3afee28ca666f3c694fde988e2a3f3"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/screenshots/narrow-15-draft-continued.png",
+      "sha256": "ea8d82a38135805bae2c644328c2f3341e58b37caf5b121f2a449779431a592c"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/source-manifest.json",
+      "sha256": "a0b7c7af6561943b6bcc1285c0621f5bd2e683c1be0f3042ab64e5efc931b050"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/statusnotice-diagnostic.jsonl",
+      "sha256": "17a725235f8880c677153d536f3db7a290c541941a74da433d303bccaa97c231"
+    },
+    {
+      "path": "docs/evidence/review-workbench/2026-10-29/visual-audit.md",
+      "sha256": "6d34a72dcaac6fac3aff2950477f8653e3df85abbbc468b21339e0154bd4fd5b"
+    },
+    {
+      "path": "docs/skills/review-dashboard.md",
+      "sha256": "eab5ae7b829ab1332237293ac026b65c93c48d493cbfa210f4ad4a70e0a3bc6f"
+    },
+    {
+      "path": "image/appliance/config.yml",
+      "sha256": "4aaa2ca334abc13947e49f427b33d38e97f0807bf5f560b155d679e534278fa5"
+    },
+    {
+      "path": "image/extension/review/dashboard.ts",
+      "sha256": "ea4dd52583449c07bce30d568aabbcbd37b41d05f3e4f52c0706c6f225beeb34"
+    },
+    {
+      "path": "image/extension/review/extension.ts",
+      "sha256": "9469e00efa4a55c4e27ce6bb31c21acc13cb91d50fc24abda9047846dffe350c"
+    },
+    {
+      "path": "image/extension/review/notice.ts",
+      "sha256": "8fc6b7772403ba074dca3bb01b22ff47b9d58036fea266c2b6f894e6bb208966"
+    },
+    {
+      "path": "image/extension/review/rail.ts",
+      "sha256": "53f8038cc74b8e1561603336ae5ff2ecb54ffa7a82a6359a30c3bda64080285d"
+    },
+    {
+      "path": "tests/appliance-contract.sh",
+      "sha256": "fc480a1ec48635266479b0065c5da4d3f209ce78491a9633e8fb1efa6bcbf07e"
+    },
+    {
+      "path": "tests/omp-review-mode.sh",
+      "sha256": "dc6625f4c5b2a7913c74f18c2699a0d178139967725339e7b6ce6fcda81be682"
+    },
+    {
+      "path": "tests/omp-review-mode.test.ts",
+      "sha256": "21aa26e96ee6f44b52b656ee749198f658e571652b2bbf802cef7feb3226ecca"
+    },
+    {
+      "path": "tests/personal_policy.test.ts",
+      "sha256": "8de49ecf5074766ebe7ead57ed210abbf7b858ed0d413e2b8dc658c7987e89bb"
+    },
+    {
+      "path": "tests/review-native-notice.test.ts",
+      "sha256": "d3d5c6d0b5657223d9d7fb6296d62f15ef200dda60608de804f12177e8ba2b70"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+[
+ {"capture":"01-factory-unavailable.png"},
+ {"input":"q"},
+ {"input":"/review details<ENTER>"},
+ {"capture":"02-factory-details.png"},
+ {"input":"q"},
+ {"input":"<ALT-B>"},
+ {"capture":"03-queue-still-available.png"},
+ {"input":"q"},
+ {"input":"/review status<ENTER>"},
+ {"capture":"04-factory-status.png"},
+ {"input":"q"},
+ {"quit":true}
+]

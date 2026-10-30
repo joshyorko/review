@@ -1,0 +1,25 @@
+{"action": "capture", "name": "00-ready-check.png"}
+{"action": "capture", "name": "01-baseline.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "RFJBRlQgS0VFUCBFWEFDVExZIC0gcmV2aWV3IG5vdGVzIGF3YWl0aW5nIGh1bWFuIGFwcHJvdmFsLg==", "label": "DRAFT KEEP EXACTLY - review notes awaiting human approval."}
+{"action": "capture", "name": "02-draft-before.png"}
+{"action": "input", "data": "G2I=", "label": "<ALT-B>"}
+{"action": "capture", "name": "03-pr-queue.png"}
+{"action": "input", "data": "dg==", "label": "v"}
+{"action": "capture", "name": "04-pr-reader.png"}
+{"action": "input", "data": "bw==", "label": "o"}
+{"action": "capture", "name": "05-pr-browser-failed.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "capture", "name": "06-draft-after-pr.png"}
+{"action": "input", "data": "G2I=", "label": "<ALT-B>"}
+{"action": "input", "data": "CQ==", "label": "<TAB>"}
+{"action": "capture", "name": "07-issue-queue.png"}
+{"action": "input", "data": "dg==", "label": "v"}
+{"action": "capture", "name": "08-issue-reader.png"}
+{"action": "input", "data": "bw==", "label": "o"}
+{"action": "capture", "name": "09-issue-browser-failed.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "capture", "name": "10-draft-after-issue.png"}
+{"action": "quit"}

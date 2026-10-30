@@ -1,0 +1,47 @@
+{"action": "capture", "name": "00-ready-check.png"}
+{"action": "capture", "name": "01-baseline.png"}
+{"action": "input", "data": "cw==", "label": "refused start"}
+{"action": "capture", "name": "02-structured-refusal.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3Zpc3VhbC10YXNrLWNoZWNrDQ==", "label": "/visual-task-check<ENTER>"}
+{"action": "input", "data": "L3Zpc3VhbC1pbnNwZWN0LW5vdGljZS1lbnRyeQ0=", "label": "/visual-inspect-notice-entry<ENTER>"}
+{"action": "input", "data": "L3JldmlldyBzdGF0dXMN", "label": "/review status<ENTER>"}
+{"action": "capture", "name": "03-status.png"}
+{"action": "input", "data": "ampqampqamo=", "label": "jjjjjjjj"}
+{"action": "capture", "name": "04-status-scrolled.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "G2I=", "label": "<ALT-B>"}
+{"action": "capture", "name": "05-same-pr-after-status.png"}
+{"action": "input", "data": "cw==", "label": "s"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3NldHRpbmdzDQ==", "label": "/settings<ENTER>"}
+{"action": "capture", "name": "06-settings.png"}
+{"action": "input", "data": "G1tDG1tDG1tDG1tDG1tDG1tDG1tDG1tD", "label": "<RIGHT><RIGHT><RIGHT><RIGHT><RIGHT><RIGHT><RIGHT><RIGHT>"}
+{"action": "capture", "name": "07-settings-tasks.png"}
+{"action": "input", "data": "CRtbQg==", "label": "<TAB><DOWN>"}
+{"action": "capture", "name": "08-settings-subagents.png"}
+{"action": "input", "data": "DRtbQhtbQg==", "label": "<ENTER><DOWN><DOWN>"}
+{"action": "capture", "name": "09-structured-before.png"}
+{"action": "input", "data": "IA==", "label": " "}
+{"action": "capture", "name": "10-structured-enabled.png"}
+{"action": "input", "data": "Gw==", "label": "<ESC>"}
+{"action": "input", "data": "L3Zpc3VhbC10YXNrLWNoZWNrDQ==", "label": "/visual-task-check<ENTER>"}
+{"action": "input", "data": "L3JldmlldyBkZXRhaWxzDQ==", "label": "/review details<ENTER>"}
+{"action": "capture", "name": "11-details.png"}
+{"action": "input", "data": "ampqampqampqag==", "label": "jjjjjjjjjj"}
+{"action": "capture", "name": "12-details-scrolled.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "G2I=", "label": "<ALT-B>"}
+{"action": "capture", "name": "13-same-pr-before-retry.png"}
+{"action": "input", "data": "cw==", "label": "s"}
+{"action": "capture", "name": "14-after-retry.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3JldmlldyBkZXRhaWxzDQ==", "label": "/review details<ENTER>"}
+{"action": "capture", "name": "15-details-after-retry.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3JldmlldyBzdGF0dXMN", "label": "/review status<ENTER>"}
+{"action": "capture", "name": "16-status-after-retry.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3JldmlldyAJ", "label": "/review <TAB>"}
+{"action": "capture", "name": "17-command-completion.png"}
+{"action": "quit"}

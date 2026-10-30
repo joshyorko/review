@@ -1,0 +1,25 @@
+{"event": "spawn", "ok": true, "pid": 74442, "argv": ["/workspace/.review-dev/visual-install/bun/bun-linux-x64-baseline/bun", "/tmp/pr94-ansi-1di33tyt/omp-lifecycle/packages/coding-agent/src/cli.ts", "--profile", "review-visual", "--cwd", "/tmp/pr94-ansi-1di33tyt/qualified-browser-80x24/work", "--config", "/tmp/pr94-ansi-1di33tyt/qualified-browser-80x24/config.yml", "--extension", "/tmp/pr94-ansi-1di33tyt/final-source/image/extension/luna-factory", "--extension", "/tmp/pr94-ansi-1di33tyt/qualified-browser-80x24/probe/visual-probe.ts", "--no-skills", "--no-rules", "--no-context-files", "--no-lsp", "--no-title", "--no-pty", "--model", "local-probe/deterministic"], "timestamp": "2026-10-29T18:39:20Z"}
+{"event": "capture", "file": "00-ready-check.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:27Z"}
+{"event": "capture", "file": "01-baseline.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:27Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:27Z"}
+{"event": "input", "label": "DRAFT KEEP EXACTLY - review notes awaiting human approval.", "timestamp": "2026-10-29T18:39:28Z"}
+{"event": "capture", "file": "02-draft-before.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:29Z"}
+{"event": "input", "label": "<ALT-B>", "timestamp": "2026-10-29T18:39:29Z"}
+{"event": "capture", "file": "03-pr-queue.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:29Z"}
+{"event": "input", "label": "v", "timestamp": "2026-10-29T18:39:30Z"}
+{"event": "capture", "file": "04-pr-reader.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:30Z"}
+{"event": "input", "label": "o", "timestamp": "2026-10-29T18:39:30Z"}
+{"event": "capture", "file": "05-pr-browser-failed.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:31Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:31Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:32Z"}
+{"event": "capture", "file": "06-draft-after-pr.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:32Z"}
+{"event": "input", "label": "<ALT-B>", "timestamp": "2026-10-29T18:39:33Z"}
+{"event": "input", "label": "<TAB>", "timestamp": "2026-10-29T18:39:33Z"}
+{"event": "capture", "file": "07-issue-queue.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:34Z"}
+{"event": "input", "label": "v", "timestamp": "2026-10-29T18:39:34Z"}
+{"event": "capture", "file": "08-issue-reader.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:35Z"}
+{"event": "input", "label": "o", "timestamp": "2026-10-29T18:39:35Z"}
+{"event": "capture", "file": "09-issue-browser-failed.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:35Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:36Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:39:36Z"}
+{"event": "capture", "file": "10-draft-after-issue.png", "target": [80, 24], "vte": [80, 24], "pty_ioctl": [80, 24], "cell_px": [10, 19], "alloc_px": [802, 458], "window_xid": 6291460, "timestamp": "2026-10-29T18:39:37Z"}

@@ -1,0 +1,428 @@
+# Review appliance: a pinned Fedora builder stages an explicit runtime closure.
+# The final scratch filesystem contains no package manager or build credentials.
+# renovate: datasource=docker depName=registry.fedoraproject.org/fedora-minimal
+ARG RUNTIME_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:47063fcb44549b53ef716744f90dc735dabe4febac4a0bc8fc12085651a6f0b9
+ARG AUDIO_BUILDER_IMAGE=${RUNTIME_BUILDER_IMAGE}
+
+# renovate: datasource=github-releases depName=can1357/oh-my-pi
+ARG OMP_VERSION=18.13.3
+ARG OMP_SOURCE_COMMIT=413d278a87a69b453efabf8d1fedb9940385e8c6
+ARG OMP_SOURCE_SHA256=56cddfedb6784a4fdd4e43070fee29bfc4c04351f378a32f9fca0c9a3c8596d4
+ARG OMP_PATCH_SHA256=621ae17adc8febc19112610bf18ca73264528465b220b096b8a546dab681c9ab
+ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT=413d278a87a69b453efabf8d1fedb9940385e8c6
+ARG OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT=413d278a87a69b453efabf8d1fedb9940385e8c6
+ARG OMP_CLIPBOARD_PATCH_SHA256=e2736f73917995bd72f946831857060981ad15205249a23d6270554e67d07ade
+ARG OMP_SESSION_LIFECYCLE_PATCH_SHA256=7ea387de3a322c060ede8e7bb236944e1517c5b3591f37589104d923db692016
+ARG OMP_CLIPBOARD_PATCH_PATH=/usr/local/share/review/omp/clipboard-truthful.patch
+ARG OMP_SESSION_LIFECYCLE_PATCH_PATH=/usr/local/share/review/omp/session-lifecycle.patch
+ARG OMP_BUN_VERSION=1.4.4
+ARG OMP_BUN_X86_64_SHA256=e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76
+ARG OMP_BUN_AARCH64_SHA256=baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e
+ARG NODE_VERSION=24.21.0
+ARG NODE_X86_64_SHA256=6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff
+ARG NODE_AARCH64_SHA256=724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5
+ARG OMP_NATIVES_VERSION=18.13.3
+ARG OMP_NATIVES_X86_64_SHA512=01e8683fd285a181c03eb43eaf2861a66de89f08857bb1640a15e3a59be488cca6b21eefa675b153bbe19978b382c422c2fc52947154de34da986ccb4f2a98a6
+ARG OMP_NATIVES_AARCH64_SHA512=a95f44f1e857880b07df61220512043deddd88f73c2feba3d11e4ee11d6b0a9c96bd383b412f04c65c4683fac48223d61214cf6e34de4201e0903d726768342a
+ARG MEMORYD_SOURCE_COMMIT=e7f8d431797973afbdf4d0530aa14a25f43acf35
+ARG MEMORYD_SOURCE_SHA256=155ec09537e941e4c71a65b738650b0419ae86f12cc86e28761d10553627d692
+ARG TYPESAFE_VERSION=0.13.0
+ARG TYPESAFE_SHA256=0c354e5dc4e9fc12e18e624bfb2da38f0ceaf1b7fa79c7acc06346766b2e1744
+ARG TYPESAFE_SDK_VERSION=0.7.0
+ARG TYPESAFE_SDK_SHA256=27fd552e7df184e13025da3a2a2711133b5307c131f630a6379e950572906cff
+ARG TYPESAFE_TYPEBOX_VERSION=1.4.3
+ARG TYPESAFE_TYPEBOX_SHA256=2fac2596b3b55822cb3434bfd6f384ca6a6a224fca43a6276a5df47a08375d86
+# renovate: datasource=github-releases depName=cli/cli
+ARG GH_VERSION=2.103.3
+ARG GH_X86_64_SHA256=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
+ARG GH_AARCH64_SHA256=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
+# renovate: datasource=github-releases depName=rtk-ai/rtk
+ARG RTK_VERSION=1.1.0
+ARG RTK_X86_64_SHA256=9454ad1b9489daa57ab0a9f4ebe2faaf4dc82b8a0f26c9e5135151abd7c9378d
+ARG RTK_AARCH64_SHA256=a5c00c3ab0129884bcb757d348afc1a650efa0f4f0769da97c341f28f89719ed
+ARG RTK_HOOK_SHA256=d1555e0af5872a30ed04059423350bdb38302f200a9642c5a9bcc519c95a2257
+ARG RTK_LICENSE_SHA256=33f694a31d9f9df3e292a9413a3cdb0113fa72698e2c719f657ff6b53165dcc4
+
+# renovate: datasource=github-releases depName=rhysd/actionlint
+ARG ACTIONLINT_VERSION=1.7.12
+ARG ACTIONLINT_X86_64_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+ARG ACTIONLINT_AARCH64_SHA256=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+
+ARG REVIEW_VERSION=0.1.0
+ARG REVIEW_REVISION=unknown
+# ---------------------------------------------------------------- audio stage
+
+FROM ${AUDIO_BUILDER_IMAGE} AS audio
+
+COPY --chmod=0755 image/appliance/stage-audio.sh /usr/local/libexec/stage-audio
+RUN --mount=type=secret,id=proxy_ca,required=true,target=/run/review-proxy-ca.pem export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; microdnf --setopt=sslcacert=/run/review-proxy-ca.pem --assumeyes --setopt=install_weak_deps=0 --nodocs install \
+      pulseaudio-libs alsa-lib && \
+    microdnf clean all && \
+    /usr/local/libexec/stage-audio /audio-out \
+      /usr/lib64/libpulse-simple.so.0 \
+      /usr/lib64/libasound.so.2
+
+# ---------------------------------------------------------------- build stage
+FROM ${RUNTIME_BUILDER_IMAGE} AS build
+ARG RUNTIME_BUILDER_IMAGE
+ARG ACTIONLINT_VERSION
+ARG ACTIONLINT_X86_64_SHA256
+ARG ACTIONLINT_AARCH64_SHA256
+ARG OMP_VERSION
+ARG OMP_SOURCE_COMMIT
+ARG OMP_SOURCE_SHA256
+ARG OMP_PATCH_SHA256
+ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT
+ARG OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT
+ARG OMP_CLIPBOARD_PATCH_SHA256
+ARG OMP_SESSION_LIFECYCLE_PATCH_SHA256
+ARG OMP_CLIPBOARD_PATCH_PATH
+ARG OMP_SESSION_LIFECYCLE_PATCH_PATH
+ARG OMP_BUN_VERSION
+ARG OMP_BUN_X86_64_SHA256
+ARG OMP_BUN_AARCH64_SHA256
+ARG NODE_VERSION
+ARG NODE_X86_64_SHA256
+ARG NODE_AARCH64_SHA256
+ARG OMP_NATIVES_VERSION
+ARG OMP_NATIVES_X86_64_SHA512
+ARG OMP_NATIVES_AARCH64_SHA512
+ARG MEMORYD_SOURCE_COMMIT
+ARG MEMORYD_SOURCE_SHA256
+ARG TYPESAFE_VERSION
+ARG TYPESAFE_SHA256
+ARG TYPESAFE_SDK_VERSION
+ARG TYPESAFE_SDK_SHA256
+ARG TYPESAFE_TYPEBOX_VERSION
+ARG TYPESAFE_TYPEBOX_SHA256
+ARG GH_VERSION
+ARG GH_X86_64_SHA256
+ARG GH_AARCH64_SHA256
+ARG RTK_VERSION
+ARG RTK_X86_64_SHA256
+ARG RTK_AARCH64_SHA256
+ARG RTK_HOOK_SHA256
+ARG RTK_LICENSE_SHA256
+ARG REVIEW_VERSION
+ARG REVIEW_REVISION
+
+COPY --chmod=0755 scripts/build-derived-omp.sh /usr/local/libexec/build-derived-omp
+COPY scripts/derived-omp-canary.ts /usr/local/libexec/derived-omp-canary.ts
+COPY patches/omp/memory-backend-registration.patch /usr/local/share/review/omp/memory-backend-registration.patch
+COPY patches/omp/clipboard-truthful.patch /usr/local/share/review/omp/clipboard-truthful.patch
+COPY patches/omp/session-lifecycle.patch /usr/local/share/review/omp/session-lifecycle.patch
+COPY image/extension/rtk/LICENSE /tmp/rtk-LICENSE
+COPY --chmod=0755 image/appliance/stage-runtime.sh /usr/local/libexec/stage-runtime
+COPY --chmod=0755 scripts/generate-appliance-sbom.py /usr/local/libexec/appliance-sbom
+COPY LICENSE NOTICE /out/usr/share/licenses/review/
+COPY image/third-party/bun-LICENSE.md /out/usr/share/licenses/bun/LICENSE.md
+COPY image/third-party/gh-LICENSE /out/usr/share/licenses/gh/LICENSE
+COPY image/appliance/config.yml /out/usr/share/review/appliance-config.yml
+COPY --chown=65532:65532 image/extension/review /out/usr/share/review/extension
+COPY --chown=65532:65532 image/extension/luna-factory /out/usr/share/review/luna-factory
+COPY image/extension/typesafe-omp-loader.mjs /out/usr/share/review/typesafe-omp-loader.mjs
+COPY --chmod=0755 image/appliance/entrypoint.sh /out/usr/bin/review-appliance
+
+RUN --mount=type=secret,id=proxy_ca,required=true,target=/run/review-proxy-ca.pem  set -eu; \
+    ( export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; microdnf --setopt=sslcacert=/run/review-proxy-ca.pem --assumeyes --setopt=install_weak_deps=0 --nodocs install \
+      bash coreutils git-core curl diffutils findutils gawk grep gzip less glibc-common \
+      sed tar xz python3 python3-libs bubblewrap ShellCheck yq jq just \
+      openssl ca-certificates tzdata ncurses-term patch gcc-c++ make && \
+    microdnf clean all ); \
+    ( export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; set -eu; \
+    case "$(uname -m)" in \
+      x86_64) actionlint_arch=amd64; actionlint_sha="$ACTIONLINT_X86_64_SHA256" ;; \
+      aarch64) actionlint_arch=arm64; actionlint_sha="$ACTIONLINT_AARCH64_SHA256" ;; \
+      *) exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${actionlint_arch}.tar.gz" \
+      -o "$workdir/actionlint.tar.gz"; \
+    echo "${actionlint_sha}  $workdir/actionlint.tar.gz" | sha256sum --check --status; \
+    tar -xzf "$workdir/actionlint.tar.gz" -C "$workdir"; \
+    install -m 0755 "$workdir/actionlint" /usr/bin/actionlint; \
+    install -D -m 0644 "$workdir/LICENSE.txt" /out/usr/share/licenses/actionlint/LICENSE.txt; \
+    rm -rf "$workdir" ); \
+    ( export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; set -eu; \
+    mkdir -p /out/usr/bin /out/usr/share/review; \
+    OMP_VERSION="$OMP_VERSION" \
+    OMP_SOURCE_COMMIT="$OMP_SOURCE_COMMIT" \
+    OMP_SOURCE_SHA256="$OMP_SOURCE_SHA256" \
+    OMP_PATCH_SHA256="$OMP_PATCH_SHA256" \
+    OMP_CLIPBOARD_PATCH_SOURCE_COMMIT="$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" \
+    OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT="$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT" \
+    OMP_CLIPBOARD_PATCH_SHA256="$OMP_CLIPBOARD_PATCH_SHA256" \
+    OMP_SESSION_LIFECYCLE_PATCH_SHA256="$OMP_SESSION_LIFECYCLE_PATCH_SHA256" \
+    OMP_CLIPBOARD_PATCH_PATH="$OMP_CLIPBOARD_PATCH_PATH" \
+    OMP_SESSION_LIFECYCLE_PATCH_PATH="$OMP_SESSION_LIFECYCLE_PATCH_PATH" \
+    OMP_BUN_VERSION="$OMP_BUN_VERSION" \
+    OMP_BUN_X86_64_SHA256="$OMP_BUN_X86_64_SHA256" \
+    OMP_BUN_AARCH64_SHA256="$OMP_BUN_AARCH64_SHA256" \
+    OMP_NATIVES_VERSION="$OMP_NATIVES_VERSION" \
+    OMP_NATIVES_X86_64_SHA512="$OMP_NATIVES_X86_64_SHA512" \
+    OMP_NATIVES_AARCH64_SHA512="$OMP_NATIVES_AARCH64_SHA512" \
+    MEMORYD_SOURCE_COMMIT="$MEMORYD_SOURCE_COMMIT" \
+    MEMORYD_SOURCE_SHA256="$MEMORYD_SOURCE_SHA256" \
+    OMP_PATCH_PATH=/usr/local/share/review/omp/memory-backend-registration.patch \
+    OMP_OUTPUT_PATH=/out/usr/bin/omp \
+    /usr/local/libexec/build-derived-omp; \
+    omp_hash="$(sha256sum /out/usr/bin/omp)"; \
+    printf '%s\n' "${omp_hash%% *}" > /out/usr/share/review/omp-derived-sha256 ); \
+    ( export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; set -eu; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) gh_arch=amd64; gh_sha="$GH_X86_64_SHA256" ;; \
+      aarch64) gh_arch=arm64; gh_sha="$GH_AARCH64_SHA256" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    mkdir -p /out/usr/share/review/pi-typesafe/node_modules/@typesafe-ai/sdk \
+      /out/usr/share/review/pi-typesafe/node_modules/typebox; \
+    \
+    curl --fail --location --show-error --silent \
+      "https://registry.npmjs.org/pi-typesafe/-/pi-typesafe-${TYPESAFE_VERSION}.tgz" \
+      -o "$workdir/pi-typesafe.tgz"; \
+    echo "${TYPESAFE_SHA256}  $workdir/pi-typesafe.tgz" | sha256sum --check --status; \
+    tar --no-same-owner --strip-components=1 -xzf "$workdir/pi-typesafe.tgz" \
+      -C /out/usr/share/review/pi-typesafe; \
+    curl --fail --location --show-error --silent \
+      "https://registry.npmjs.org/@typesafe-ai/sdk/-/sdk-${TYPESAFE_SDK_VERSION}.tgz" \
+      -o "$workdir/typesafe-sdk.tgz"; \
+    echo "${TYPESAFE_SDK_SHA256}  $workdir/typesafe-sdk.tgz" | sha256sum --check --status; \
+    tar --no-same-owner --strip-components=1 -xzf "$workdir/typesafe-sdk.tgz" \
+      -C /out/usr/share/review/pi-typesafe/node_modules/@typesafe-ai/sdk; \
+    curl --fail --location --show-error --silent \
+      "https://registry.npmjs.org/typebox/-/typebox-${TYPESAFE_TYPEBOX_VERSION}.tgz" \
+      -o "$workdir/typebox.tgz"; \
+    echo "${TYPESAFE_TYPEBOX_SHA256}  $workdir/typebox.tgz" | sha256sum --check --status; \
+    tar --no-same-owner --strip-components=1 -xzf "$workdir/typebox.tgz" \
+      -C /out/usr/share/review/pi-typesafe/node_modules/typebox; \
+    test -f /out/usr/share/review/pi-typesafe/package.json; \
+    test -f /out/usr/share/review/pi-typesafe/extensions/index.js; \
+    test -f /out/usr/share/review/pi-typesafe/node_modules/@typesafe-ai/sdk/package.json; \
+    test -f /out/usr/share/review/pi-typesafe/node_modules/typebox/package.json; \
+    \
+    curl --fail --location --show-error --silent \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz" \
+      -o "$workdir/gh.tar.gz"; \
+    echo "${gh_sha}  $workdir/gh.tar.gz" | sha256sum --check --status; \
+    tar --no-same-owner -xf "$workdir/gh.tar.gz" -C "$workdir"; \
+    install -m 0755 "$workdir/gh_${GH_VERSION}_linux_${gh_arch}/bin/gh" /out/usr/bin/gh; \
+    \
+    rm -rf "$workdir" ); \
+    ( export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; set -eu; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) rtk_asset=rtk-x86_64-unknown-linux-musl.tar.gz; rtk_sha="$RTK_X86_64_SHA256" ;; \
+      aarch64) rtk_asset=rtk-aarch64-unknown-linux-gnu.tar.gz; rtk_sha="$RTK_AARCH64_SHA256" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    mkdir -p /out/usr/bin /out/usr/share/review/rtk "$workdir/home" "$workdir/config" "$workdir/data" "$workdir/state"; \
+    export HOME="$workdir/home" \
+      XDG_CONFIG_HOME="$workdir/config" \
+      XDG_DATA_HOME="$workdir/data" \
+      XDG_STATE_HOME="$workdir/state" \
+      RTK_TELEMETRY_DISABLED=1; \
+    mkdir -p /out/usr/share/licenses/rtk; \
+    echo "${RTK_LICENSE_SHA256}  /tmp/rtk-LICENSE" | sha256sum --check --status; \
+    grep -qF 'Version 2.0, January 2004' /tmp/rtk-LICENSE; \
+    install -m 0644 /tmp/rtk-LICENSE /out/usr/share/licenses/rtk/LICENSE; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/${rtk_asset}" \
+      -o "$workdir/rtk.tar.gz"; \
+    echo "${rtk_sha}  $workdir/rtk.tar.gz" | sha256sum --check --status; \
+    tar --no-same-owner -xzf "$workdir/rtk.tar.gz" -C "$workdir" rtk; \
+    install -m 0755 "$workdir/rtk" /out/usr/bin/rtk; \
+    curl --fail --location --show-error --silent \
+      "https://raw.githubusercontent.com/rtk-ai/rtk/v${RTK_VERSION}/hooks/pi/rtk.ts" \
+      -o "$workdir/rtk.ts"; \
+    echo "${RTK_HOOK_SHA256}  $workdir/rtk.ts" | sha256sum --check --status; \
+    grep -qF 'pi.on("tool_call"' "$workdir/rtk.ts"; \
+    grep -qF 'process.env.RTK_DISABLED === "1"' "$workdir/rtk.ts"; \
+    install -m 0644 "$workdir/rtk.ts" /out/usr/share/review/rtk/rtk.ts; \
+    rtk_version="$(/out/usr/bin/rtk --version)"; \
+    test "$rtk_version" = "rtk ${RTK_VERSION}"; \
+    /out/usr/bin/rtk gain >"$workdir/gain.txt" 2>&1; \
+    grep -Eq 'RTK Token Savings|No tracking data yet' "$workdir/gain.txt"; \
+    rm -rf "$workdir" ); \
+    ( export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; set -eu; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) node_arch=x64; node_sha="$NODE_X86_64_SHA256" ;; \
+      aarch64) node_arch=arm64; node_sha="$NODE_AARCH64_SHA256" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    workdir="$(mktemp -d)"; \
+    curl --fail --location --show-error --silent \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
+      -o "$workdir/node.tar.gz"; \
+    echo "${node_sha}  $workdir/node.tar.gz" | sha256sum --check --status; \
+    tar --no-same-owner --extract --gzip --file "$workdir/node.tar.gz" --directory "$workdir"; \
+    node_dir="$workdir/node-v${NODE_VERSION}-linux-${node_arch}"; \
+    install -D -m 0755 "$node_dir/bin/node" /usr/local/bin/node; \
+    install -D -m 0644 "$node_dir/LICENSE" /out/usr/share/licenses/node/LICENSE; \
+    install -d -m 0755 /out/usr/lib/node_modules; \
+    cp -a "$node_dir/lib/node_modules/npm" /out/usr/lib/node_modules/npm; \
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js /out/usr/bin/npm; \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /out/usr/bin/npx; \
+    rm -rf "$workdir" ); \
+    ( export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; /usr/local/libexec/stage-runtime /out \
+    /usr/bin/actionlint \
+    /usr/bin/shellcheck \
+    /usr/bin/yq \
+    /usr/bin/jq \
+    /usr/bin/just \
+    /usr/bin/openssl \
+    /usr/local/bin/node \
+    /usr/local/bin/bun )
+
+COPY --from=audio /audio-out/ /out/
+
+RUN --mount=type=secret,id=proxy_ca,required=true,target=/run/review-proxy-ca.pem  set -eu; \
+    ( export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) native_package=pi-natives-linux-x64; native_sha="$OMP_NATIVES_X86_64_SHA512"; gh_sha="$GH_X86_64_SHA256"; rtk_sha="$RTK_X86_64_SHA256"; node_sha="$NODE_X86_64_SHA256"; bun_sha="$OMP_BUN_X86_64_SHA256" ;; \
+      aarch64) native_package=pi-natives-linux-arm64; native_sha="$OMP_NATIVES_AARCH64_SHA512"; gh_sha="$GH_AARCH64_SHA256"; rtk_sha="$RTK_AARCH64_SHA256"; node_sha="$NODE_AARCH64_SHA256"; bun_sha="$OMP_BUN_AARCH64_SHA256" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    case "$arch" in x86_64) actionlint_sha="$ACTIONLINT_X86_64_SHA256" ;; aarch64) actionlint_sha="$ACTIONLINT_AARCH64_SHA256" ;; esac; \
+    mkdir -p /out/usr/share/review; \
+    /usr/local/libexec/appliance-sbom \
+      --arch "$arch" \
+      --version "$REVIEW_VERSION" \
+      --revision "$REVIEW_REVISION" \
+      --omp-version "$OMP_VERSION" \
+      --omp-sha256 "$(cat /out/usr/share/review/omp-derived-sha256)" \
+      --omp-source-commit "$OMP_SOURCE_COMMIT" \
+      --omp-source-sha256 "$OMP_SOURCE_SHA256" \
+      --omp-patch-sha256 "$OMP_PATCH_SHA256" \
+      --omp-clipboard-patch-source-commit "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" \
+      --omp-session-lifecycle-patch-source-commit "$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT" \
+      --omp-clipboard-patch-sha256 "$OMP_CLIPBOARD_PATCH_SHA256" \
+      --omp-session-lifecycle-patch-sha256 "$OMP_SESSION_LIFECYCLE_PATCH_SHA256" \
+      --omp-clipboard-patch-path "$OMP_CLIPBOARD_PATCH_PATH" \
+      --omp-session-lifecycle-patch-path "$OMP_SESSION_LIFECYCLE_PATCH_PATH" \
+      --omp-bun-version "$OMP_BUN_VERSION" \
+      --node-version "$NODE_VERSION" \
+      --node-sha256 "$node_sha" \
+      --bun-sha256 "$bun_sha" \
+      --omp-natives-version "$OMP_NATIVES_VERSION" \
+      --omp-native-package "$native_package" \
+      --omp-native-sha512 "$native_sha" \
+      --actionlint-version "$ACTIONLINT_VERSION" \
+      --actionlint-sha256 "$actionlint_sha" \
+      --runtime-builder-image "$RUNTIME_BUILDER_IMAGE" \
+      --gh-version "$GH_VERSION" \
+      --gh-sha256 "$gh_sha" \
+      --rtk-version "$RTK_VERSION" \
+      --rtk-archive-sha256 "$rtk_sha" \
+      --rtk-hook-sha256 "$RTK_HOOK_SHA256" \
+      --rtk-license-sha256 "$RTK_LICENSE_SHA256" \
+      --out /out/usr/share/review/sbom.spdx.json; \
+    rm /out/usr/share/review/omp-derived-sha256; \
+    python3 -m json.tool /out/usr/share/review/sbom.spdx.json >/dev/null ); \
+    ( export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; set -eu; \
+    install -d -m 1777 /out/tmp; \
+    install -d -m 0755 /out/etc /out/home/review /out/workspace /out/run/review/pulse; \
+    printf 'root:x:0:0:root:/root:/usr/bin/bash\nreview:x:65532:65532:Review:/home/review:/usr/bin/bash\n' > /out/etc/passwd; \
+    printf 'root:x:0:\nreview:x:65532:\n' > /out/etc/group; \
+    chown -R 65532:65532 /out/home/review /out/workspace ); \
+    ( export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; ln -s extension /out/usr/share/review/review ); \
+    ( export SSL_CERT_FILE=/run/review-proxy-ca.pem CURL_CA_BUNDLE=/run/review-proxy-ca.pem NODE_EXTRA_CA_CERTS=/run/review-proxy-ca.pem GIT_SSL_CAINFO=/run/review-proxy-ca.pem; set -eu; \
+    case "$(uname -m)" in \
+      x86_64) audio_triplet=x86_64-linux-gnu ;; \
+      aarch64) audio_triplet=aarch64-linux-gnu ;; \
+      *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    for binary in /out/usr/bin/omp /out/usr/bin/gh /out/usr/bin/git /out/usr/bin/bash /out/usr/bin/python3 /out/usr/bin/node /out/usr/bin/bun /out/usr/bin/npm /out/usr/bin/npx; do \
+    test -x "$binary" || { echo "missing $binary" >&2; exit 1; }; \
+    done; \
+    test -x /out/usr/bin/rtk; \
+    test -s /out/usr/share/review/rtk/rtk.ts; \
+    test -s /out/usr/share/licenses/rtk/LICENSE; \
+    test -e "/out/usr/lib64/libpulse-simple.so.0"; \
+    test -e "/out/usr/lib64/libasound.so.2"; \
+    test -e /out/usr/share/alsa/alsa.conf; \
+    test -e /out/usr/share/review/extension/index.ts; \
+    test -d /out/usr/share/review/extension/agents; \
+    test -e /out/usr/share/review/luna-factory/index.ts; \
+    test -e /out/usr/share/review/luna-factory/omp/verifier-probe.ts; \
+    test -d /out/usr/share/review/luna-factory/agents; \
+    test -L /out/usr/share/review/review; \
+    test -e /out/usr/share/review/review/github.ts )
+
+FROM scratch
+
+ARG REVIEW_VERSION
+ARG REVIEW_REVISION
+ARG RUNTIME_BUILDER_IMAGE
+ARG OMP_VERSION
+ARG OMP_SOURCE_COMMIT
+ARG OMP_PATCH_SHA256
+ARG OMP_CLIPBOARD_PATCH_SOURCE_COMMIT
+ARG OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT
+ARG OMP_CLIPBOARD_PATCH_SHA256
+ARG OMP_SESSION_LIFECYCLE_PATCH_SHA256
+ARG NODE_VERSION
+ARG OMP_BUN_VERSION
+ARG TYPESAFE_VERSION
+ARG RTK_VERSION
+ARG RTK_X86_64_SHA256
+ARG RTK_AARCH64_SHA256
+ARG RTK_HOOK_SHA256
+ARG RTK_LICENSE_SHA256
+ARG AUDIO_BUILDER_IMAGE
+
+COPY --from=build /out /
+
+ENV HOME=/home/review \
+    XDG_CONFIG_HOME=/home/review/.config \
+    XDG_CACHE_HOME=/home/review/.cache \
+    XDG_DATA_HOME=/home/review/.local/share \
+    XDG_STATE_HOME=/home/review/.local/state \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=credential.https://github.com.helper \
+    GIT_CONFIG_VALUE_0="!/usr/bin/gh auth git-credential" \
+    PATH=/usr/bin:/bin \
+    SHELL=/usr/bin/bash \
+    TERM=xterm-256color \
+    COLORTERM=truecolor \
+    REVIEW_APPLIANCE=1
+
+LABEL org.opencontainers.image.title="Review" \
+      org.opencontainers.image.description="GitHub Review workbench for OMP, packaged with Luna Factory." \
+      org.opencontainers.image.source="https://github.com/joshyorko/review" \
+      org.opencontainers.image.url="https://github.com/joshyorko/review" \
+      org.opencontainers.image.documentation="https://github.com/joshyorko/review/blob/main/docs/appliance.md" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${REVIEW_VERSION}" \
+      org.opencontainers.image.revision="${REVIEW_REVISION}" \
+      org.opencontainers.image.base.name="${RUNTIME_BUILDER_IMAGE}" \
+      io.github.joshyorko.review.appliance="true" \
+      io.github.joshyorko.review.harness="omp" \
+      io.github.joshyorko.review.omp.version="${OMP_VERSION}" \
+      io.github.joshyorko.review.omp.source.commit="${OMP_SOURCE_COMMIT}" \
+      io.github.joshyorko.review.node.version="${NODE_VERSION}" \
+      io.github.joshyorko.review.bun.version="${OMP_BUN_VERSION}" \
+      io.github.joshyorko.review.omp.patch.sha256="${OMP_PATCH_SHA256}" \
+      io.github.joshyorko.review.omp.clipboard.patch.source.commit="${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT}" \
+      io.github.joshyorko.review.omp.session.lifecycle.patch.source.commit="${OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT}" \
+      io.github.joshyorko.review.omp.clipboard.patch.sha256="${OMP_CLIPBOARD_PATCH_SHA256}" \
+      io.github.joshyorko.review.omp.session.lifecycle.patch.sha256="${OMP_SESSION_LIFECYCLE_PATCH_SHA256}" \
+      io.github.joshyorko.review.typesafe.version="${TYPESAFE_VERSION}" \
+      io.github.joshyorko.review.rtk.version="${RTK_VERSION}" \
+      io.github.joshyorko.review.rtk.x86_64.sha256="${RTK_X86_64_SHA256}" \
+      io.github.joshyorko.review.rtk.aarch64.sha256="${RTK_AARCH64_SHA256}" \
+      io.github.joshyorko.review.rtk.hook.sha256="${RTK_HOOK_SHA256}" \
+      io.github.joshyorko.review.rtk.license.sha256="${RTK_LICENSE_SHA256}" \
+      io.github.joshyorko.review.audio.source="${AUDIO_BUILDER_IMAGE}" \
+      io.github.joshyorko.review.audio.packages="pulseaudio-libs,alsa-lib"
+
+USER 65532:65532
+WORKDIR /workspace
+
+# The mode is keyboard driven and registers no slash commands; arguments passed
+# to `podman run` land on omp itself, so `--pr 1284` and `--issues` work.
+ENTRYPOINT ["/usr/bin/review-appliance"]

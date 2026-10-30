@@ -1,0 +1,28 @@
+{"action": "capture", "name": "00-ready-check.png"}
+{"action": "capture", "name": "01-baseline.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3Zpc3VhbC1hcm0tcmVmcmVzaC1mYWlsdXJlDQ==", "label": "/visual-arm-refresh-failure<ENTER>"}
+{"action": "input", "data": "G2I=", "label": "<ALT-B>"}
+{"action": "input", "data": "cg==", "label": "r"}
+{"action": "capture", "name": "02-refresh-failed.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3JldmlldyBkZXRhaWxzDQ==", "label": "/review details<ENTER>"}
+{"action": "capture", "name": "03-refresh-details.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "G2I=", "label": "<ALT-B>"}
+{"action": "input", "data": "cg==", "label": "r"}
+{"action": "capture", "name": "04-refresh-retry.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3Zpc3VhbC1hcm0tZGFzaGJvYXJkLWZhaWx1cmUN", "label": "/visual-arm-dashboard-failure<ENTER>"}
+{"action": "input", "data": "G2I=", "label": "<ALT-B>"}
+{"action": "capture", "name": "05-dashboard-failed-editor.png"}
+{"action": "input", "data": "G2I=", "label": "<ALT-B>"}
+{"action": "capture", "name": "06-dashboard-uncertain.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3JldmlldyBkZXRhaWxzDQ==", "label": "/review details<ENTER>"}
+{"action": "capture", "name": "07-dashboard-details.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3JldmlldyBzdGF0dXMN", "label": "/review status<ENTER>"}
+{"action": "capture", "name": "08-dashboard-status.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "quit"}

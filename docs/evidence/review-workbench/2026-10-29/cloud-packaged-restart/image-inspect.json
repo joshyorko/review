@@ -1,0 +1,11 @@
+{
+  "Id": "sha256:96f6bcbf63d1508b4a085e3a9f7b42165f2674d506ffec5f0e8b656653486054",
+  "Size": 726858432,
+  "Architecture": "amd64",
+  "Os": "linux",
+  "revision": "bd143724883888d9c19695647c86b8b824a1d9b7",
+  "user": "65532:65532",
+  "entrypoint": [
+    "/usr/bin/review-appliance"
+  ]
+}

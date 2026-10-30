@@ -1,0 +1,14 @@
+{
+  "head_sha": "df1e45edf44ef33ec65f3f54fdd5435e02c11b38",
+  "merge_sha": "a889b6294c2c1ef8455a9bb74ed91fbab07d3412",
+  "run_id": 40917473071,
+  "job_id": 123601434839,
+  "conclusion": "failure",
+  "failed_step": "Static hygiene",
+  "evidence": [
+    "2026-10-29T17:03:54.0621500Z trim trailing whitespace.................................................Failed",
+    "2026-10-29T17:03:54.0622091Z - hook id: trailing-whitespace",
+    "2026-10-29T17:03:54.0622678Z - files were modified by this hook",
+    "2026-10-29T17:03:54.0623256Z Fixing docs/evidence/review-workbench/2026-10-29/file-pagination-wip/review-pr-files.patch"
+  ]
+}

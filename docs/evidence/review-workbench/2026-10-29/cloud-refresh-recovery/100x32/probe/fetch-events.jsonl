@@ -1,0 +1,6 @@
+{"status":200,"afterFailure":false,"search":"org:fixture is:pr is:open archived:false sort:updated-desc"}
+{"status":503,"search":"org:fixture is:pr is:open archived:false sort:updated-desc"}
+{"status":200,"afterFailure":true,"search":"org:fixture is:pr is:open archived:false sort:updated-desc"}
+{"status":200,"afterFailure":true,"search":"org:fixture is:pr is:open archived:false sort:updated-desc"}
+{"status":503,"search":"org:fixture is:pr is:open archived:false sort:updated-desc"}
+{"status":200,"afterFailure":true,"search":"org:fixture is:pr is:open archived:false sort:updated-desc"}

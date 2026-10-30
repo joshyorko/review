@@ -1,0 +1,13 @@
+{"action": "capture", "name": "00-ready-check.png"}
+{"action": "capture", "name": "01-factory-unavailable.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3JldmlldyBkZXRhaWxzDQ==", "label": "/review details<ENTER>"}
+{"action": "capture", "name": "02-factory-details.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "G2I=", "label": "<ALT-B>"}
+{"action": "capture", "name": "03-queue-still-available.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "input", "data": "L3JldmlldyBzdGF0dXMN", "label": "/review status<ENTER>"}
+{"action": "capture", "name": "04-factory-status.png"}
+{"action": "input", "data": "cQ==", "label": "q"}
+{"action": "quit"}

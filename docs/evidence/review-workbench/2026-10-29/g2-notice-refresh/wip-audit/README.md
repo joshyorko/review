@@ -1,0 +1,92 @@
+# Stopped visual-audit work
+
+WIP snapshot preserved at the operator's request. These artifacts are not a final visual approval.
+
+- Source captured: `516b28987a492fffba6040bc3a4bbcc83817ef4c`; later browser-link changes were pushed but not fully recaptured before work stopped.
+- `normal-final` contains the measured 100x32 walkthrough and probe receipts.
+- `narrow-final` contains multiple attempts and may contain reused-HOME claim contamination. Do not treat it as accepted evidence.
+- `browser-pr` and `browser-issue` capture the earlier browser fallback. They do not certify the final direct-link card.
+- Python capture scripts and the TypeScript fixture are included for resumption, with their original temporary paths. Review and adapt paths before running; use an immutable source archive and a fresh isolated HOME.
+- Geometry logs record VTE and PTY sizes. Earlier unmeasured screenshots elsewhere in this evidence tree are historical only.
+- No private HOME, credentials, native-addon binary, or source archive is included.
+- Overall Product Design sign-off remains BLOCKED/PENDING: finish actual narrow/failure-state review; native TSP visual review requires a TSP-capable renderer. Do not infer PASS from protocol tests.
+
+## Preserved files
+
+- `normal-final/capture_recovery_and_details.py`
+- `normal-final/geometry.jsonl`
+- `normal-final/screenshot-manifest.json`
+- `normal-final/probe/visual-probe.ts`
+- `normal-final/probe/send-attempts.jsonl`
+- `normal-final/probe/task-schema-events.jsonl`
+- `normal-final/probe/notice-events.jsonl`
+- `normal-final/probe/persisted-notice-inspection.jsonl`
+- `normal-final/probe/notice-customentries.jsonl`
+- `normal-final/screenshots/18-review-completion.png`
+- `normal-final/screenshots/17-status-after-retry.png`
+- `normal-final/screenshots/16-resolved-details.png`
+- `normal-final/screenshots/15-after-admitted-retry.png`
+- `normal-final/screenshots/14-same-pr-before-retry.png`
+- `normal-final/screenshots/13-details-scrolled.png`
+- `normal-final/screenshots/12-details-top.png`
+- `normal-final/screenshots/11-structured-enabled.png`
+- `normal-final/screenshots/10-structured-selected.png`
+- `normal-final/screenshots/09-settings-subagents.png`
+- `normal-final/screenshots/08-settings-tasks.png`
+- `normal-final/screenshots/07-settings-landing.png`
+- `normal-final/screenshots/06-a1-restored.png`
+- `normal-final/screenshots/05-same-pr-after-ack.png`
+- `normal-final/screenshots/04-status-viewer-scrolled.png`
+- `normal-final/screenshots/03-status-viewer-top.png`
+- `normal-final/screenshots/02-a1-error-dashboard.png`
+- `normal-final/screenshots/01-baseline-dashboard.png`
+- `narrow-final/capture_recovery_and_details.py`
+- `narrow-final/geometry.jsonl`
+- `narrow-final/probe/visual-probe.ts`
+- `narrow-final/probe/send-attempts.jsonl`
+- `narrow-final/probe/task-schema-events.jsonl`
+- `narrow-final/probe/notice-events.jsonl`
+- `narrow-final/probe/persisted-notice-inspection.jsonl`
+- `narrow-final/probe/notice-customentries.jsonl`
+- `narrow-final/screenshots/18-review-completion.png`
+- `narrow-final/screenshots/17-status-after-retry.png`
+- `narrow-final/screenshots/16-resolved-details.png`
+- `narrow-final/screenshots/15-after-admitted-retry.png`
+- `narrow-final/screenshots/14-same-pr-before-retry.png`
+- `narrow-final/screenshots/13-details-scrolled.png`
+- `narrow-final/screenshots/12-details-top.png`
+- `narrow-final/screenshots/11-structured-enabled.png`
+- `narrow-final/screenshots/10-structured-selected.png`
+- `narrow-final/screenshots/09-settings-subagents.png`
+- `narrow-final/screenshots/08-settings-tasks.png`
+- `narrow-final/screenshots/07-settings-landing.png`
+- `narrow-final/screenshots/06-a1-restored.png`
+- `narrow-final/screenshots/05-same-pr-after-ack.png`
+- `narrow-final/screenshots/04-status-viewer-scrolled.png`
+- `narrow-final/screenshots/03-status-viewer-top.png`
+- `narrow-final/screenshots/02-a1-error-dashboard.png`
+- `narrow-final/screenshots/01-baseline-dashboard.png`
+- `browser-pr/capture_browser_pr.py`
+- `browser-pr/geometry.jsonl`
+- `browser-pr/screenshot-manifest.json`
+- `browser-pr/probe/visual-probe.ts`
+- `browser-pr/probe/notice-events.jsonl`
+- `browser-pr/probe/notice-customentries.jsonl`
+- `browser-pr/screenshots/06-editor-draft-after.png`
+- `browser-pr/screenshots/05-browser-warning-reader.png`
+- `browser-pr/screenshots/04-reader-before-browser.png`
+- `browser-pr/screenshots/03-dashboard-pr.png`
+- `browser-pr/screenshots/02-editor-draft-before.png`
+- `browser-pr/screenshots/01-dashboard-baseline.png`
+- `browser-issue/capture_issue_browser.py`
+- `browser-issue/geometry.jsonl`
+- `browser-issue/screenshot-manifest.json`
+- `browser-issue/probe/visual-probe.ts`
+- `browser-issue/probe/notice-events.jsonl`
+- `browser-issue/probe/notice-customentries.jsonl`
+- `browser-issue/screenshots/06-issue-editor-draft-after.png`
+- `browser-issue/screenshots/05-issue-browser-warning-reader.png`
+- `browser-issue/screenshots/04-issue-reader-before-browser.png`
+- `browser-issue/screenshots/03-dashboard-issue.png`
+- `browser-issue/screenshots/02-issue-editor-draft-before.png`
+- `browser-issue/screenshots/01-issue-dashboard-baseline.png`

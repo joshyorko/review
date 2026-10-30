@@ -1,0 +1,71 @@
+{
+  "source_sha": "c5d0f1f4af662f5a922ddbb6653c41d32b20f624",
+  "status": "BLOCKED",
+  "screenshots": [],
+  "audits": [
+    {
+      "target": "100x32",
+      "home": "/tmp/pr94-qualification-u84t03g1/100x32/home",
+      "home_fresh": true,
+      "capture_started": false,
+      "vte_measured": false,
+      "pty_measured": false
+    },
+    {
+      "target": "80x24",
+      "home": "/tmp/pr94-qualification-u84t03g1/80x24/home",
+      "home_fresh": true,
+      "capture_started": false,
+      "vte_measured": false,
+      "pty_measured": false
+    }
+  ],
+  "prerequisites": [
+    {
+      "command": [
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin:/bin",
+        "/workspace/.review-dev/sdk/node_modules/.bin/omp",
+        "--version"
+      ],
+      "exit_code": 127,
+      "output": "env: 'bun': No such file or directory"
+    },
+    {
+      "command": [
+        "/usr/bin/python3",
+        "-c",
+        "import gi; gi.require_version(\"Gtk\",\"4.0\"); gi.require_version(\"Vte\",\"3.91\")"
+      ],
+      "exit_code": 1,
+      "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import gi; gi.require_version(\"Gtk\",\"4.0\"); gi.require_version(\"Vte\",\"3.91\")\n               ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^\n  File \"/usr/lib/python3/dist-packages/gi/__init__.py\", line 125, in require_version\n    raise ValueError('Namespace %s not available for version %s' %\n                     (namespace, version))\nValueError: Namespace Gtk not available for version 4.0"
+    },
+    {
+      "command": [
+        "/usr/bin/python3",
+        "-c",
+        "import gi; gi.require_version(\"Vte\",\"3.91\")"
+      ],
+      "exit_code": 1,
+      "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import gi; gi.require_version(\"Vte\",\"3.91\")\n               ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^\n  File \"/usr/lib/python3/dist-packages/gi/__init__.py\", line 122, in require_version\n    raise ValueError('Namespace %s not available' % namespace)\nValueError: Namespace Vte not available"
+    }
+  ],
+  "remaining_steps": [
+    "Run the actual foreground OMP workbench against this immutable source in a fresh HOME for each geometry.",
+    "Measure actual VTE and child PTY as 100x32 and 80x24 before each capture.",
+    "Inspect saved screenshots of notices, Details/Status, settings recovery, browser failures, drafts and navigation.",
+    "Capture native TSP toast using a TSP-capable renderer.",
+    "Obtain required Product Design PASS before claiming UI completion."
+  ],
+  "omp_required_bun": ">=1.4.4",
+  "executable_observations": {
+    "bun": null,
+    "apptainer": null,
+    "podman": null,
+    "tsp": null,
+    "ffmpeg": "/usr/bin/ffmpeg"
+  },
+  "display_variable_set": false,
+  "renderer_note": "No TSP-capable renderer was available through the inspected environment/tool interfaces. A missing tsp executable alone does not rule out every possible renderer."
+}

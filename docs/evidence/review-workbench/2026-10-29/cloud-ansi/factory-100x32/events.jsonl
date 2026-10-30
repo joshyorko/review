@@ -1,0 +1,13 @@
+{"event": "spawn", "ok": true, "pid": 74867, "argv": ["/workspace/.review-dev/visual-install/bun/bun-linux-x64-baseline/bun", "/tmp/pr94-ansi-1di33tyt/omp-lifecycle/packages/coding-agent/src/cli.ts", "--profile", "review-visual", "--cwd", "/tmp/pr94-ansi-1di33tyt/qualified-factory-100x32/work", "--config", "/tmp/pr94-ansi-1di33tyt/qualified-factory-100x32/config.yml", "--extension", "/tmp/pr94-ansi-1di33tyt/qualified-factory-100x32/probe/visual-probe.ts", "--no-skills", "--no-rules", "--no-context-files", "--no-lsp", "--no-title", "--no-pty", "--model", "local-probe/deterministic"], "timestamp": "2026-10-29T18:40:24Z"}
+{"event": "capture", "file": "00-ready-check.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:40:31Z"}
+{"event": "capture", "file": "01-factory-unavailable.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:40:31Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:40:31Z"}
+{"event": "input", "label": "/review details<ENTER>", "timestamp": "2026-10-29T18:40:32Z"}
+{"event": "capture", "file": "02-factory-details.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:40:32Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:40:32Z"}
+{"event": "input", "label": "<ALT-B>", "timestamp": "2026-10-29T18:40:33Z"}
+{"event": "capture", "file": "03-queue-still-available.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:40:33Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:40:34Z"}
+{"event": "input", "label": "/review status<ENTER>", "timestamp": "2026-10-29T18:40:34Z"}
+{"event": "capture", "file": "04-factory-status.png", "target": [100, 32], "vte": [100, 32], "pty_ioctl": [100, 32], "cell_px": [10, 19], "alloc_px": [1002, 610], "window_xid": 6291460, "timestamp": "2026-10-29T18:40:34Z"}
+{"event": "input", "label": "q", "timestamp": "2026-10-29T18:40:35Z"}

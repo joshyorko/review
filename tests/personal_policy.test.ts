@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { actionPrompt, createReviewExtension } from "../image/extension/review/extension.ts";
+import { actionPrompt, createReviewExtension, NOTICE_ENTRY } from "../image/extension/review/extension.ts";
 import { ReviewDashboard } from "../image/extension/review/dashboard.ts";
 import { PLAIN_PAINTER } from "../image/extension/review/glyphs.ts";
 import { fetchQueue } from "../image/extension/review/github.ts";
@@ -13,6 +13,7 @@ import { EMPTY_HIVE } from "../image/extension/review/hive.ts";
 import { ReviewMode } from "../image/extension/review/mode.ts";
 import { renderRail, tmuxReviewStatusBar } from "../image/extension/review/rail.ts";
 import { registerTools } from "../image/extension/review/tools.ts";
+import { createReviewNoticeComponent } from "../image/extension/review/notice.ts";
 
 const NOW = 1_800_000_000_000;
 const ENV = {
@@ -23,7 +24,9 @@ const ENV = {
 	LUNA_FACTORY_CLAIMS_ROOT: "",
 	REVIEW_MODE: "review",
 };
+let noticeFixtureSession = 0;
 beforeEach(() => {
+	createReviewNoticeComponent().sessionChanged(`personal-policy-test-${++noticeFixtureSession}`);
 	ENV.LUNA_FACTORY_STATE_ROOT = mkdtempSync(join(tmpdir(), "personal-state-"));
 	ENV.LUNA_FACTORY_CLAIMS_ROOT = mkdtempSync(join(tmpdir(), "personal-claims-"));
 });
@@ -130,13 +133,18 @@ function makeFetch(
 
 function fakeHost() {
 	const leaf = (): any => ({ optional: () => leaf(), describe: () => leaf() });
+	const taskParameters = Object.assign((input: unknown) => input, {
+		toJsonSchema: () => ({ type: "object", properties: { context: { type: "string" }, tasks: { type: "array", items: { type: "object", properties: { outputSchema: { type: "object" }, schemaMode: { type: "string" } } } } } }),
+	});
 	return {
+		toolInfo: [{ name: "task", parameters: taskParameters }],
 		sessionShutdownLifecycleVersion: 1,
 		events: new Map<string, any>(),
 		flags: new Map<string, any>(),
 		flagValues: new Map<string, unknown>(),
 		shortcuts: new Map<string, any>(),
 		tools: new Map<string, any>(),
+		commands: new Map<string, any>(),
 		messages: [] as string[],
 		entries: [] as Array<{ customType: string; data: unknown }>,
 		zod: { object: () => ({}), string: leaf, number: leaf },
@@ -146,17 +154,30 @@ function fakeHost() {
 		getFlag(name: string) { return this.flagValues.get(name); },
 		registerShortcut(name: string, options: any) { this.shortcuts.set(name, options); },
 		registerTool(definition: any) { this.tools.set(definition.name, definition); },
+		registerCommand(name: string, definition: any) { this.commands.set(name, definition); },
+		getAllTools() { return this.toolInfo; },
 		sendUserMessage(content: string) { this.messages.push(content); },
 		appendEntry(customType: string, data: unknown) { this.entries.push({ customType, data }); },
 		async exec() { return { stdout: "", stderr: "", code: 0, killed: false }; },
 	};
 }
 
+async function assertErrorDetails(pi: ReturnType<typeof fakeHost>, ctx: ReturnType<typeof fakeCtx>, expected: RegExp): Promise<void> {
+	assert.ok(pi.entries.some((entry) => entry.customType === NOTICE_ENTRY && /Review couldn’t complete this step/.test(entry.data.title)), "the operator sees the persistent human notice");
+	await pi.commands.get("review").handler("details", ctx);
+	const wrappedExpected = new RegExp(expected.source.replace(/ /g, "\\s+"), expected.flags);
+	assert.match(ctx.modalOutputs.at(-1) ?? "", wrappedExpected);
+}
+
 function fakeCtx() {
 	const notifications: Array<{ message: string; level: string }> = [];
+	const overlays: any[] = [];
+	const modalOutputs: string[] = [];
 	return {
 		hasUI: true,
 		notifications,
+		overlays,
+		modalOutputs,
 		ui: {
 			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text },
 			notify: (message: string, level: string) => notifications.push({ message, level }),
@@ -168,7 +189,13 @@ function fakeCtx() {
 			editor: async () => undefined,
 			confirm: async () => true,
 			custom(factory: any) {
-				factory({ requestRender() {} }, this.theme, {}, () => {});
+				const view = factory({ requestRender() {} }, this.theme, {}, () => {});
+				overlays.push(view);
+				const header = view.render?.(100)?.[0] ?? "";
+				if (/^Review details · read only/.test(header)) {
+					modalOutputs.push(view.render(100).join("\n"));
+					view.handleInput("q");
+				}
 				return Promise.resolve();
 			},
 		},
@@ -217,7 +244,7 @@ test("personal workflow dispatch rejects push-only permission when workflow scop
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /workflow\/Actions write permission could not be verified/);
 });
 
 test("personal workflow dispatch rechecks named workflow paths when queue omits files", async (t) => {
@@ -235,7 +262,7 @@ test("personal workflow dispatch rechecks named workflow paths when queue omits 
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /workflow\/Actions write permission/);
 });
 
 test("returned workflow PR repair still requires capability when scopes are omitted", async (t) => {
@@ -253,7 +280,7 @@ test("returned workflow PR repair still requires capability when scopes are omit
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /workflow\/Actions write permission could not be verified/);
 });
 
 test("returned workflow repair fails closed without named file evidence", async (t) => {
@@ -271,7 +298,7 @@ test("returned workflow repair fails closed without named file evidence", async 
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /complete changed-file list unavailable/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /Live pull-request check failed: example\/repo#42: GitHub returned incomplete changed-file metadata/);
 });
 
 test("personal workflow dispatch reports missing workflow write permission", async (t) => {
@@ -285,7 +312,7 @@ test("personal workflow dispatch reports missing workflow write permission", asy
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /lacks workflow\/Actions write permission/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /lacks workflow\/Actions write permission/);
 });
 
 test("personal workflow dispatch fails closed when OAuth scopes are unavailable", async (t) => {
@@ -299,7 +326,7 @@ test("personal workflow dispatch fails closed when OAuth scopes are unavailable"
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /workflow\/Actions write permission could not be verified/);
 });
 
 test("personal workflow dispatch fails closed when scope lookup fails", async (t) => {
@@ -313,7 +340,7 @@ test("personal workflow dispatch fails closed when scope lookup fails", async (t
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /workflow\/Actions write permission could not be verified/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /workflow\/Actions write permission could not be verified/);
 });
 
 test("personal workflow dispatch fails closed when changed-file evidence is unavailable", async (t) => {
@@ -327,7 +354,7 @@ test("personal workflow dispatch fails closed when changed-file evidence is unav
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((notification) => /complete changed-file list unavailable/.test(notification.message)));
+	await assertErrorDetails(pi, ctx, /Live pull-request check failed: example\/repo#42: GitHub returned incomplete changed-file metadata/);
 });
 
 test("Issue s and Alt-S dispatch issue implementation, while d requests issue evidence", () => {
@@ -740,5 +767,5 @@ test("live head changes still block the captured pull request", async (t) => {
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 	assert.equal(pi.messages.length, 0);
-	assert.ok(ctx.notifications.some((entry) => /pull request head changed/.test(entry.message)));
+	await assertErrorDetails(pi, ctx, /pull request head changed/);
 });

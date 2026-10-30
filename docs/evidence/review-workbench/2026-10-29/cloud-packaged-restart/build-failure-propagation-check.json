@@ -1,0 +1,9 @@
+{
+  "strict_failure_propagation": {
+    "exit_code": 1,
+    "stdout": "",
+    "expected": "exit 1 without executing later commands"
+  },
+  "final_stage_byte_identical": true,
+  "source_revision": "bd143724883888d9c19695647c86b8b824a1d9b7"
+}

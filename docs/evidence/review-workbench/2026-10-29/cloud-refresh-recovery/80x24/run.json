@@ -1,0 +1,7 @@
+{
+  "scenario": "refresh-recovery",
+  "source_sha": "48fbaa8a0fa6929b261c1556e03dc0ffbdd7df6e",
+  "fresh_home_before_spawn": true,
+  "real_omp": "18.13.3 pinned source plus shipped session-lifecycle.patch, existing SDK dependencies; not packaged SIF",
+  "model_handoffs": "intercepted before provider calls"
+}

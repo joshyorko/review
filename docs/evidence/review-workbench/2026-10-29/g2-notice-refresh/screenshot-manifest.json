@@ -1,0 +1,510 @@
+{
+  "commit": "516b28987a492fffba6040bc3a4bbcc83817ef4c",
+  "ui_manifest_sha256": "3d5cf1fab729763176bfca09e2b1bcff6f896bade18fa165e1f17b4563c596fc",
+  "screenshots": [
+    {
+      "path": "screenshots/01-baseline-dashboard.png",
+      "sha256": "e57f4efdcd69238fd6f08c6890d1e1261ba5aed523a52a8d639006ab40dc4603",
+      "geometry": {
+        "file": "01-baseline-dashboard.png",
+        "timestamp": "2026-10-29T16:37:53Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/02-a1-error-dashboard.png",
+      "sha256": "25d2d08a4d38caa4cd0b6ac7a7011893239b0bacf52c5be5cfb048ce38252d7c",
+      "geometry": {
+        "file": "02-a1-error-dashboard.png",
+        "timestamp": "2026-10-29T16:37:57Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/03-status-viewer-top.png",
+      "sha256": "e1f2fd3d18250f7ffb585813f5346cc5812996dd8097d76b9a24febb869269ee",
+      "geometry": {
+        "file": "03-status-viewer-top.png",
+        "timestamp": "2026-10-29T16:38:02Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/04-status-viewer-scrolled.png",
+      "sha256": "f31f92773400ba102f24292ab23ba588ad44b9c4c3d1ef6750513b6bcddb0f30",
+      "geometry": {
+        "file": "04-status-viewer-scrolled.png",
+        "timestamp": "2026-10-29T16:38:04Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/05-same-pr-after-ack.png",
+      "sha256": "344733700120797cde0c62ad210042df57d9b54f45c987bfd4892b64462f53ff",
+      "geometry": {
+        "file": "05-same-pr-after-ack.png",
+        "timestamp": "2026-10-29T16:38:08Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/06-a1-restored.png",
+      "sha256": "10873a75006fd06b87abb925265bf2483b0c2b55e0c56586544ac03afab8e796",
+      "geometry": {
+        "file": "06-a1-restored.png",
+        "timestamp": "2026-10-29T16:38:11Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/07-settings-landing.png",
+      "sha256": "b64332af9d866808932493ea9202d9e339f763301fdbff3283cc2581422b1dd7",
+      "geometry": {
+        "file": "07-settings-landing.png",
+        "timestamp": "2026-10-29T16:38:15Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/08-settings-tasks.png",
+      "sha256": "0c47e555bdceccc4b05af7beb113a3b4b730cbd38a4a82ef5c790a32d78ba89f",
+      "geometry": {
+        "file": "08-settings-tasks.png",
+        "timestamp": "2026-10-29T16:38:17Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/09-settings-subagents.png",
+      "sha256": "2ca8d4dff7e3cc72eb11c45b78607a3ca4ce6801c917053947b098d9ca5392a4",
+      "geometry": {
+        "file": "09-settings-subagents.png",
+        "timestamp": "2026-10-29T16:38:19Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/10-structured-selected.png",
+      "sha256": "c1ea1bfb687a0779d277976d5c5e767bd3e2de6c8558625441cbf273424426ea",
+      "geometry": {
+        "file": "10-structured-selected.png",
+        "timestamp": "2026-10-29T16:38:23Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/11-structured-enabled.png",
+      "sha256": "263e108f6b706a6619b4f332c47c83d723610203854f3627356ba7a1f768d2c5",
+      "geometry": {
+        "file": "11-structured-enabled.png",
+        "timestamp": "2026-10-29T16:38:25Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/12-details-top.png",
+      "sha256": "bfab4f9485b33c3186932b8bc1956977cb912af978359fcfaf3f5ce084db3c59",
+      "geometry": {
+        "file": "12-details-top.png",
+        "timestamp": "2026-10-29T16:38:30Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/13-details-scrolled.png",
+      "sha256": "61b5614123d03ae01c1bb464a10907720ba82a9bb540ab37c1bfc0f1ae799248",
+      "geometry": {
+        "file": "13-details-scrolled.png",
+        "timestamp": "2026-10-29T16:38:33Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/14-same-pr-before-retry.png",
+      "sha256": "4f5ba21bede98c6f96d0eb5cbc19548617d80458525557acc3a21e55b31ef41f",
+      "geometry": {
+        "file": "14-same-pr-before-retry.png",
+        "timestamp": "2026-10-29T16:38:36Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/15-after-admitted-retry.png",
+      "sha256": "44941a5d6e0dcfb3d7c50dc4b3ffada353d81ee6034f16cf7bc9477b64ee1e27",
+      "geometry": {
+        "file": "15-after-admitted-retry.png",
+        "timestamp": "2026-10-29T16:38:39Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/16-resolved-details.png",
+      "sha256": "9fdd5fe734b812e4941ebeb2578ecdd6e07a1daf7a22d0167d550685898cb4d8",
+      "geometry": {
+        "file": "16-resolved-details.png",
+        "timestamp": "2026-10-29T16:38:43Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/17-status-after-retry.png",
+      "sha256": "19456065a05dd553f29d381b03b0967aa1e41ee356b027e2a6a221894e69560c",
+      "geometry": {
+        "file": "17-status-after-retry.png",
+        "timestamp": "2026-10-29T16:38:47Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    },
+    {
+      "path": "screenshots/18-review-completion.png",
+      "sha256": "04417c87190035637577777dfa57203daa2eab2fc42d7f1c926edf85a8269981",
+      "geometry": {
+        "file": "18-review-completion.png",
+        "timestamp": "2026-10-29T16:38:50Z",
+        "target": [
+          100,
+          32
+        ],
+        "vte": [
+          100,
+          32
+        ],
+        "pty_ioctl": [
+          100,
+          32
+        ],
+        "cell_px": [
+          10,
+          19
+        ],
+        "alloc_px": [
+          1002,
+          610
+        ]
+      }
+    }
+  ]
+}

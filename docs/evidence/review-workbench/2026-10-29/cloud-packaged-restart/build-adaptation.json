@@ -1,0 +1,9 @@
+{
+  "input_sha256": "321486a6981c10523a26d3f88dba7936e77fe35eb93e1e97a7e8bd8bace33acb",
+  "output_sha256": "ba4f44c11aec4caa3c56321d3c7ec83516c5480850c7422da9fc773384ba9847",
+  "original_build_RUN_count": 11,
+  "compacted_build_RUN_count": 2,
+  "COPY_count_preserved": 17,
+  "changes": "All build-stage ARG and ordinary COPY instructions moved before RUNs. RUN bodies retain order and each runs in a separate subshell. Audio COPY retains its seam between RUN groups. Original pins, source files, verification, final stage, labels, USER, ENTRYPOINT unchanged.",
+  "reason": "Default managed Docker vfs duplicated 29 build layers and exhausted 32 GB. No storage driver or daemon settings changed."
+}

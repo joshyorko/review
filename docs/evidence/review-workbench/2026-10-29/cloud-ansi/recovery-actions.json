@@ -1,0 +1,196 @@
+[
+  {
+    "capture": "01-baseline.png"
+  },
+  {
+    "input": "s",
+    "label": "refused start",
+    "wait": 0.5
+  },
+  {
+    "capture": "02-structured-refusal.png"
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "input": "/visual-task-check\r",
+    "label": "/visual-task-check<ENTER>",
+    "wait": 0.5
+  },
+  {
+    "input": "/visual-inspect-notice-entry\r",
+    "label": "/visual-inspect-notice-entry<ENTER>",
+    "wait": 0.5
+  },
+  {
+    "input": "/review status\r",
+    "label": "/review status<ENTER>",
+    "wait": 0.5
+  },
+  {
+    "capture": "03-status.png"
+  },
+  {
+    "input": "jjjjjjjj",
+    "label": "jjjjjjjj",
+    "wait": 0.5
+  },
+  {
+    "capture": "04-status-scrolled.png"
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "input": "\u001bb",
+    "label": "<ALT-B>",
+    "wait": 0.5
+  },
+  {
+    "capture": "05-same-pr-after-status.png"
+  },
+  {
+    "input": "s",
+    "label": "s",
+    "wait": 0.5
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "input": "/settings\r",
+    "label": "/settings<ENTER>",
+    "wait": 0.5
+  },
+  {
+    "capture": "06-settings.png"
+  },
+  {
+    "input": "\u001b[C\u001b[C\u001b[C\u001b[C\u001b[C\u001b[C\u001b[C\u001b[C",
+    "label": "<RIGHT><RIGHT><RIGHT><RIGHT><RIGHT><RIGHT><RIGHT><RIGHT>",
+    "wait": 0.5
+  },
+  {
+    "capture": "07-settings-tasks.png"
+  },
+  {
+    "input": "\t\u001b[B",
+    "label": "<TAB><DOWN>",
+    "wait": 0.5
+  },
+  {
+    "capture": "08-settings-subagents.png"
+  },
+  {
+    "input": "\r\u001b[B\u001b[B",
+    "label": "<ENTER><DOWN><DOWN>",
+    "wait": 0.5
+  },
+  {
+    "capture": "09-structured-before.png"
+  },
+  {
+    "input": " ",
+    "label": " ",
+    "wait": 0.5
+  },
+  {
+    "capture": "10-structured-enabled.png"
+  },
+  {
+    "input": "\u001b",
+    "label": "<ESC>",
+    "wait": 0.5
+  },
+  {
+    "input": "/visual-task-check\r",
+    "label": "/visual-task-check<ENTER>",
+    "wait": 0.5
+  },
+  {
+    "input": "/review details\r",
+    "label": "/review details<ENTER>",
+    "wait": 0.5
+  },
+  {
+    "capture": "11-details.png"
+  },
+  {
+    "input": "jjjjjjjjjj",
+    "label": "jjjjjjjjjj",
+    "wait": 0.5
+  },
+  {
+    "capture": "12-details-scrolled.png"
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "input": "\u001bb",
+    "label": "<ALT-B>",
+    "wait": 0.5
+  },
+  {
+    "capture": "13-same-pr-before-retry.png"
+  },
+  {
+    "input": "s",
+    "label": "s",
+    "wait": 0.5
+  },
+  {
+    "capture": "14-after-retry.png"
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "input": "/review details\r",
+    "label": "/review details<ENTER>",
+    "wait": 0.5
+  },
+  {
+    "capture": "15-details-after-retry.png"
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "input": "/review status\r",
+    "label": "/review status<ENTER>",
+    "wait": 0.5
+  },
+  {
+    "capture": "16-status-after-retry.png"
+  },
+  {
+    "input": "q",
+    "label": "q",
+    "wait": 0.5
+  },
+  {
+    "input": "/review \t",
+    "label": "/review <TAB>",
+    "wait": 0.5
+  },
+  {
+    "capture": "17-command-completion.png"
+  },
+  {
+    "quit": true
+  }
+]

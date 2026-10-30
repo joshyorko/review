@@ -1,0 +1,20 @@
+[
+  "/workspace/.review-dev/visual-install/bun/bun-linux-x64-baseline/bun",
+  "/tmp/pr94-ansi-1di33tyt/omp-lifecycle/packages/coding-agent/src/cli.ts",
+  "--profile",
+  "review-visual",
+  "--cwd",
+  "/tmp/pr94-ansi-1di33tyt/qualified-factory-80x24/work",
+  "--config",
+  "/tmp/pr94-ansi-1di33tyt/qualified-factory-80x24/config.yml",
+  "--extension",
+  "/tmp/pr94-ansi-1di33tyt/qualified-factory-80x24/probe/visual-probe.ts",
+  "--no-skills",
+  "--no-rules",
+  "--no-context-files",
+  "--no-lsp",
+  "--no-title",
+  "--no-pty",
+  "--model",
+  "local-probe/deterministic"
+]

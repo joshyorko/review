@@ -137,8 +137,9 @@ commits(last: 1) {
 
 /** Expensive PR evidence fetched only by bounded, named-item reads. */
 const PR_DETAIL_FIELDS = `
+baseRefOid
 files(first: 100) {
-	pageInfo { hasNextPage }
+	pageInfo { hasNextPage endCursor }
 	nodes { path }
 }
 commits(last: 1) {
@@ -299,6 +300,7 @@ interface SearchNode {
 	deletions?: number;
 	closed?: boolean;
 	changedFiles?: number;
+	baseRefOid?: string;
 	autoMergeRequest?: { enabledAt?: string } | null;
 	author?: { login?: string } | null;
 	repository?: { nameWithOwner?: string } | null;
@@ -306,7 +308,7 @@ interface SearchNode {
 	reviewRequests?: {
 		nodes?: Array<{ requestedReviewer?: { __typename?: string; login?: string } | null } | null>;
 	} | null;
-	files?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Array<{ path?: string }> } | null;
+	files?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ path?: string }> } | null;
 	commits?: {
 		nodes?: Array<{
 			commit?: {
@@ -599,6 +601,171 @@ const ITEM_KEY = /^([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)#(\d+)$/;
  * other kind is simply absent from the result — the caller reports the
  * shortfall rather than inventing a row for it.
  */
+const PR_FILE_PAGE_SIZE = 100;
+const PR_FILE_MAX_PAGES = 30;
+const PR_FILE_MAX_RESPONSE_BYTES = 1_048_576;
+const PR_DETAIL_MAX_RESPONSE_BYTES = 4_194_304;
+const PR_FILE_MAX_PATH_BYTES = 16_777_216;
+
+interface PrFileTarget {
+	alias: string;
+	owner: string;
+	name: string;
+	number: number;
+}
+
+interface CompletePrFilesResult {
+	readonly files?: NonNullable<SearchNode["files"]>;
+	readonly error?: string;
+}
+
+async function readBoundedJson(response: Response, maximumBytes: number): Promise<unknown> {
+	const decoder = new TextDecoder();
+	const reader = response.body?.getReader();
+	if (!reader) {
+		if (typeof response.text === "function") {
+			const text = await response.text();
+			if (new TextEncoder().encode(text).byteLength > maximumBytes) throw new Error("GitHub response exceeded the byte limit");
+			return JSON.parse(text) as unknown;
+		}
+		const payload = await response.json() as unknown;
+		const serialized = JSON.stringify(payload);
+		if (typeof serialized !== "string" || new TextEncoder().encode(serialized).byteLength > maximumBytes) {
+			throw new Error("GitHub response exceeded the byte limit");
+		}
+		return payload;
+	}
+	const chunks: Uint8Array[] = [];
+	let byteLength = 0;
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		byteLength += value.byteLength;
+		if (byteLength > maximumBytes) {
+			await reader.cancel();
+			throw new Error("GitHub response exceeded the file-page byte limit");
+		}
+		chunks.push(value);
+	}
+	const bytes = new Uint8Array(byteLength);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return JSON.parse(decoder.decode(bytes)) as unknown;
+}
+
+async function completePrFileList(
+	target: PrFileTarget,
+	node: SearchNode,
+	options: FetchOptions,
+	deadlineAt: number,
+): Promise<CompletePrFilesResult> {
+	const firstPage = node.files;
+	if (!firstPage || !Array.isArray(firstPage.nodes) || typeof firstPage.pageInfo?.hasNextPage !== "boolean") {
+		return { error: "GitHub returned incomplete changed-file metadata" };
+	}
+	if (!Number.isSafeInteger(node.changedFiles) || node.changedFiles! < 0) {
+		return { error: "GitHub returned an invalid or missing changed-file count" };
+	}
+	const paths: string[] = [];
+	const seenPaths = new Set<string>();
+	let pathBytes = 0;
+	const encoder = new TextEncoder();
+	const addPaths = (pagePaths: unknown[]): string | undefined => {
+		for (const file of pagePaths) {
+			if (!isRecord(file) || typeof file.path !== "string" || file.path.length === 0) return "GitHub returned a changed file without a path";
+			if (seenPaths.has(file.path)) return "GitHub returned duplicate changed-file paths";
+			seenPaths.add(file.path);
+			pathBytes += encoder.encode(file.path).byteLength;
+			if (pathBytes > PR_FILE_MAX_PATH_BYTES) return "GitHub changed-file metadata exceeded the path byte limit";
+			paths.push(file.path);
+		}
+		return undefined;
+	};
+	const incompleteFiles = () => ({
+		files: { pageInfo: { hasNextPage: true, endCursor: firstPage.pageInfo?.endCursor }, nodes: paths.map((path) => ({ path })) },
+	});
+	const firstPathError = addPaths(firstPage.nodes);
+	if (firstPathError) return { ...incompleteFiles(), error: firstPathError };
+	if (firstPage.pageInfo.hasNextPage === false) {
+		if (paths.length !== node.changedFiles) {
+			return { ...incompleteFiles(), error: "GitHub changed-file count did not match the complete file list" };
+		}
+		return { files: firstPage };
+	}
+	if (!node.headRefOid || !node.baseRefOid || node.closed !== false) {
+		return incompleteFiles();
+	}
+	if (paths.length > node.changedFiles!) {
+		return { files: firstPage, error: "GitHub returned more changed files than the current PR count" };
+	}
+	let cursor = firstPage.pageInfo.endCursor;
+	if (typeof cursor !== "string" || cursor.length === 0) {
+		return incompleteFiles();
+	}
+	const seenCursors = new Set([cursor]);
+	let pageCount = 1;
+	while (true) {
+		if (pageCount >= PR_FILE_MAX_PAGES) {
+			return { files: { pageInfo: { hasNextPage: true, endCursor: cursor }, nodes: paths.map((path) => ({ path })) } };
+		}
+		const remainingMs = deadlineAt - Date.now();
+		if (remainingMs <= 0) return { error: "GitHub changed-file pagination exceeded its request deadline" };
+		const query = `query {\n\tw0: repository(owner: ${JSON.stringify(target.owner)}, name: ${JSON.stringify(target.name)}) {\n` +
+			`\t\tnameWithOwner\n\t\tpullRequest(number: ${target.number}) {\n` +
+			`\t\t\tnumber closed headRefOid baseRefOid changedFiles\n` +
+			`\t\t\tfiles(first: ${PR_FILE_PAGE_SIZE}, after: ${JSON.stringify(cursor)}) { pageInfo { hasNextPage endCursor } nodes { path } }\n` +
+			`\t\t}\n\t}\n}`;
+		try {
+			const response = await (options.fetchImpl ?? fetch)("https://api.github.com/graphql", {
+				method: "POST",
+				headers: { ...headers(options.token), "Content-Type": "application/json" },
+				body: JSON.stringify({ query }),
+				signal: deadlineSignal(remainingMs, options.signal),
+				redirect: "error",
+			});
+			if (!response.ok) return { error: `GitHub GraphQL ${response.status} ${response.statusText} while reading changed files` };
+			const payload = await readBoundedJson(response, PR_FILE_MAX_RESPONSE_BYTES) as {
+				data?: { w0?: { nameWithOwner?: string; pullRequest?: SearchNode | null } | null };
+				errors?: Array<{ message?: string }>;
+			};
+			if (payload.errors?.length) return { error: payload.errors.map((entry) => entry.message ?? "unknown").join("; ") };
+			const repository = payload.data?.w0;
+			const pagePr = repository?.pullRequest;
+			if (repository?.nameWithOwner?.toLowerCase() !== `${target.owner}/${target.name}`.toLowerCase() || !pagePr) {
+				return { error: "GitHub changed-file page no longer identifies the selected pull request" };
+			}
+			if (pagePr.number !== target.number || pagePr.closed !== false) return { error: "GitHub pull-request identity or open state changed during changed-file pagination" };
+			if (pagePr.headRefOid !== node.headRefOid) return { error: "GitHub pull-request head changed during changed-file pagination" };
+			if (pagePr.baseRefOid !== node.baseRefOid) return { error: "GitHub pull-request base changed during changed-file pagination" };
+			if (pagePr.changedFiles !== node.changedFiles) return { error: "GitHub changed-file count changed during pagination" };
+			const page = pagePr.files;
+			if (!page || !Array.isArray(page.nodes) || typeof page.pageInfo?.hasNextPage !== "boolean") {
+				return { error: "GitHub returned incomplete changed-file page data" };
+			}
+			const pathError = addPaths(page.nodes);
+			if (pathError) return { error: pathError };
+			if (paths.length > node.changedFiles!) return { error: "GitHub returned more changed files than the current PR count" };
+			pageCount += 1;
+			if (page.pageInfo.hasNextPage === false) {
+				if (paths.length !== node.changedFiles) return { error: "GitHub changed-file count did not match the complete file list" };
+				return { files: { pageInfo: { hasNextPage: false, endCursor: page.pageInfo.endCursor }, nodes: paths.map((path) => ({ path })) } };
+			}
+			const nextCursor = page.pageInfo.endCursor;
+			if (typeof nextCursor !== "string" || nextCursor.length === 0 || seenCursors.has(nextCursor)) {
+				return { error: "GitHub changed-file pagination cursor did not advance" };
+			}
+			seenCursors.add(nextCursor);
+			cursor = nextCursor;
+		} catch (error) {
+			if (options.signal?.aborted) return { error: "GitHub changed-file pagination was cancelled" };
+			return { error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+}
+
 export async function fetchItemsByKey(
 	keys: readonly string[],
 	mode: QueueMode,
@@ -624,6 +791,7 @@ export async function fetchItemsByKey(
 
 	const wanted = mode === "prs" ? "PullRequest" : "Issue";
 	const extras = mode === "prs" ? PR_ITEM_FIELDS : ISSUE_ITEM_FIELDS;
+	const deadlineAt = Date.now() + (options.timeoutMs ?? QUEUE_TIMEOUT_MS);
 	const query = `query {\n${targets
 		.map(
 			({ alias, owner, name, number }) =>
@@ -637,24 +805,44 @@ export async function fetchItemsByKey(
 			method: "POST",
 			headers: { ...headers(token), "Content-Type": "application/json" },
 			body: JSON.stringify({ query }),
-			signal: deadlineSignal(options.timeoutMs ?? QUEUE_TIMEOUT_MS, signal),
+			signal: deadlineSignal(Math.max(1, deadlineAt - Date.now()), signal),
 			redirect: "error",
 		});
 		if (!response.ok) {
 			return { items, error: `GitHub GraphQL ${response.status} ${response.statusText}`, fetchedAt: Date.now() };
 		}
-		const payload = (await response.json()) as {
+		const rawPayload = mode === "prs"
+			? await readBoundedJson(response, PR_DETAIL_MAX_RESPONSE_BYTES)
+			: await response.json();
+		const payload = rawPayload as {
 			data?: Record<string, { issueOrPullRequest?: SearchNode | null } | null>;
 			errors?: Array<{ message?: string }>;
 		};
 		// Partial data is normal here: one unreadable repository must not discard
 		// the rest of Hive's queue, so errors are reported beside what did resolve.
-		for (const { alias } of targets) {
-			const node = payload.data?.[alias]?.issueOrPullRequest;
+		const paginationErrors: string[] = [];
+		for (const target of targets) {
+			const node = payload.data?.[target.alias]?.issueOrPullRequest;
 			// The search path is `is:open`; by name it has to be asked. Hive keeps
 			// ranking work after it is closed, and a finished item is not a queue.
 			if (!node || node.closed === true) continue;
-			const item = toQueueItem(node, mode);
+			let itemNode = node;
+			if (mode === "prs") {
+				const completeFiles = await completePrFileList(target, node, options, deadlineAt);
+				if (completeFiles.error) {
+					paginationErrors.push(`${target.owner}/${target.name}#${target.number}: ${completeFiles.error}`);
+					itemNode = {
+						...node,
+						files: {
+							nodes: completeFiles.files?.nodes ?? [],
+							pageInfo: { hasNextPage: true },
+						},
+					};
+				} else if (completeFiles.files) {
+					itemNode = { ...node, files: completeFiles.files };
+				}
+			}
+			const item = toQueueItem(itemNode, mode);
 			if (item) {
 				// Named reads are the mutation boundary. Missing expensive evidence
 				// must fail closed rather than look like a clean PR.
@@ -665,9 +853,11 @@ export async function fetchItemsByKey(
 				);
 			}
 		}
-		const failed = payload.errors?.length
-			? payload.errors.map((entry) => entry.message ?? "unknown").join("; ")
-			: undefined;
+		const errors = [
+			...(payload.errors ?? []).map((entry) => entry.message ?? "unknown"),
+			...paginationErrors,
+		];
+		const failed = errors.length > 0 ? errors.join("; ") : undefined;
 		return { items, error: failed, fetchedAt: Date.now() };
 	} catch (error) {
 		if (signal?.aborted) return { items, cancelled: true, fetchedAt: Date.now() };
