@@ -91,7 +91,6 @@ PY
 #!/usr/bin/env bash
 set -euo pipefail
 root="\$(cd "\$(dirname "\$(readlink -f "\${BASH_SOURCE[0]}")")/../libexec" && pwd)"
-  export REVIEW_MODE=review
   export REVIEW_APPLIANCE_IMAGE="\${REVIEW_APPLIANCE_IMAGE:-$oci_image}"
   export REVIEW_APPLIANCE_FALLBACK_SIF="\${REVIEW_APPLIANCE_FALLBACK_SIF:-\$root/launcher/review.sif}"
   if [[ "\${1:-}" != changelog ]]; then cat "\$root/build.txt"; fi

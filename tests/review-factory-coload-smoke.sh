@@ -51,7 +51,6 @@ run_case() {
     --env XDG_STATE_HOME=/home/review/.local/state
     --env XDG_CACHE_HOME=/home/review/.cache
     --env REVIEW_DEFAULT_SCOPE=example/repo
-    --env REVIEW_MODE=review
     --env GH_TOKEN=
     --env GITHUB_TOKEN=
   )
@@ -136,7 +135,6 @@ policy_rpc() {
         --env XDG_STATE_HOME=/home/review/.local/state \
         --env XDG_CACHE_HOME=/home/review/.cache \
         --env REVIEW_DEFAULT_SCOPE=example/repo \
-        --env REVIEW_MODE=review \
         --env GH_TOKEN= \
         --env GITHUB_TOKEN= \
         --volume "$policy_home:/home/review:rw" "$image" \

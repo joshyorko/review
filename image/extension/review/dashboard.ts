@@ -50,8 +50,6 @@ export const DASHBOARD_KEYS: readonly RailKey[] = [
 	{ chord: "t", label: "trace" },
 	{ chord: "p", label: "pause" },
 	{ chord: "h/l", label: "fold" },
-	{ chord: "H", label: "hive" },
-	{ chord: "L", label: "stage" },
 	{ chord: "d", label: "diff" },
 	{ chord: "v", label: "read" },
 	{ chord: "enter", label: "cite" },
@@ -62,7 +60,7 @@ export const DASHBOARD_KEYS: readonly RailKey[] = [
 ];
 
 const HELP: readonly string[] = [
-	"HIVE WORKBENCH",
+	"REVIEW WORKBENCH",
 	"",
 	"  space            toggle selection on the highlighted item",
 	"  F                Send selected items to Factory",
@@ -75,7 +73,6 @@ const HELP: readonly string[] = [
 	"  v                read the highlighted pull request or issue",
 	"  h / l, ← / →     collapse or expand a trace span",
 	"  g / G            jump to first or last row",
-	"  H / L            toggle Hive-only / step Hive stages",
 	"  o / r            change repository / refetch",
 	"  /                filter by title, repo, author, label, or number",
 	"  s                slay selected PRs or implement selected issues",
@@ -88,8 +85,7 @@ const HELP: readonly string[] = [
 	"  q, esc           close the workbench",
 	"",
 	"The trace projects OMP turn and tool execution.",
-	"Hive supplies priority and claims. GitHub supplies read-only evidence when",
-	"the connected Hive does not yet expose the unified work capability.",
+	"GitHub supplies the queue and current evidence.",
 ];
 
 interface TuiLike {
@@ -172,7 +168,7 @@ export class ReviewDashboard {
 	private stopTick: (() => void) | undefined;
 	private lastWidth = 120;
 	private queueRowItems: (number | "divider")[] = [];
-	private traceRowSpans: (string | "hive" | undefined)[] = [];
+	private traceRowSpans: (string | undefined)[] = [];
 	private showReader = false;
 	private readerScroll = 0;
 	private readerDetail: PrDetail | undefined;
@@ -423,13 +419,6 @@ export class ReviewDashboard {
 			return;
 		}
 		if (col > 36 && col < width - 20) {
-			if (this.mode.isReviewMode()) return;
-			if (this.mode.hiveLevel !== undefined) {
-				this.mode.cycleHiveLevel();
-			} else {
-				this.mode.toggleHiveOnly();
-			}
-			this.tui.requestRender();
 			return;
 		}
 		if (col >= width - 20) {
@@ -489,10 +478,6 @@ export class ReviewDashboard {
 		}
 		const traceOffset = bodyRow - 1;
 		const spanId = this.traceRowSpans[traceOffset];
-		if (spanId === "hive") {
-			this.tui.requestRender();
-			return;
-		}
 		if (typeof spanId === "string") {
 			const ids = this.traceIds(Date.now());
 			const cursorIdx = ids.indexOf(spanId);
@@ -510,12 +495,12 @@ export class ReviewDashboard {
 		}
 
 		// Fallback when rendered map is not populated yet
-		const hive = this.hiveRows(width);
-		if (traceOffset < hive.length) {
+		const details = this.selectionContextRows(width);
+		if (traceOffset < details.length) {
 			this.tui.requestRender();
 			return;
 		}
-		const spanRowIndex = traceOffset - hive.length;
+		const spanRowIndex = traceOffset - details.length;
 		const roots = this.traceRoots(Date.now());
 		const rendered = renderSpanTree(roots, {
 			painter: this.painter,
@@ -524,7 +509,7 @@ export class ReviewDashboard {
 			frame: this.frame,
 			expansion: this.expansion,
 			focusedId: undefined,
-			maxLogLines: Math.max(3, Math.floor((height - 1 - hive.length) / 3)),
+			maxLogLines: Math.max(3, Math.floor((height - 1 - details.length) / 3)),
 		});
 		const targetRow = rendered[this.traceScroll + spanRowIndex];
 		if (targetRow && targetRow.kind === "span") {
@@ -676,12 +661,6 @@ export class ReviewDashboard {
 	}
 
 	private handleStatusBarClick(col: number, _width: number): void {
-		if (col < 30) {
-			if (this.mode.isReviewMode()) return;
-			this.mode.toggleHiveOnly();
-			this.tui.requestRender();
-			return;
-		}
 		if (col < 55) {
 			const item = this.mode.selected();
 			if (item) {
@@ -785,7 +764,7 @@ export class ReviewDashboard {
 				return;
 			case "alt+s":
 			case "\u001bs": {
-				if (this.mode.isReviewMode() && this.mode.queueMode === "issues") {
+				if (this.mode.queueMode === "issues") {
 					const items = this.mode.slayableItems(BATCH_LIMIT);
 					if (items.length === 0) return;
 					this.emitAction({ kind: "fix", item: items[0]!, items });
@@ -835,16 +814,6 @@ export class ReviewDashboard {
 			case "right":
 				if (this.pane === "trace") this.toggleSpan(true);
 				else this.pane = "trace";
-				this.tui.requestRender();
-				return;
-			case "H":
-				if (this.mode.isReviewMode()) return;
-				this.mode.toggleHiveOnly();
-				this.tui.requestRender();
-				return;
-			case "L":
-				if (this.mode.isReviewMode()) return;
-				this.mode.cycleHiveLevel();
 				this.tui.requestRender();
 				return;
 			case "r":
@@ -1066,7 +1035,7 @@ export class ReviewDashboard {
 	private headerRow(width: number, now: number): string {
 		const tally = this.mode.ciTally();
 		const parts = [
-			this.painter.bold(this.painter.fg("accent", `${GLYPH.hex} ${this.mode.isReviewMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH"}`)),
+			this.painter.bold(this.painter.fg("accent", `${GLYPH.hex} REVIEW WORKBENCH`)),
 			this.painter.fg("dim", GLYPH.logDashed.trim()),
 			this.painter.bold(
 				this.painter.fg(
@@ -1095,14 +1064,7 @@ export class ReviewDashboard {
 			),
 		];
 		const source = orderSourceLabel(this.mode);
-		const sourceText = this.mode.hiveOnly && this.mode.hive.online ? `${source.text} (hive-only)` : source.text;
-		if (this.mode.hiveLevel !== undefined) {
-			parts.push(this.painter.fg("dim", GLYPH.dot), this.painter.fg("warning", `stage ${this.mode.hiveLevel}`));
-		}
-		parts.push(this.painter.fg("dim", GLYPH.dot), this.painter.fg(source.role, sourceText));
-		for (const group of this.mode.hive.triage) {
-			if (group.count > 0) parts.push(this.painter.fg("dim", `${group.label.toLowerCase()} ${group.count}`));
-		}
+		parts.push(this.painter.fg("dim", GLYPH.dot), this.painter.fg(source.role, source.text));
 		return truncateToWidth(parts.join(" "), width);
 	}
 
@@ -1114,8 +1076,6 @@ export class ReviewDashboard {
 			let emptyMsg: string;
 			if (this.mode.loading) {
 				emptyMsg = `  ${this.painter.fg("warning", statusIcon("running", this.frame))} loading queue…`;
-			} else if (this.mode.hiveOnly && this.mode.hive.online && this.mode.items.length > 0) {
-				emptyMsg = `  no Hive-ranked ${this.mode.queueMode} (${this.mode.items.length} unranked open — press H to show all, Tab for ${this.mode.queueMode === "prs" ? "issues" : "prs"})`;
 			} else {
 				emptyMsg = "  nothing open";
 			}
@@ -1165,91 +1125,29 @@ export class ReviewDashboard {
 		return rows;
 	}
 
-	/**
-	 * What Hive knows about the selected row.
-	 *
-	 * Hive's queue is mostly issues, and an issue has no recorded pipeline, so
-	 * the pane that exists to explain the selection was blank for exactly the
-	 * work this tool is pointed at. This is the drill-down: why it is ranked
-	 * where it is, what stage Hive has it at, and whether a change already
-	 * exists that would close it.
-	 */
-	private hiveRows(width: number): string[] {
+	/** Additional GitHub evidence about the selected row. */
+	private selectionContextRows(width: number): string[] {
 		const item = this.mode.selected();
-		if (!item) return [];
-		const work = this.mode.hiveWorkFor(item);
-		const priority = this.mode.priorityFor(item);
-		if (!work && priority?.hiveRank === undefined && priority?.category !== "blocked") return [];
-
+		const priority = item ? this.mode.priorityFor(item) : undefined;
+		if (!item || !priority) return [];
 		const rows: string[] = [];
-		if (priority?.category === "blocked") {
+		if (priority.category === "blocked") {
 			rows.push(truncateToWidth(`  ${this.painter.fg("error", "BLOCKED")}${this.painter.fg("dim", ` ${GLYPH.dot} ${priority.reason}`)}`, width));
-			if (item.workflowFiles && item.workflowFiles.length > 0) {
-				for (const file of item.workflowFiles) {
-					rows.push(truncateToWidth(this.painter.fg("dim", `  changes ${file}`), width));
-				}
+			if (item.workflowFiles?.length) {
+				for (const file of item.workflowFiles) rows.push(truncateToWidth(this.painter.fg("dim", `  changes ${file}`), width));
 			} else if (item.changedFilesComplete === false) {
 				rows.push(truncateToWidth(this.painter.fg("dim", "  complete changed-file list unavailable"), width));
 			}
-		}
-		const rank = priority?.hiveRank === undefined ? "" : `hive #${priority.hiveRank + 1}`;
-		const stage = work?.level ? ` ${GLYPH.dot} stage ${work.level}` : "";
-		if (rank) {
-			rows.push(truncateToWidth(`  ${this.painter.fg("accent", rank)}${this.painter.fg("dim", stage)}`, width));
-		}
-		// The reason only earns a row when it says something the rank and stage
-		// above it do not: `hive <level> #<n>` is the same sentence twice.
-		if (priority?.reason && priority.hiveRank === undefined && priority.category !== "blocked") {
+		} else {
 			rows.push(truncateToWidth(this.painter.fg("dim", `  ${priority.reason}`), width));
 		}
-		const claimedBy = this.mode.claimFor(item);
-		if (claimedBy) {
-			rows.push(truncateToWidth(this.painter.fg("warning", `  a worker is on this now: ${claimedBy}`), width));
-		}
-		if (work && work.key !== `${item.repo}#${item.id}`) {
-			// Ranked through the issue it closes, not on its own name.
-			rows.push(truncateToWidth(this.painter.fg("dim", `  queued as ${work.key}`), width));
-		}
-		if (work?.labels.length) {
-			rows.push(truncateToWidth(this.painter.fg("dim", `  labels ${work.labels.join(", ")}`), width));
-		}
-		if (work?.url) rows.push(truncateToWidth(this.painter.fg("dim", `  ${work.url}`), width));
-
-		// Changes that already answer this queued work, so a maintainer never
-		// starts an issue somebody has already finished. Hive's own link is
-		// authoritative and survives a queue window that never fetched the pull
-		// request; the fetched queue adds any others that close the same issue.
-		const answering = this.mode.items.filter(
-			(candidate) => candidate.type === "pr" && (candidate.closingIssues ?? []).includes(work?.key ?? ""),
-		);
-		if (work?.pr) {
-			const state = work.pr.state ? ` ${GLYPH.dot} ${work.pr.state}` : "";
-			rows.push(
-				truncateToWidth(
-					`  ${this.painter.fg("accent", `#${work.pr.number}`)}${this.painter.fg("dim", `${state} ${GLYPH.dot} hive`)}`,
-					width,
-				),
-			);
-		}
-		for (const pr of answering) {
-			if (pr.id === work?.pr?.number) continue;
-			const ci = ciGlyph(pr.ciStatus);
-			rows.push(
-				truncateToWidth(
-					`  ${this.painter.fg(statusRole(ci.status), ci.glyph)} ${this.painter.fg("accent", `#${pr.id}`)} ${this.painter.fg("text", pr.title)}`,
-					width,
-				),
-			);
-		}
-		if (item.type === "issue" && item.closedByPrs && item.closedByPrs.length > 0) {
-			rows.push(
-				truncateToWidth(
-					`  ${this.painter.fg("accent", "merged PR:")} ${this.painter.fg("warning", item.closedByPrs.join(", "))} ${this.painter.fg("dim", "(review before closing)")}`,
-					width,
-				),
-			);
-		} else if (work && !work.pr && answering.length === 0) {
-			rows.push(truncateToWidth(this.painter.fg("dim", "  no open change closes this yet"), width));
+		if (item.type === "issue") {
+			const answering = this.mode.items.filter((candidate) => candidate.type === "pr" && (candidate.closingIssues ?? []).includes(`${item.repo}#${item.id}`));
+			for (const pr of answering) {
+				const ci = ciGlyph(pr.ciStatus);
+				rows.push(truncateToWidth(`  ${this.painter.fg(statusRole(ci.status), ci.glyph)} ${this.painter.fg("accent", `#${pr.id}`)} ${this.painter.fg("text", pr.title)}`, width));
+			}
+			if (item.closedByPrs?.length) rows.push(truncateToWidth(`  ${this.painter.fg("accent", "merged PR:")} ${this.painter.fg("warning", item.closedByPrs.join(", "))} ${this.painter.fg("dim", "(review before closing)")}`, width));
 		}
 		rows.push("");
 		return rows;
@@ -1257,14 +1155,14 @@ export class ReviewDashboard {
 
 	private traceRows(width: number, height: number, now: number): string[] {
 		this.traceRowSpans = [];
-		const hive = this.hiveRows(width);
-		for (let i = 0; i < hive.length; i++) {
-			this.traceRowSpans.push("hive");
+		const details = this.selectionContextRows(width);
+		for (let i = 0; i < details.length; i++) {
+			this.traceRowSpans.push(undefined);
 		}
 		const roots = this.traceRoots(now);
 		if (roots.length === 0) {
 			this.traceRowSpans.push(undefined);
-			return [...hive, this.painter.fg("dim", `  ${statusIcon("pending")} no OMP activity yet`)];
+			return [...details, this.painter.fg("dim", `  ${statusIcon("pending")} no OMP activity yet`)];
 		}
 		const ids = this.traceIds(now);
 		this.traceCursor = Math.min(this.traceCursor, Math.max(0, ids.length - 1));
@@ -1277,7 +1175,7 @@ export class ReviewDashboard {
 			frame: this.frame,
 			expansion: this.expansion,
 			focusedId,
-			maxLogLines: Math.max(3, Math.floor((height - hive.length) / 3)),
+			maxLogLines: Math.max(3, Math.floor((height - details.length) / 3)),
 		});
 
 		if (focusedId === undefined) {
@@ -1289,7 +1187,7 @@ export class ReviewDashboard {
 			const cursorRow = rendered.findIndex((row) => row.kind === "span" && row.spanId === focusedId);
 			this.traceScroll = clampScroll(Math.max(0, cursorRow), this.traceScroll, height);
 		}
-		const spanSlice = rendered.slice(this.traceScroll, this.traceScroll + Math.max(1, height - hive.length));
+		const spanSlice = rendered.slice(this.traceScroll, this.traceScroll + Math.max(1, height - details.length));
 		for (const row of spanSlice) {
 			if (row.kind === "span") {
 				this.traceRowSpans.push(row.spanId);
@@ -1298,7 +1196,7 @@ export class ReviewDashboard {
 			}
 		}
 		const spans = spanSlice.map((row) => row.text);
-		return [...hive, ...spans];
+		return [...details, ...spans];
 	}
 
 	private paneTitle(pane: Pane, text: string, width: number): string {
@@ -1310,7 +1208,6 @@ export class ReviewDashboard {
 
 	private dashboardKeys(): RailKey[] {
 		return DASHBOARD_KEYS
-			.filter((key) => !this.mode.isReviewMode() || (key.chord !== "H" && key.chord !== "L"))
 			// The Factory chord is advertised only while a Factory controller is
 			// registered: a key that cannot reach Factory is not a handoff.
 			.filter((key) => key.chord !== "F" || this.factoryAvailable())
@@ -1325,10 +1222,8 @@ export class ReviewDashboard {
 
 	private helpLines(): string[] {
 		const lines = HELP
-			.filter((line) => !this.mode.isReviewMode() || (!line.startsWith("  H / L") && !/hive/i.test(line)))
 			.filter((line) => !line.startsWith("  F ") || this.factoryAvailable())
 			.map((line) => line);
-		lines[0] = this.mode.isReviewMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH";
 		if (this.mode.queueMode === "issues") {
 			const replace = new Map([
 				["  s                review, repair, and land selected pull requests", "  s                implement selected issues and open review-ready PRs"],
@@ -1337,9 +1232,7 @@ export class ReviewDashboard {
 			]);
 			for (let index = 0; index < lines.length; index++) lines[index] = replace.get(lines[index]!) ?? lines[index]!;
 		}
-		if (this.mode.isReviewMode()) {
-			lines.push("GitHub supplies repository evidence and queue state.");
-		}
+		lines.push("GitHub supplies repository evidence and queue state.");
 		return lines;
 	}
 
@@ -1354,7 +1247,7 @@ export class ReviewDashboard {
 		lines.push(...notice.map((line) => truncateToWidth(line, width)));
 
 		if (this.showHelp) {
-			lines.push(this.painter.bold(this.painter.fg("accent", this.mode.isReviewMode() ? "REVIEW WORKBENCH" : "HIVE WORKBENCH")));
+			lines.push(this.painter.bold(this.painter.fg("accent", "REVIEW WORKBENCH")));
 			lines.push("");
 			for (const line of this.helpLines()) lines.push(truncateToWidth(this.painter.fg(line.startsWith("  ") ? "dim" : "text", line), width));
 			lines.push(keymapBar(this.painter, [{ chord: "?", label: "back" }], width));

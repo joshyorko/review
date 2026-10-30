@@ -78,7 +78,7 @@ Review is fast-moving, and cadence is part of correctness here.
 - Cadence never buys out a correctness gate. Batched work still passes the
   repository's full validation, every change still carries its evidence, and
   the sole-writer boundaries hold: one writer per branch or worktree, one
-  agent per landing batch, and Hive as the only assignment authority.
+  agent per landing batch, with Review admission governed by the human-confirmed workflow.
   Parallelism belongs to reading; writing stays single-writer.
 
 ## Human Continuation

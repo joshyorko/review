@@ -9,9 +9,8 @@ repair lineage, completion — out of conversational memory and into tested code
 > jobs, isolation, transcripts, and model plumbing. GitHub and repository policy
 > still own external authority.
 
-It is not a replacement for Hive, not another agent runtime, and not a Review
-rewrite. It adds no database, no daemon, no scheduler, and no second worker
-store.
+It is not another agent runtime or a Review rewrite. It adds no database, no
+daemon, no scheduler, and no second worker store.
 
 ## Contract mapping
 
@@ -235,7 +234,7 @@ Loading the extension registers a surface and waits: it starts no work, changes
 no model, takes over no Review queue, and enables no perpetual automation.
 Execution requires `LUNA_FACTORY_ENABLED=1`. Factory never approves, merges,
 publishes, or pushes to a protected branch, and it never infers an admission from
-a Hive rank or a visible queue row.
+a Review queue row.
 
 Review and Factory are not meant to hold the same scope at once; V1 has no
 automatic handoff. While an active Factory run owns the ledger, the same-name

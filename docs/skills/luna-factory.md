@@ -64,7 +64,7 @@ and separate Review/Factory authority.
 - Completion creates no merge, publish, or deploy authority.
 - Loading the extension starts nothing. Execution requires
   `LUNA_FACTORY_ENABLED=1`; Factory never infers admission from a visible GitHub
-  or explicitly enabled Hive queue row.
+  or visible GitHub queue row.
 - `LUNA_FACTORY_ENABLED` and `LUNA_FACTORY_CAPACITY` are the only Factory
   runtime knobs that are user configuration; both cross the personal appliance
   boundary by name, and neither value is ever rendered into argv. Loading

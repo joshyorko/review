@@ -585,17 +585,14 @@ export async function fetchQueue(mode: QueueMode, options: FetchOptions = {}): P
 	}
 }
 
-/** `owner/repo#number`, as Hive names its work. */
+/** Canonical `owner/repo#number` identifier used by the GitHub queue. */
 const ITEM_KEY = /^([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)#(\d+)$/;
 
 /**
  * Named work, fetched by identity instead of found by search.
  *
- * The queue is a search over recently updated items, and Hive's backlog is
- * mostly neither recent nor updated: measured against `projectbluefin`, six of
- * ten queued items fell outside the window, so the tool whose purpose is
- * burning that queue down never showed them. Search decides what is nearby;
- * this decides what is required.
+ * A named read revalidates an item against GitHub by its stable identity when
+ * the queue search is not the appropriate source for that operation.
  *
  * One aliased request for the whole set. Anything closed, moved, or of the
  * other kind is simply absent from the result — the caller reports the
@@ -819,12 +816,12 @@ export async function fetchItemsByKey(
 			errors?: Array<{ message?: string }>;
 		};
 		// Partial data is normal here: one unreadable repository must not discard
-		// the rest of Hive's queue, so errors are reported beside what did resolve.
+		// the other named GitHub results, so errors are reported beside resolved data.
 		const paginationErrors: string[] = [];
 		for (const target of targets) {
 			const node = payload.data?.[target.alias]?.issueOrPullRequest;
-			// The search path is `is:open`; by name it has to be asked. Hive keeps
-			// ranking work after it is closed, and a finished item is not a queue.
+			// The search path is `is:open`; by name it has to be asked again because
+			// a finished item is not an active GitHub queue row.
 			if (!node || node.closed === true) continue;
 			let itemNode = node;
 			if (mode === "prs") {

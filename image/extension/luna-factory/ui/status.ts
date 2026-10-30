@@ -23,7 +23,7 @@ export function truncatePlain(text: string, width: number): string {
  * The one-line status indicator.
  *
  * Namespaced with `Factory <generation>` so it cannot be mistaken for Review's
- * queue gauge or Hive connectivity.
+ * queue gauge.
  */
 export function renderStatus(ledger: Ledger, width = 120, verdict: RunVerdict = evaluateRun(ledger)): string {
 	const active = verdict.activeMandatory;

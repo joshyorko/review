@@ -27,7 +27,7 @@ metadata:
 1. Identify the exact OMP process, session, container, or Factory run reported by the operator.
 2. Inspect its state, process tree, mounts, recent logs, and relevant session transcript.
 3. Treat attended sessions as user-owned. Never stop, restart, replace, or reclaim one just to gather evidence.
-4. Queue truth comes from live GitHub. Hive reads are relevant only if the user explicitly selected Hive mode; no static queue snapshot is authoritative.
+4. Queue truth comes from live GitHub; no static queue snapshot is authoritative.
 5. OMP state may support session and Factory recovery, but it does not replace current GitHub state or prove a worker is still live.
 6. Distinguish provider, tool, and runtime errors from benign warning labels by the observed effect. A clean log alone does not prove the intended lifecycle completed.
 
@@ -35,7 +35,6 @@ metadata:
 
 - Missing queue: inspect explicit scope, GitHub authentication, and GitHub API evidence.
 - Missing Factory handoff: inspect extension packaging/loading and the Review-to-Factory bridge before changing execution opt-in.
-- Explicit Hive mode unavailable: verify that `HIVE_HUB` was supplied and the read-side request result is current; do not make normal Review depend on it.
 - Appliance startup failure: run `just review-doctor` without starting another agent.
 
 ## Verification

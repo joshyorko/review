@@ -28,7 +28,7 @@ A fresh interactive session without an explicit, restored, or configured scope a
 
 GitHub credentials come from `gh auth token` or inherited `GH_TOKEN`/`GITHUB_TOKEN` and supported OMP provider credentials. GitHub remains the authority for repository access, reviews, workflow changes, and landing. Review never elevates token permissions.
 
-Review defaults to GitHub-only mode. It makes no Hive request and does not search `~/.config/hive` for contributor registration. Existing users may explicitly set `REVIEW_MODE=hive` and `HIVE_HUB` to opt into the optional read-side integration. That integration supplies context only; it does not assign or complete contributor work. The old Hive contributor image and launcher are not part of this product.
+Review reads its queue and current repository state from GitHub.
 
 Luna Factory is packaged beside Review. Loading it starts no work; execution requires `LUNA_FACTORY_ENABLED=1`. Factory retains its own admission, claims, evidence, and durable state boundaries.
 

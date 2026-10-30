@@ -26,7 +26,7 @@ catalog, or agent-facing repository contracts.
 ## When Not to Use
 
 Do not use this as a backlog, session log, or replacement for a
-task-specific launcher, image-build, optional Hive read-side, or
+task-specific launcher, image-build, or
 pull-request workflow skill. Use it alongside the matching skill when
 documentation maintenance is part of that work.
 

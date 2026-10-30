@@ -40,7 +40,6 @@ export default function sdkInitializationProbe(pi: any) {
 			env: {
 				HOME: root,
 				GH_TOKEN: "local-probe-placeholder",
-				REVIEW_MODE: "review",
 				REVIEW_DEFAULT_SCOPE: "example/repo",
 				LUNA_FACTORY_STATE_ROOT: join(root, "factory-state"),
 				LUNA_FACTORY_CLAIMS_ROOT: join(root, "factory-claims"),

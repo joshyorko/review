@@ -11,15 +11,14 @@ This document defines the local product and authority boundaries for Review and 
 | **OMP** | Sessions, model resolution, agents, tasks, tools, workflowz execution, and cancellation. | Runs only through the user's active OMP configuration and the packaged capability boundary. |
 | **Luna Factory** | Optional bounded native workers, evidence reconciliation, claims, and task state. | Execution is opt-in; visibility in Review is not admission. Completion grants no merge, publish, or deploy authority. |
 | **Human operator** | Scope, policy, and mutating intent. | Reviewers remain read-only; a confirmed action delegates only its bounded lifecycle. |
-| **Optional Hive read-side** | Explicitly configured ordering/status context for users who select Hive mode. | Read-side facts do not assign work, grant GitHub permissions, or create Factory admission. |
 
-The normal workbench is GitHub-only Review. It does not require Hive, contributor registration, Bluefin labels, organization policy, or an organization-specific MCP server. `REVIEW_MODE=hive` opts into the optional read-side integration; `HIVE_HUB` must be supplied explicitly. The default path performs no Hive fetch or contributor-registration discovery.
+The workbench is GitHub-only Review. It does not require contributor registration, Bluefin labels, organization policy, or an organization-specific MCP server.
 
 ## Scope and evidence
 
 Review scope follows explicit operator intent: an explicit repository/organization, a restored explicit Review scope, `REVIEW_DEFAULT_SCOPE`, then an interactive choice. Headless callers must provide `owner/repo` or `org:<name>`. Never infer an organization from repository ancestry, login identity, or historical defaults.
 
-GitHub owns current state. A queue row is an observation, not a task assignment. Before any mutation, preserve the relevant item identity and exact head, refresh live evidence and permissions, and refuse stale or mismatched subjects. An absent permission or required check remains a real gate; optional Hive context cannot bypass it.
+GitHub owns current state. A queue row is an observation, not a task assignment. Before any mutation, preserve the relevant item identity and exact head, refresh live evidence and permissions, and refuse stale or mismatched subjects. An absent permission or required check remains a real gate.
 
 The operator may explicitly set a per-repository human-review preset with
 `/review policy owner/repo solo|team`; `/review policy owner/repo` reads the
@@ -42,7 +41,7 @@ both modes. No local agent receipt becomes a GitHub review or approval.
 
 Review is the source and observation front-end. Review specialist agents return evidence and recommendations; they have no comment, approval, push, or merge capability. Human-confirmed Slay intent may authorize a bounded coordinator lifecycle, subject to the existing live permission, exact-head, ruleset, mutation-claim, and no-self-review safeguards.
 
-Luna Factory is a separate execution controller co-loaded with Review. Loading it starts nothing. `LUNA_FACTORY_ENABLED=1` is required for work. Its admission, task state, evidence, worker receipts, retry lineage, and claims are Factory-owned. A queue row or Hive rank is never an admission signal. Factory completion never creates GitHub landing or deployment authority.
+Luna Factory is a separate execution controller co-loaded with Review. Loading it starts nothing. `LUNA_FACTORY_ENABLED=1` is required for work. Its admission, task state, evidence, worker receipts, retry lineage, and claims are Factory-owned. A Review queue row is never an admission signal. Factory completion never creates GitHub landing or deployment authority.
 
 ## Factory proof and task state
 

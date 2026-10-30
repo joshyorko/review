@@ -42,7 +42,7 @@ GitHub `gh-cli` selection removes ambient token aliases only for the stored-cred
 
 `scripts/parse-review-args.sh` is the shared argument parser. Repository and organization scopes use `owner/repo` and `org:<name>`. A fresh interactive session asks for scope if none is explicit, restored, or configured; a headless caller must pass one. `REVIEW_DEFAULT_SCOPE` is the generic environment setting. The launcher must not infer scope from the fork parent, GitHub login, or image metadata.
 
-GitHub-only Review is the default and makes no Hive request. Hive read-side data is available only when the operator sets `REVIEW_MODE=hive` and explicitly supplies `HIVE_HUB`. Never read `~/.config/hive/contributor.env` or mount a contributor registration.
+Review passes GitHub credentials and an explicitly configured scope to its container. It does not read contributor registration files.
 
 ## Isolation and lifecycle
 

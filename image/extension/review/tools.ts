@@ -6,7 +6,6 @@
  */
 
 import { diffToText, fetchDiff, fetchIssueDetail } from "./github.ts";
-import { hiveFailureStatus } from "./hive.ts";
 import type { ReviewMode } from "./mode.ts";
 import { sanitizeMarkdown } from "./reader.ts";
 import { traceToText } from "./trace.ts";
@@ -80,60 +79,20 @@ function issueDetailToText(detail: Awaited<ReturnType<typeof fetchIssueDetail>>[
 }
 
 
-/**
- * One sentence naming the authority that produced the order.
- *
- * "Hive ordered this", "Hive had nothing to say about this scope" and "we could
- * not reach Hive" are three different facts, and a model told the wrong one will
- * either ignore a priority that exists or invent one that does not.
- */
-function orderLine(mode: ReviewMode): string {
-	if (mode.isReviewMode()) return "order: LOCAL · attention order — repository scope and filters";
-	const hive = mode.hive;
-	if (!hive.configured) {
-		return "order: LOCAL · attention order — no hive hub configured; review, fix, and slay remain available";
-	}
-	if (!hive.online) {
-		return `order: LOCAL · attention order — ${hiveFailureStatus(hive.error)}; local policy remains active, and review, fix, and slay remain available`;
-	}
-	const actionable = hive.actionableItems === undefined ? "" : `, ${hive.actionableItems} actionable overall`;
-	const coverage = mode.hiveCoverage();
-	const shortfall =
-		coverage.present < coverage.total
-			? ` ${coverage.total - coverage.present} of Hive's ${coverage.total} queued items could not be resolved on GitHub and are missing from this queue.`
-			: "";
-	return `order: hive — ${mode.hiveRankedCount()} of ${mode.items.length} items ranked by ${hive.hub}${actionable}. Hive owns priority; do not reorder or reassign it.${shortfall}`;
+/** The queue order comes from the current GitHub snapshot and local policy. */
+function orderLine(): string {
+	return "order: LOCAL · attention order — repository scope and filters";
 }
 
-/**
- * @param whenReady Resolves once startup has fetched the hub and the queue.
- *   `session_start` returns before that, so a tool called early would otherwise
- *   report an empty queue as though the organization had nothing open.
- */
 export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => Promise<void>): void {
 	const z = pi.zod;
-	const registerTool = (definition: ToolDefinition, aliases: readonly string[] = []): void => {
-		if (mode.isHiveMode()) {
-			pi.registerTool(definition);
-			return;
-		}
-		const reviewNames = aliases.length > 0
-			? aliases
-			: definition.name.startsWith("review_") ? [definition.name] : [];
-		for (const name of reviewNames) {
-			pi.registerTool({
-				...definition,
-				name,
-				description: definition.description.replaceAll("Hive", "Review"),
-			});
-		}
-	};
+	const registerTool = (definition: ToolDefinition): void => pi.registerTool(definition);
 
 	registerTool({
-		name: "hive_workbench_status",
+		name: "review_workbench_status",
 		label: "Workbench Status",
 		description:
-			"Current Hive workbench queue, selection, source authority, and available execution evidence.",
+			"Current GitHub Review queue, selection, ordering, and available execution evidence.",
 		parameters: z.object({}),
 		async execute() {
 			await whenReady();
@@ -141,22 +100,18 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 			const item = mode.selected();
 			const tally = mode.ciTally();
 			const priority = item ? mode.priorityFor(item) : undefined;
-			const hive = mode.hive;
 			const lines = [
 				`mode=${mode.queueMode} scope=${mode.scopeLabel()} items=${mode.visibleItems().length}/${mode.items.length}`,
 				`ci: ${tally.success} passing, ${tally.failure} failing, ${tally.pending} pending, ${tally.unknown} unknown`,
-				orderLine(mode),
+				orderLine(),
 			];
-			if (hive.online && hive.triage.length > 0) {
-				lines.push(`triage: ${hive.triage.map((group) => `${group.label} ${group.count}`).join(", ")}`);
-			}
 			if (mode.queueError) lines.push(`queue error: ${mode.queueError}`);
 			if (item) {
 				lines.push(
 					"",
 					`selected ${item.repo}#${item.id} — ${item.title}`,
 					`author @${item.author}${item.draft ? " (draft)" : ""} ci=${item.ciStatus ?? "unknown"} merge=${item.mergeState} review=${item.reviewState} labels=${item.labels.join(",") || "none"}`,
-					priority ? `priority: ${priority.category} (${priority.reason}, ${priority.source})` : "priority: unranked",
+					priority ? `priority: ${priority.category} (${priority.reason})` : "priority: unranked",
 					`landing: ${mode.landingStateFor(item)}`,
 					`human review policy: ${mode.operatorPolicyFor(item.repo)?.mode ?? "team"} (${mode.operatorPolicyFor(item.repo)?.source ?? "default"})${mode.operatorLandingReasonFor(item) ? `; ${mode.operatorLandingReasonFor(item)}` : ""}`,
 					`head: ${item.headSha ? `${item.headSha.slice(0, 12)}...${item.headSha}` : "unknown"}`,
@@ -175,16 +130,6 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 					org: mode.org,
 					scope: mode.scope,
 					order_source: mode.orderSource(),
-					...(mode.isHiveMode() ? { hive: {
-						configured: hive.configured,
-						online: hive.online,
-						hub: hive.hub || null,
-						ranked: mode.hiveRankedCount(),
-						queued: mode.hiveCoverage(),
-						actionable_items: hive.actionableItems ?? null,
-						triage: hive.triage,
-						error: hive.error ?? null,
-					} } : {}),
 					selected_priority: priority ?? null,
 				landing_state: item ? mode.landingStateFor(item) : null,
 				operator_policy: item ? mode.operatorPolicyFor(item.repo) ?? null : null,
@@ -197,10 +142,10 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 				},
 			};
 		},
-	}, ["review_workbench_status"]);
+	});
 
 	registerTool({
-		name: "hive_workbench_queue",
+		name: "review_workbench_queue",
 		label: "Workbench Queue",
 		description:
 			"List the live workbench queue of open pull requests or issues, optionally filtered by title, repository, author, label, or number.",
@@ -251,10 +196,10 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 				},
 			};
 		},
-	}, ["review_workbench_queue"]);
+	});
 
 	registerTool({
-		name: "hive_workbench_diff",
+		name: "review_workbench_diff",
 		label: "Review Diff",
 		description:
 			"Fetch the bounded diff for a pull request from the GitHub API. Pass repo explicitly in child sessions because they do not inherit the parent selection.",
@@ -293,10 +238,9 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 				isError: Boolean(diff.error),
 			};
 		},
-	}, ["review_workbench_diff"]);
+	});
 
-	if (mode.isReviewMode()) {
-		registerTool({
+	registerTool({
 			name: "review_workbench_issue",
 			label: "Review Issue",
 			description: "Fetch the issue body, comments, labels, state, and linked pull requests from GitHub.",
@@ -320,11 +264,10 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 					isError: Boolean(result.error),
 				};
 			},
-		});
-	}
+	});
 
 	registerTool({
-		name: "hive_workbench_trace",
+		name: "review_workbench_trace",
 		label: "Review Trace",
 		description: "Render the current OMP session and workflowz execution trace.",
 		parameters: z.object({}),
@@ -334,92 +277,6 @@ export function registerTools(pi: ToolHost, mode: ReviewMode, whenReady: () => P
 			return {
 				content: text(traceToText(spans, now, 180)),
 				details: { has_state: spans.length > 0 },
-			};
-		},
-	}, ["review_workbench_trace"]);
-	registerTool({
-		name: "hive_workbench_lookup",
-		label: "Hive Lookup",
-		description:
-			"Query the authenticated Hive hub for live status, contributor state, ordered work, triage, or curated knowledge.",
-		parameters: z.object({
-			target: z.string().describe("Target query: 'status' (default), 'knowledge', 'me', 'queue', or 'triage'").optional(),
-		}),
-		async execute(_id, params) {
-			await whenReady();
-			const target = typeof params.target === "string" ? params.target.toLowerCase().trim() : "status";
-			const hive = mode.hive;
-			if (!hive.configured) {
-				return {
-					content: text("Hive read-side integration is not configured; set HIVE_HUB explicitly to opt in."),
-					details: { configured: false, online: false },
-				};
-			}
-
-			if (target === "knowledge") {
-				const knowledge = await mode.getHiveKnowledge();
-				if (!knowledge) {
-					return {
-						content: text(`Hive knowledge export unavailable from ${hive.hub}`),
-						details: { target: "knowledge", error: "unavailable" },
-						isError: true,
-					};
-				}
-				return {
-					content: text(knowledge),
-					details: { target: "knowledge", bytes: knowledge.length },
-				};
-			}
-
-			if (target === "me") {
-				const me = await mode.getHiveMe();
-				if (!me) {
-					return {
-						content: text(`Hive /api/v1/me unavailable from ${hive.hub}`),
-						details: { target: "me", error: "unavailable" },
-						isError: true,
-					};
-				}
-				return {
-					content: text(JSON.stringify(me, null, 2)),
-					details: { target: "me", data: me },
-				};
-			}
-
-			if (target === "queue") {
-				const lines = hive.items.map((it, idx) => `${idx + 1}. ${it.key}: ${it.title} (${it.url})`);
-				return {
-					content: text(lines.length > 0 ? lines.join("\n") : "Hive queue is empty"),
-					details: { target: "queue", count: hive.items.length, items: hive.items },
-				};
-			}
-
-			if (target === "triage") {
-				const lines = hive.triage.map((g) => `${g.label} (${g.level}): ${g.count} items`);
-				return {
-					content: text(lines.length > 0 ? lines.join("\n") : "No triage groups recorded"),
-					details: { target: "triage", groups: hive.triage },
-				};
-			}
-			// Default: status overview
-			const lines = [
-				`hub: ${hive.hub} (${hive.online ? "online" : "offline"})`,
-				`actionable_items: ${hive.actionableItems ?? "unknown"}`,
-				`queue_ranked: ${mode.hiveRankedCount()} items in current scope`,
-				`triage_groups: ${hive.triage.map((g) => `${g.label}:${g.count}`).join(" ")}`,
-			];
-			if (hive.error) lines.push(`error: ${hive.error}`);
-			return {
-				content: text(lines.join("\n")),
-				details: {
-					target: "status",
-					hub: hive.hub,
-					online: hive.online,
-					actionable_items: hive.actionableItems ?? null,
-					ranked: mode.hiveRankedCount(),
-					triage: hive.triage,
-					error: hive.error ?? null,
-				},
 			};
 		},
 	});
