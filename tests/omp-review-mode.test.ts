@@ -6239,7 +6239,7 @@ test("Review recovers a consumed worker from host evidence without session entri
 	assert.equal(restarted.messages.length, 0);
 });
 
-for (const count of [1, 8]) test(`packaged OMP current pin delivers and evicts ${count} Slay workers without losing Review evidence`, { skip: !process.env.REVIEW_OMP_SOURCE }, async () => {
+for (const count of [1, 8]) test(`packaged OMP current pin delivers and evicts ${count} issue workers without fabricating PR-ready evidence`, { skip: !process.env.REVIEW_OMP_SOURCE }, async () => {
 	const Manager = await loadPackagedJobManager(process.env.REVIEW_OMP_SOURCE!);
 	const states = Object.fromEntries(Array.from({ length: count }, (_, index) => [`projectbluefin/review#${77 + index}`, { title: `real manager ${index}`, submittedPrs: [] }]));
 	const env = { ...ISOLATED_ENV };
@@ -6255,7 +6255,14 @@ for (const count of [1, 8]) test(`packaged OMP current pin delivers and evicts $
 		await manager.getJob(baselineId).promise;
 		const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 		await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-		pi.events.get("tool_call")({ toolCallId: "real-call", toolName: "task", input: { isolated: false } }, ctx);
+		const admitted = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+		const issueItems = admitted.waves[admitted.currentWave].items;
+		assert.equal(issueItems.length, count);
+		const taskInput = { tasks: issueItems.map((item, index) => {
+			const issueKey = `${item.repo.toLowerCase()}#${item.id}`;
+			return { agent: "fixer", name: `RealWorker${index}`, task: `Implement ${issueKey} in its admitted checkout.`, schemaMode: "strict", outputSchema: issuePrReadyOutputSchema(issueKey) };
+		}) };
+		pi.events.get("tool_call")({ toolCallId: "real-call", toolName: "task", input: taskInput }, ctx);
 		const pending = Array.from({ length: count }, () => Promise.withResolvers<string>());
 		const progress = pending.map((_, index) => ({ id: `RealWorker${index}`, index, status: "running" }));
 		const jobIds = pending.map((done, index) => manager.register("task", progress[index].id, () => done.promise, { id: progress[index].id, agentId: progress[index].id }));
@@ -6276,8 +6283,18 @@ for (const count of [1, 8]) test(`packaged OMP current pin delivers and evicts $
 		assert.equal(manager.getRecentJobs(5).filter((job) => jobIds.includes(job.id)).length, 0, "the real manager evicts consumed results");
 		for (let index = 0; index < count; index++) states[`projectbluefin/review#${77 + index}`].submittedPrs = [`projectbluefin/review#${10 + index}`];
 		await pi.events.get("agent_end")({}, ctx);
-		assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
-		assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+		const settled = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+		assert.equal(settled.state, "blocked", "native job delivery and issue links do not replace structured per-issue PR-ready results");
+		assert.deepEqual(settled.waveJobIds, [...jobIds].sort(), "all evicted worker jobs remain attributed to this Review wave");
+		for (const [index, item] of issueItems.entries()) {
+			const assignment = settled.issueTaskAssignments[`${item.repo.toLowerCase()}#${item.id}`];
+			assert.equal(assignment.toolCallId, "real-call");
+			assert.equal(assignment.agentId, `RealWorker${index}`);
+			assert.equal(assignment.jobId, jobIds[index]);
+		}
+		assert.equal(settled.issueWorkerReceipts, undefined, "evicted worker results without caller-strict data cannot mint a receipt");
+		assert.match(settled.error, /UNKNOWN.*exact delivered worker-result\/PR attribution/i);
+		assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, count + 1);
 		assert.equal(pi.messages.length, 1);
 	} finally { await manager.dispose(); }
 });
