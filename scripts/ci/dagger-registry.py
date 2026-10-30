@@ -104,8 +104,7 @@ def dagger_test_roots(root: Path) -> list[str]:
             command = steps.get(step)
             if command is None:
                 raise RegistryError(f"suite profile {profile!r} names unmapped Dagger step {step!r}")
-            match = test_path.search(command)
-            if match:
+            for match in test_path.finditer(command):
                 roots.add(Path(match.group(1)).name)
     return sorted(roots)
 

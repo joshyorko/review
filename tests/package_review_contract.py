@@ -42,7 +42,7 @@ class BrewDevContract(unittest.TestCase):
         for name, body in {
             "brew": 'case "$1" in --prefix) echo "$FIXTURE_ROOT/prefix";; --repository) echo "$FIXTURE_ROOT/brew";; *) echo "$*" >> "$FIXTURE_CALLS"; exit 9;; esac',
             "apptainer": "exit 9",
-            "podman": 'if [[ "$1" == build ]]; then printf "%s\\n" "$*" > "$FIXTURE_ROOT/build-args"; cat bin/review > "$FIXTURE_ROOT/snapshot-launcher"; exit 42; fi',
+            "podman": 'case "$1" in build) printf "%s\\n" "$*" > "$FIXTURE_ROOT/build-args"; cat bin/review > "$FIXTURE_ROOT/snapshot-launcher"; exit 42;; push) : > "$FIXTURE_ROOT/push-called"; exit 99;; save) : > "$5";; esac',
         }.items():
             p = tools / name
             p.write_text("#!/usr/bin/env bash\nset -eu\n" + body + "\n")
@@ -168,7 +168,7 @@ class BrewDevContract(unittest.TestCase):
         (tools / "apptainer").write_text(
             "#!/usr/bin/env bash\nset -eu\n"
             "case $1 in\n"
-            "build) printf '#!/bin/sh\\nexit 0\\n' > \"$2\";;\n"
+            "build) printf '%s\\n' \"$3\" > \"$FIXTURE_ROOT/apptainer-source\"; printf '#!/bin/sh\\nexit 0\\n' > \"$2\";;\n"
             "inspect) printf '{\"data\":{\"attributes\":{\"labels\":{\"org.opencontainers.image.revision\":\"%s\"}}}}\\n' \"$FIXTURE_SHA\";;\n"
             "exec) exit 0;;\n"
             "*) exit 19;;\nesac\n"
@@ -180,8 +180,13 @@ class BrewDevContract(unittest.TestCase):
         profile.write_text("version=1\nruntime=apptainer\ngithub_auth=auto\ninherit_omp=false\n"
                            "factory_enabled=false\nfactory_capacity=2\nenv_groups=\nenv_names=\n")
         output = self.root / "bundle"
+        oci_archive = self.root / "candidate.oci.tar"
+        self.env["REVIEW_OCI_ARCHIVE"] = str(oci_archive)
         result = self.run_cli("build", "main", str(output))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(oci_archive.is_file())
+        self.assertEqual((self.root / "apptainer-source").read_text().strip(), f"oci-archive:{oci_archive}")
+        self.assertFalse((self.root / "push-called").exists())
         package = self.root / "Cellar/review/fixture"
         payload = self.root / "payload"
         with tarfile.open(next(output.glob("review-*.tar.gz"))) as archive:
@@ -223,6 +228,11 @@ class BrewDevContract(unittest.TestCase):
         self.assertIn("default: main", workflow)
         self.assertNotIn("TAP_SSH_KEY", workflow)
 
+    def test_sif_uses_the_exported_oci_archive_when_available(self):
+        script = SCRIPT.read_text()
+        self.assertIn('sif_source="docker-archive:$work/review.tar"', script)
+        self.assertIn('[[ -z "${REVIEW_OCI_ARCHIVE:-}" ]] || sif_source="oci-archive:$REVIEW_OCI_ARCHIVE"', script)
+
 
 class FormulaContract(unittest.TestCase):
     def setUp(self):
@@ -241,7 +251,9 @@ class FormulaContract(unittest.TestCase):
         data = ("fixture " + arch).encode()
         (self.root / f"review-{arch}.tar.gz").write_bytes(data)
         record = {"ref": "feature/example", "sha": sha, "arch": arch,
-                  "version": "0.1.0", "archive_sha256": hashlib.sha256(data).hexdigest()}
+                  "version": "0.1.0", "archive_sha256": hashlib.sha256(data).hexdigest(),
+                  "oci_archive_digest": "sha256:" + "a" * 64,
+                  "oci_arch_digest": "sha256:" + "b" * 64}
         (self.root / f"manifest-{arch}.json").write_text(json.dumps(record))
 
     def test_both_native_architectures_share_one_version_and_sha(self):

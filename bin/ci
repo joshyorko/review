@@ -9,6 +9,7 @@ ref_set=0
 require_native=0
 require_os=""
 plan_only=0
+native_adapter=""
 while (($#)); do
   case "$1" in
   --profile)
@@ -45,7 +46,8 @@ Usage:
 
 Runs the checked-in Dagger profile over a sanitized snapshot of the working
 tree. The pre-push planner includes staged, unstaged, untracked, renamed, and
-deleted paths. Native requirements that lack a same-host adapter return blocked.
+deleted paths. The appliance-artifact adapter requires a clean committed source
+and checks the same Dagger-exported OCI archive through Podman and Apptainer/SIF.
 HELP
     exit 0
     ;;
@@ -71,6 +73,7 @@ pre-push)
   plan_json="$(python3 "$repo_root/scripts/ci/path-plan.py" "${plan_args[@]}")" || exit $?
   dagger_profile="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["profile"])' <<<"$plan_json")"
   native_state="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["native"])' <<<"$plan_json")"
+  native_adapter="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("nativeAdapter") or "")' <<<"$plan_json")"
   printf 'bin/ci selected plan: %s\n' "$plan_json" >&2
   if ((plan_only)); then
     printf '%s\n' "$plan_json"
@@ -103,7 +106,12 @@ version="$(dagger version)"
 
 cd "$repo_root"
 snapshot="$(mktemp -d "${TMPDIR:-/tmp}/review-ci-source.XXXXXX")"
-trap 'python3 -c '\''import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)'\'' "$snapshot"' EXIT
+native_work=""
+cleanup() {
+  python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)' "$snapshot"
+  [[ -z "$native_work" ]] || python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)' "$native_work"
+}
+trap cleanup EXIT
 python3 scripts/ci/source-snapshot.py "$snapshot" --history
 env \
   -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_COPILOT_TOKEN -u COPILOT_GITHUB_TOKEN \
@@ -113,6 +121,18 @@ env \
   DAGGER_NO_NAG=1 dagger call check --source="$snapshot" --profile="$dagger_profile"
 
 if [[ "$native_state" != "not-required" ]]; then
-  echo "bin/ci: blocked native profile; status=$native_state. Portable checks passed but are not native proof." >&2
-  exit 3
+  if [[ "$native_adapter" != appliance-artifact ]]; then
+    echo "bin/ci: blocked native profile; status=$native_state adapter=${native_adapter:-unavailable}. Portable checks passed but are not native proof." >&2
+    exit 3
+  fi
+  native_work="$(mktemp -d "${TMPDIR:-/tmp}/review-ci-native-artifact.XXXXXX")"
+  revision="$(git -C "$repo_root" rev-parse "$ref")"
+  archive="$native_work/review-appliance.oci.tar"
+  env \
+    -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_COPILOT_TOKEN -u COPILOT_GITHUB_TOKEN \
+    -u RENOVATE_TOKEN -u REVIEW_GH_TOKEN \
+    -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u CONTEXT7_API_KEY \
+    -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+    DAGGER_NO_NAG=1 dagger call appliance-archive --source="$snapshot" --revision="$revision" -o "$archive"
+  bash "$repo_root/scripts/ci/native-appliance.sh" "$snapshot" "$revision" "$archive"
 fi

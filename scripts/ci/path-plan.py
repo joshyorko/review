@@ -21,15 +21,21 @@ PIPELINE_PATHS = {
     "scripts/check-skill-frontmatter.sh",
     "scripts/generate-skills.py",
     "scripts/install-git-cliff.sh",
+    "scripts/review-formula.py",
     "scripts/update-omp-pins.mjs",
     "scripts/update-derived-pins.mjs",
     "scripts/update-gh-pins.mjs",
     "scripts/update-rtk-pins.mjs",
     "scripts/update-typesafe-pins.mjs",
     "scripts/update-requirements-ci-hashes.mjs",
+    "scripts/validate-release-source.sh",
     "tests/test-registry.sh",
     "tests/ci-",
     "tests/ci_",
+    "tests/release-publication-source.sh",
+    "tests/package_oci_contract.py",
+    "tests/package_review_contract.py",
+    "tests/luna_factory_dogfood_contract.test.ts",
     "tests/update-",
     "justfile",
     ".pre-commit-config.yaml",
@@ -38,11 +44,25 @@ NATIVE_PATHS = {
     "image",
     "patches",
     "scripts/package-review",
-    "scripts/review-formula.py",
     "scripts/install-apptainer-ci.sh",
     "scripts/build-derived-omp.sh",
+    "tests/appliance-runtime-probe.sh",
+    "tests/appliance-runtime-report.ts",
+    "tests/luna-factory-dogfood.sh",
+    "tests/review-factory-coload-smoke.sh",
+    "tests/fixtures/review-factory-coload-rpc.py",
 }
-NATIVE_TEST_MARKERS = ("native", "krun", "apptainer", "sif", "dogfood", "coload", "runtime")
+NATIVE_TEST_MARKERS = ("native", "krun", "apptainer", "sif", "coload", "runtime")
+APPLIANCE_ARTIFACT_PATHS = {
+    "image",
+    "patches",
+    "scripts/package-review",
+    "tests/appliance-runtime-probe.sh",
+    "tests/appliance-runtime-report.ts",
+    "tests/luna-factory-dogfood.sh",
+    "tests/review-factory-coload-smoke.sh",
+    "tests/fixtures/review-factory-coload-rpc.py",
+}
 DOC_PATHS = ("docs/", "README", "AGENTS.md", "CHANGELOG.md", "LICENSE", "CONTRIBUTING")
 
 
@@ -125,11 +145,13 @@ def plan(root: Path, base: str | None, ref: str = "HEAD", require_native: bool =
 
     native = "not-required"
     unknown: set[str] = set()
+    native_paths: set[str] = set()
     portable = False
     docs_only = bool(paths)
     for path in paths:
         if _matches(path, NATIVE_PATHS) or (path.startswith("tests/") and any(marker in path.lower() for marker in NATIVE_TEST_MARKERS)):
             native = "required"
+            native_paths.add(path)
             portable = True
             docs_only = False
             continue
@@ -156,23 +178,53 @@ def plan(root: Path, base: str | None, ref: str = "HEAD", require_native: bool =
         native = "required"
     profile = "contract" if docs_only and not portable else "portable"
     reason = "known paths selected" if not unknown else f"unknown paths require conservative review: {', '.join(sorted(unknown))}"
-    blocked = native != "not-required"
+    native_adapter = None
+    if (
+        native == "required"
+        and not require_os
+        and not require_native
+        and not unknown
+        and native_paths
+        and all(_matches(path, APPLIANCE_ARTIFACT_PATHS) for path in native_paths)
+    ):
+        native_adapter = "appliance-artifact"
+    tracked_paths = {
+        item.decode("utf-8", errors="surrogateescape")
+        for item in _git(root, "ls-files", "--cached", "-z").split(b"\0")
+        if item
+    }
+    project_skill = root / ".agents/skills/review-ci"
+    project_skill_has_untracked = project_skill.is_dir() and any(
+        item.relative_to(root).as_posix() not in tracked_paths
+        for item in project_skill.rglob("*")
+        if item.is_file() or item.is_symlink()
+    )
+    dirty = bool(_git(root, "status", "--porcelain=v1", "-z")) or project_skill_has_untracked
+    if native_adapter and dirty:
+        native_adapter = None
+    blocked = native != "not-required" and native_adapter is None
     if require_os:
         reason += f"; required host OS {require_os} is not verified by this portable runner"
     elif require_native:
         reason += "; explicit native proof is not available in this runner"
     elif native == "required":
-        reason += "; this path set needs a native adapter not yet available in this runner"
+        if native_adapter:
+            reason += "; appliance artifact native adapter selected"
+        elif dirty:
+            reason += "; native appliance proof requires a clean committed source"
+        else:
+            reason += "; this path set needs a native adapter not available in this runner"
     return {
         "profile": profile,
         "native": native,
+        "nativeAdapter": native_adapter,
         "blocked": blocked,
         "reason": reason,
         "changedPaths": sorted(paths),
         "base": base,
         "ref": ref,
         "head": _git(root, "rev-parse", "HEAD").decode().strip(),
-        "dirty": bool(_git(root, "status", "--porcelain=v1", "-z")),
+        "dirty": dirty,
     }
 
 

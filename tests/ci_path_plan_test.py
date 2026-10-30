@@ -57,6 +57,8 @@ class PathPlanTest(unittest.TestCase):
             (root / "docs/guide.md").rename(root / "docs/renamed.md")
             (root / ".dagger").mkdir()
             (root / ".dagger/main.go").write_text("pipeline\n")
+            (root / "tests").mkdir()
+            (root / "tests/luna_factory_dogfood_contract.test.ts").write_text("contract\n")
 
             selected = path_plan.plan(root, "main")
 
@@ -66,17 +68,72 @@ class PathPlanTest(unittest.TestCase):
             self.assertIn("docs/guide.md", selected["changedPaths"])
             self.assertIn("docs/renamed.md", selected["changedPaths"])
             self.assertIn(".dagger/main.go", selected["changedPaths"])
+            self.assertEqual(selected["native"], "not-required")
 
-    def test_native_and_unknown_paths_are_blocked_after_portable_selection(self) -> None:
+    def test_native_runtime_probe_files_use_the_artifact_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "native"
-            repository(root)
+            base = repository(root)
+            (root / "tests").mkdir()
+            (root / "tests/appliance-runtime-probe.sh").write_text("probe\n")
+            git(root, "add", "tests/appliance-runtime-probe.sh")
+            git(root, "commit", "-qm", "change runtime probe")
+            selected = path_plan.plan(root, base)
+            self.assertEqual(selected["native"], "required")
+            self.assertEqual(selected["nativeAdapter"], "appliance-artifact")
+            self.assertFalse(selected["blocked"])
+
+    def test_appliance_paths_select_the_native_artifact_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "dirty"
+            base = repository(root)
+            (root / "image/appliance").mkdir(parents=True)
+            (root / "image/appliance/Containerfile").write_text("uncommitted runtime change\n")
+            dirty = path_plan.plan(root, base)
+            self.assertTrue(dirty["dirty"])
+            self.assertIsNone(dirty["nativeAdapter"])
+            self.assertTrue(dirty["blocked"])
+            self.assertIn("clean committed source", dirty["reason"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "ignored-skill"
+            base = repository(root)
+            (root / "image/appliance").mkdir(parents=True)
+            (root / "image/appliance/Containerfile").write_text("committed appliance\n")
+            git(root, "add", "image/appliance/Containerfile")
+            git(root, "commit", "-qm", "change appliance")
+            (root / ".agents/skills/review-ci").mkdir(parents=True)
+            (root / ".agents/skills/review-ci/SKILL.md").write_text("ignored project skill\n")
+            selected = path_plan.plan(root, base)
+            self.assertIn(".agents/skills/review-ci/SKILL.md", selected["changedPaths"])
+            self.assertTrue(selected["dirty"])
+            self.assertIsNone(selected["nativeAdapter"])
+            self.assertTrue(selected["blocked"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "native"
+            base = repository(root)
             (root / "image/appliance").mkdir(parents=True)
             (root / "image/appliance/Containerfile").write_text("runtime change\n")
-            native = path_plan.plan(root, "main")
+            git(root, "add", "image/appliance/Containerfile")
+            git(root, "commit", "-qm", "change appliance")
+            native = path_plan.plan(root, base)
             self.assertEqual(native["profile"], "portable")
             self.assertEqual(native["native"], "required")
-            self.assertTrue(native["blocked"])
+            self.assertEqual(native["nativeAdapter"], "appliance-artifact")
+            self.assertFalse(native["blocked"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "unsupported"
+            base = repository(root)
+            (root / "scripts").mkdir()
+            (root / "scripts/install-apptainer-ci.sh").write_text("host package profile change\n")
+            git(root, "add", "scripts/install-apptainer-ci.sh")
+            git(root, "commit", "-qm", "change apptainer installer")
+            unsupported = path_plan.plan(root, base)
+            self.assertEqual(unsupported["native"], "required")
+            self.assertIsNone(unsupported["nativeAdapter"])
+            self.assertTrue(unsupported["blocked"])
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "unknown"
@@ -85,6 +142,7 @@ class PathPlanTest(unittest.TestCase):
             unknown = path_plan.plan(root, "main")
             self.assertEqual(unknown["profile"], "portable")
             self.assertEqual(unknown["native"], "unknown")
+            self.assertIsNone(unknown["nativeAdapter"])
             self.assertTrue(unknown["blocked"])
 
     def test_missing_base_mismatched_ref_and_explicit_native_fail_closed(self) -> None:

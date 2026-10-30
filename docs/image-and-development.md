@@ -57,10 +57,11 @@ leave `publish` disabled to test an unpublished committed ref.
 
 Run `bin/ci --profile pre-push --base <base>` before each push, workflow
 dispatch/rerun, or release action. It selects the changed-path portable suite
-and reports native requirements. Docs-only changes use the contract profile.
-`just ci` runs the bootstrap contract smoke. A pre-push profile that requires
-unavailable native proof returns blocked after portable checks; it is not a
-release gate.
+and native adapters. Docs-only changes use the contract profile. Appliance
+changes export one exact-source OCI archive from Dagger and pass that same
+archive through Podman and Apptainer/SIF checks. The native adapter requires a
+clean committed source; dirty native changes remain blocked after portable
+checks. `just ci` runs the bootstrap contract smoke and is not a release gate.
 
 ```bash
 pre-commit run --all-files

@@ -58,8 +58,10 @@ case "$action" in
       [[ ! -e "$REVIEW_OCI_ARCHIVE" ]] || fail "local OCI archive destination already exists"
       podman save --format oci-archive -o "$REVIEW_OCI_ARCHIVE" "$image"
     fi
+    sif_source="docker-archive:$work/review.tar"
+    [[ -z "${REVIEW_OCI_ARCHIVE:-}" ]] || sif_source="oci-archive:$REVIEW_OCI_ARCHIVE"
     APPTAINER_CACHEDIR="$work/apptainer-cache" apptainer build \
-      "$work/payload/launcher/review.sif" "docker-archive:$work/review.tar"
+      "$work/payload/launcher/review.sif" "$sif_source"
     chmod 0755 "$work/payload/launcher/review.sif"
     apptainer inspect --json "$work/payload/launcher/review.sif" > "$work/image.json"
     python3 - "$work/image.json" "$sha" <<'PY'

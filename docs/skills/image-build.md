@@ -39,6 +39,9 @@ Before a push, workflow dispatch/rerun, or release action, run the declared
 must be reported as blocked when the required host boundary is unavailable;
 portable/container evidence does not stand in for native KVM, AppArmor, or
 architecture-specific package proof.
+The local appliance-artifact adapter requires a clean committed source. It
+exports one Dagger OCI archive and verifies that same artifact through Podman
+and Apptainer/SIF; its job-local archive is never a publication input.
 `just ci` runs only the bootstrap contract smoke and is not a release or
 publication gate; use the changed-path pre-push profile before release work.
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 
 	"dagger/review-ci/internal/dagger"
@@ -22,6 +23,87 @@ func (m *ReviewCi) Contract(ctx context.Context, source *dagger.Directory) (stri
 // outside this credential-free container execution.
 func (m *ReviewCi) Portable(ctx context.Context, source *dagger.Directory) (string, error) {
 	return m.Check(ctx, source, "portable")
+}
+
+func (m *ReviewCi) applianceImage(ctx context.Context, source *dagger.Directory, revision string) (*dagger.Container, string, dagger.ID, error) {
+	if len(revision) != 40 {
+		return nil, "", "", fmt.Errorf("appliance source revision must be a full commit SHA")
+	}
+	for _, char := range revision {
+		if !(char >= '0' && char <= '9') && !(char >= 'a' && char <= 'f') {
+			return nil, "", "", fmt.Errorf("appliance source revision must be lowercase hexadecimal")
+		}
+	}
+	version, err := source.File("VERSION").Contents(ctx)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("read Review VERSION: %w", err)
+	}
+	version = strings.TrimSpace(version)
+	containerfile, err := source.File("image/appliance/Containerfile").Contents(ctx)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("read appliance Containerfile: %w", err)
+	}
+	ompCommit := regexp.MustCompile(`(?m)^ARG OMP_SOURCE_COMMIT=([0-9a-f]{40})$`).FindStringSubmatch(containerfile)
+	if len(ompCommit) != 2 {
+		return nil, "", "", fmt.Errorf("appliance Containerfile does not declare one full OMP source commit")
+	}
+	buildContext := source.WithoutFile(".ci-history.bundle")
+	image := buildContext.DockerBuild(dagger.DirectoryDockerBuildOpts{
+		Dockerfile: "image/appliance/Containerfile",
+		BuildArgs: []dagger.BuildArg{
+			{Name: "REVIEW_VERSION", Value: version},
+			{Name: "REVIEW_REVISION", Value: revision},
+		},
+	})
+	for name, expected := range map[string]string{
+		"org.opencontainers.image.version":         version,
+		"org.opencontainers.image.revision":        revision,
+		"io.github.joshyorko.review.omp.source.commit": ompCommit[1],
+		"io.github.joshyorko.review.omp.memoryd.shim": "0",
+	} {
+		actual, err := image.Label(ctx, name)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("read built appliance label %s: %w", name, err)
+		}
+		if actual != expected {
+			return nil, "", "", fmt.Errorf("built appliance label %s mismatch: expected %q, found %q", name, expected, actual)
+		}
+	}
+	imageID, err := image.ID(ctx)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("resolve built appliance identity: %w", err)
+	}
+	return image, version, imageID, nil
+}
+
+// Builds the exact-source appliance with Dagger Dockerfile compatibility and
+// verifies its package labels and direct runtime commands. Native Podman/krun,
+// Apptainer, and SIF behavior remain separate host profiles.
+func (m *ReviewCi) Appliance(ctx context.Context, source *dagger.Directory, revision string) (string, error) {
+	image, version, imageID, err := m.applianceImage(ctx, source, revision)
+	if err != nil {
+		return "", err
+	}
+	ompVersion, err := image.WithExec([]string{"/usr/bin/omp", "--version"}).Stdout(ctx)
+	if err != nil {
+		return "", fmt.Errorf("built appliance OMP version probe failed: %w", err)
+	}
+	launcherHelp, err := image.WithExec([]string{"/usr/bin/review-appliance", "--help"}).Stdout(ctx)
+	if err != nil {
+		return "", fmt.Errorf("built appliance launcher help probe failed: %w", err)
+	}
+	return fmt.Sprintf("appliance build passed: version=%s revision=%s omp=%s container-id=%s launcher-help-bytes=%d", version, revision, strings.TrimSpace(ompVersion), imageID, len(launcherHelp)), nil
+}
+
+// Exports the verified exact-source appliance as an OCI archive for native
+// host adapters. The archive is an ephemeral verification artifact, not a
+// published image or release asset.
+func (m *ReviewCi) ApplianceArchive(ctx context.Context, source *dagger.Directory, revision string) (*dagger.File, error) {
+	image, _, _, err := m.applianceImage(ctx, source, revision)
+	if err != nil {
+		return nil, err
+	}
+	return image.AsTarball(dagger.ContainerAsTarballOpts{MediaTypes: dagger.ImageMediaTypesOci}).WithName("review-appliance-" + revision + ".oci.tar"), nil
 }
 
 // Executes the checked-in suite selected by name. Unknown and empty profiles
@@ -62,7 +144,7 @@ var supportedSteps = map[string]string{
 	"ci-path-plan-contract":   "python3 tests/ci_path_plan_test.py",
 	"ci-registry-invocation-test": "python3 tests/ci_manifest_registry_test.py",
 	"release-dispatch-guard":      "python3 tests/release-dispatch-guard.py",
-	"ci-shellcheck":           "shellcheck --exclude=SC1090 --exclude=SC2034 bin/ci tests/ci-runner-contract.sh",
+	"ci-shellcheck":           "shellcheck --exclude=SC1090 --exclude=SC2034 bin/ci scripts/ci/native-appliance.sh scripts/ci/check-oci-digest.sh scripts/validate-release-source.sh tests/ci-runner-contract.sh tests/release-publication-source.sh",
 	"static-hygiene":          "SKIP=check-skill-frontmatter,generate-skills,omp-review-mode,appliance-contract pre-commit run --all-files --show-diff-on-failure",
 	"source-snapshot-contract": "python3 tests/ci_source_snapshot_test.py",
 	"skill-frontmatter":        "bash scripts/check-skill-frontmatter.sh",
@@ -73,7 +155,7 @@ var supportedSteps = map[string]string{
 	"just-onboarding":          "bash tests/just-onboarding.sh",
 	"appliance-contract":       "bash tests/appliance-contract.sh",
 	"package-review-contract":  "python3 tests/package_review_contract.py",
-	"release-version":           "python3 tests/release_version_test.py",
+	"release-version":           "python3 tests/release_version_test.py && bash tests/release-publication-source.sh",
 	"review-changelog":           "REVIEW_CI_TOOLS_DIR=/opt/review-ci-tools bash scripts/ci/run-review-changelog.sh",
 	"package-oci-contract":     "python3 tests/package_oci_contract.py",
 	"appliance-sbom-contract":  "python3 tests/appliance_sbom_contract.py",

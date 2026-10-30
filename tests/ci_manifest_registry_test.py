@@ -42,11 +42,14 @@ class DaggerRegistryTest(unittest.TestCase):
                 )
             )
             (root / ".dagger/main.go").write_text(
-                '\t"contract-test": "python3 tests/contract_test.py",\n'
+                '\t"contract-test": "python3 tests/contract_test.py && bash tests/secondary_contract.sh",\n'
                 '\t"portable-only-test": "python3 tests/portable_only_test.py",\n'
             )
 
-            self.assertEqual(dagger_registry.dagger_test_roots(root), ["contract_test.py"])
+            self.assertEqual(
+                dagger_registry.dagger_test_roots(root),
+                ["contract_test.py", "secondary_contract.sh"],
+            )
             self.assertNotIn("portable_only_test.py", dagger_registry.dagger_test_roots(root))
 
     def test_rejects_invoked_profile_missing_from_manifest(self) -> None:

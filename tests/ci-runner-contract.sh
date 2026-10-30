@@ -30,4 +30,4 @@ assert_blocked "native requirement" --profile contract --require-native
 assert_blocked "OS requirement" --profile contract --require-os ubuntu:26.04
 assert_blocked "unavailable comparison base" --profile pre-push --base missing-base --plan-only
 
-echo "CI runner reports unimplemented subject and native gates as blocked."
+echo "CI runner reports missing subject and unsupported native gates as blocked."

@@ -33,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
       build: ${{ steps.source.outputs.build }}
       publish: ${{ steps.source.outputs.publish }}
     steps:
@@ -49,9 +50,29 @@ jobs:
         run: |
           set -euo pipefail
           sha="$(git rev-parse HEAD)"
+          main_sha="$(git rev-parse origin/main)"
+          test -z "$(git status --porcelain=v1)" || {
+            echo "::error::release source checkout is dirty"
+            exit 1
+          }
+          if [ "$AUTOMATIC" = false ] && [ "$PUBLISH" = true ]; then
+            [[ "$GITHUB_REF" == refs/heads/main ]] || {
+              echo "::error::publication workflow must run from main"
+              exit 1
+            }
+            [[ "$sha" == "$main_sha" ]] || {
+              echo "::error::publication source must be the exact current main commit"
+              exit 1
+            }
+            # The source checkout is now pinned to trusted main before this helper runs.
+            bash scripts/validate-release-source.sh "$sha" "$main_sha" "$PUBLISH"
+          fi
           version="$(bash scripts/review-appliance-version.sh)"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          {
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "publish=$PUBLISH"
+          } >> "$GITHUB_OUTPUT"
           # API errors must fail, never masquerade as an unpublished version.
           gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$RUNNER_TEMP/release-tags"
           if [ "$PUBLISH" = true ] && grep -Fxq "v$version" "$RUNNER_TEMP/release-tags"; then
@@ -74,7 +95,6 @@ jobs:
     if: needs.prepare.outputs.build == 'true'
     permissions:
       contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -96,28 +116,18 @@ jobs:
         run: python3 tests/package_review_contract.py
       - name: Install Apptainer
         run: bash scripts/install-apptainer-ci.sh
-      - name: Log in to GHCR
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          authfile="$RUNNER_TEMP/ghcr-auth.json"
-          printf '%s' "$GITHUB_TOKEN" |
-            podman login ghcr.io --username "$GITHUB_ACTOR" --authfile "$authfile" --password-stdin
-          chmod 0600 "$authfile"
-      - name: Build committed launcher and matching native SIF
-        env:
-          SOURCE_REF: ${{ needs.prepare.outputs.sha }}
-          REVIEW_SOURCE_REF: ${{ needs.prepare.outputs.sha }}
-          REVIEW_OCI_PUSH: "1"
-          REGISTRY_AUTH_FILE: ${{ runner.temp }}/ghcr-auth.json
-        # scripts/package-review performs the authenticated podman push before it builds the SIF.
-        run: ./scripts/package-review build "$SOURCE_REF" "$RUNNER_TEMP/bundles"
-      - name: Check out tools tap packaging
+      - name: Check out tools tap SIF smoke
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: joshyorko/homebrew-tools
           path: tools-tap
+      - name: Build committed launcher and matching native SIF
+        env:
+          SOURCE_REF: ${{ needs.prepare.outputs.sha }}
+          REVIEW_SOURCE_REF: ${{ needs.prepare.outputs.sha }}
+          REVIEW_OCI_ARCHIVE: ${{ runner.temp }}/bundles/review-${{ matrix.arch }}.oci.tar
+        # Candidate construction is local and credential-free; the publish job owns registry writes.
+        run: ./scripts/package-review build "$SOURCE_REF" "$RUNNER_TEMP/bundles"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: review-candidate-${{ matrix.arch }}
@@ -137,11 +147,9 @@ jobs:
           call: >-
             review-candidate-check
             --artifact=${{ runner.temp }}/bundles/review-${{ matrix.arch }}.tar.gz
-            --version=${{ steps.version.outputs.version }}
-
-
+            --version=${{ needs.prepare.outputs.version }}
   publish:
-    if: needs.prepare.outputs.publish == 'true'
+    if: needs.prepare.outputs.publish == 'true' && github.ref == 'refs/heads/main'
     needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
@@ -156,9 +164,7 @@ jobs:
           pattern: review-candidate-*
           path: ${{ runner.temp }}/bundles
           merge-multiple: true
-      - name: Validate native bundles and generate formula
-        run: python3 scripts/review-formula.py "$RUNNER_TEMP/bundles" "$RUNNER_TEMP/formula"
-      - name: Publish the matching OCI index
+      - name: Log in to GHCR and publish immutable architecture images
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -168,7 +174,41 @@ jobs:
             podman login ghcr.io --username "$GITHUB_ACTOR" --authfile "$authfile" --password-stdin
           chmod 0600 "$authfile"
           mapfile -t manifests < <(printf '%s\n' "$RUNNER_TEMP"/bundles/manifest-*.json | sort)
-          test "${#manifests[@]}" -gt 0
+          test "${#manifests[@]}" -eq 2
+          for record in "${manifests[@]}"; do
+            sha="$(jq -r '.sha' "$record")"
+            arch="$(jq -r '.arch' "$record")"
+            image="$(jq -r '.oci_arch_image' "$record")"
+            archive="$RUNNER_TEMP/bundles/review-$arch.oci.tar"
+            test -s "$archive"
+            test "$image" = "ghcr.io/joshyorko/review:sha-$sha-$arch"
+            archive_identity="$(skopeo inspect --format '{{.Digest}} {{index .Labels "org.opencontainers.image.revision"}}' "oci-archive:$archive")"
+            read -r archive_digest revision <<<"$archive_identity"
+            test "$revision" = "$sha"
+            [[ "$archive_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            skopeo copy --all --preserve-digests --dest-authfile "$authfile" \
+              "oci-archive:$archive" "docker://$image"
+            registry_digest="$(skopeo inspect --authfile "$authfile" --format '{{.Digest}}' "docker://$image")"
+            bash scripts/ci/check-oci-digest.sh "$archive_digest" "$registry_digest"
+            python3 - "$record" "$archive_digest" "$registry_digest" <<'PY'
+          import json,sys
+          from pathlib import Path
+          path=Path(sys.argv[1]); record=json.loads(path.read_text())
+          record['oci_archive_digest']=sys.argv[2]
+          record['oci_arch_digest']=sys.argv[3]
+          path.write_text(json.dumps(record,indent=2)+'\n')
+          PY
+          done
+      - name: Validate native bundles and generate formula
+        run: python3 scripts/review-formula.py "$RUNNER_TEMP/bundles" "$RUNNER_TEMP/formula"
+      - name: Publish the matching OCI index
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          authfile="$RUNNER_TEMP/ghcr-auth.json"
+          mapfile -t manifests < <(printf '%s\n' "$RUNNER_TEMP"/bundles/manifest-*.json | sort)
+          test "${#manifests[@]}" -eq 2
           sha="$(jq -r '.sha' "${manifests[0]}")"
           image="$(jq -r '.oci_image' "${manifests[0]}")"
           test "$image" = "ghcr.io/joshyorko/review:sha-$sha"
