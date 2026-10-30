@@ -190,6 +190,13 @@ jobs:
           grep -Fq 'review-queue' justfile
           grep -Fq 'brew install joshyorko/tools/review' README.md
 
+      - name: Compare the local-first Dagger portable profile
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
+        with:
+          version: '0.21.11'
+          verb: call
+          args: portable --source=${{ runner.temp }}/review-ci-source
+
       - name: Build and execute Review appliance
         run: |
           set -euo pipefail

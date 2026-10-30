@@ -16,6 +16,7 @@
       "generate-skills",
       "test-registry",
       "check-commit-message",
+      "release-dispatch-guard",
       "omp-review-mode",
       "just-onboarding",
       "appliance-contract",
