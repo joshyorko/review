@@ -40,16 +40,18 @@ visible in the stack trace.
 | Review code, patch, pin, workflow wiring, or launcher integration | `joshyorko/review` |
 | Software behavior that reproduces directly at the pinned source/release | That software's upstream repository, such as OMP, RTK, or GitHub CLI |
 | An action's own install/setup behavior | The action repository; separate it from the tool or package it installs. Review's dogfood workflow currently pins `eWaterCycle/setup-apptainer`; its release workflow installs from `apptainer/ppa` instead. |
-| A package build, repository, PPA, or distribution-specific patch | The package/distribution maintainer, not automatically the software project |
+| A package build, repository metadata, source registration, or distribution-specific patch | The component that creates the artifact or package selection; separate Review-owned setup from installer/repository tooling and package maintainers |
 | Hosted runner image, kernel, AppArmor profile, or architecture capability | The owner of the runner/image configuration, after separating it from package behavior |
 | Bluefin image-owned configuration or integration | The Bluefin repository/component whose source owns that behavior; do not route there just because investigation ran on Bluefin |
 
 For Apptainer, inspect the current workflow and distinguish the CLI/source
-project, selected package or PPA, installer action, and hosted runner's
-kernel/security profile. A missing profile on one runner does not by itself
-prove an Apptainer defect. Likewise, a machine running Bluefin does not make
-Bluefin the owner unless the failed behavior is in a Bluefin-owned image or
-integration.
+project, package/PPA artifact, repository metadata and architecture filter,
+installer action, and hosted runner's kernel/security profile. Compare the
+selected package identity with the package files and runner capabilities: a
+correct artifact may be skipped by repository metadata, and a missing profile
+on one runner does not by itself prove an Apptainer defect. Likewise, a machine
+running Bluefin does not make Bluefin the owner unless the failed behavior is
+in a Bluefin-owned image or integration.
 For OMP, report sparingly: first establish a minimal failure against Review's
 exact pinned OMP source without Review's compatibility patches or integration,
 then compare the current OMP issue, PR, and release state. A Review patch or
