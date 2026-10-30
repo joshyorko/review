@@ -9,9 +9,9 @@ it to the Review image, CI, or runtime, and do not install or configure it
 without task-specific authorization. Findings are leads, not proof of an
 upstream defect.
 
-For appliance pins and package selection, load [`image-build.md`](../image-build.md);
-for runtime boundaries, load [`launcher.md`](../launcher.md). Use the reporting
-skill for attribution, authorization, and upstream follow-through.
+For appliance pins and package selection, load the `image-build` skill; for
+runtime boundaries, load `launcher`. Use the reporting skill for attribution,
+authorization, and upstream follow-through.
 
 ## Establish the run boundary
 

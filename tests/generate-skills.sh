@@ -14,7 +14,9 @@ bash "$repo_root/tests/check-skill-frontmatter-contract.sh"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-mkdir -p "$tmpdir/source/docs/skills/nested-skill"
+mkdir -p \
+  "$tmpdir/source/docs/skills/nested-skill" \
+  "$tmpdir/source/docs/skills/references"
 cat >"$tmpdir/source/docs/skills/valid-skill.md" <<'EOF'
 ---
 name: valid-skill
@@ -43,6 +45,52 @@ cat >"$tmpdir/source/docs/skills/nested-skill/references/card-fields.md" <<'EOF'
 REFERENCE_BODY_MARKER
 EOF
 
+cat >"$tmpdir/source/docs/skills/resource-skill.md" <<'EOF'
+---
+name: resource-skill
+description: "A flat manifest skill with declared resources."
+---
+
+# Resource Skill
+
+Read [the guide](references/guide.md).
+EOF
+cat >"$tmpdir/source/docs/skills/references/guide.md" <<'EOF'
+# Guide
+DECLARED_REFERENCE_MARKER
+EOF
+cat >"$tmpdir/source/docs/skills/references/scenarios.json" <<'EOF'
+{"fixture":"DECLARED_SCENARIO_MARKER"}
+EOF
+
+cat >"$tmpdir/source/docs/skills/traversal-skill.md" <<'EOF'
+---
+name: traversal-skill
+description: "A manifest resource with a traversal path."
+---
+
+# Traversal Skill
+EOF
+cat >"$tmpdir/source/docs/skills/symlink-resource-skill.md" <<'EOF'
+---
+name: symlink-resource-skill
+description: "A manifest resource with a symlink source."
+---
+
+# Symlink Resource Skill
+EOF
+cat >"$tmpdir/source/docs/skills/undeclared-resource-skill.md" <<'EOF'
+---
+name: undeclared-resource-skill
+description: "A flat skill with an undeclared linked resource."
+---
+
+# Undeclared Resource Skill
+
+Read [the guide](references/guide.md).
+EOF
+ln -s /etc/passwd "$tmpdir/source/docs/skills/references/external.md"
+
 cat >"$tmpdir/index.json" <<EOF
 {
   "skills": [
@@ -57,6 +105,33 @@ cat >"$tmpdir/index.json" <<EOF
       "name": "nested-skill",
       "description": "A nested skill.",
       "entry_point": "docs/skills/nested-skill/SKILL.md"
+    },
+    {
+      "id": "resource-skill",
+      "name": "resource-skill",
+      "description": "A flat manifest skill with declared resources.",
+      "entry_point": "docs/skills/resource-skill.md",
+      "resources": ["references/guide.md", "references/scenarios.json"]
+    },
+    {
+      "id": "traversal-skill",
+      "name": "traversal-skill",
+      "description": "A manifest resource with a traversal path.",
+      "entry_point": "docs/skills/traversal-skill.md",
+      "resources": ["references/../../outside.md"]
+    },
+    {
+      "id": "symlink-resource-skill",
+      "name": "symlink-resource-skill",
+      "description": "A manifest resource with a symlink source.",
+      "entry_point": "docs/skills/symlink-resource-skill.md",
+      "resources": ["references/external.md"]
+    },
+    {
+      "id": "undeclared-resource-skill",
+      "name": "undeclared-resource-skill",
+      "description": "A flat skill with an undeclared linked resource.",
+      "entry_point": "docs/skills/undeclared-resource-skill.md"
     },
     {
       "id": "$tmpdir/escaped",
@@ -89,6 +164,21 @@ python3 "$repo_root/scripts/generate-skills.py" \
 
 test -f "$tmpdir/out/valid-skill/SKILL.md"
 test -f "$tmpdir/out/nested-skill/SKILL.md"
+test -f "$tmpdir/out/resource-skill/SKILL.md"
+test -f "$tmpdir/out/resource-skill/references/guide.md"
+test -f "$tmpdir/out/resource-skill/references/scenarios.json"
+test ! -e "$tmpdir/out/resource-skill/references/external.md"
+grep -Fq 'DECLARED_REFERENCE_MARKER' \
+  "$tmpdir/out/resource-skill/references/guide.md"
+grep -Fq 'DECLARED_SCENARIO_MARKER' \
+  "$tmpdir/out/resource-skill/references/scenarios.json"
+test ! -e "$tmpdir/out/traversal-skill"
+grep -Fq 'skipped traversal-skill: invalid resources' "$tmpdir/stderr"
+test ! -e "$tmpdir/out/symlink-resource-skill"
+grep -Fq 'skipped symlink-resource-skill: invalid resources' "$tmpdir/stderr"
+test ! -e "$tmpdir/out/undeclared-resource-skill"
+grep -Fq 'skipped undeclared-resource-skill: undeclared reference resources' \
+  "$tmpdir/stderr"
 test ! -e "$tmpdir/escaped"
 grep -Fq "skipped $tmpdir/escaped: invalid id" "$tmpdir/stderr"
 grep -Fq 'skipped invalid-entry: invalid entry_point' "$tmpdir/stderr"
@@ -255,5 +345,39 @@ PY
 test -f "$tmpdir/remote-out/remote-skill/SKILL.md"
 grep -Fq 'REMOTE_REFERENCE_MARKER' \
   "$tmpdir/remote-out/remote-skill/references/remote.md"
+
+# Project Review's actual manifest-backed flat skill. Its explicit resources
+# must be present in the installed layout so both source and package-relative
+# links resolve; this exercises the image's canonical projection path.
+python3 "$repo_root/scripts/generate-skills.py" \
+  --index "$repo_root/docs/skills/index.json" \
+  --raw-base "$repo_root" \
+  --out "$tmpdir/review-out" \
+  2>"$tmpdir/review-stderr"
+test -f \
+  "$tmpdir/review-out/upstream-dependency-reporting/references/upstream-clawpatch-discovery.md"
+test -f \
+  "$tmpdir/review-out/upstream-dependency-reporting/references/upstream-clawpatch-discovery-scenarios.json"
+grep -Fq \
+  'references/upstream-clawpatch-discovery.md' \
+  "$tmpdir/review-out/upstream-dependency-reporting/SKILL.md"
+grep -Fq \
+  'upstream-clawpatch-discovery-scenarios.json' \
+  "$tmpdir/review-out/upstream-dependency-reporting/references/upstream-clawpatch-discovery.md"
+grep -Fq \
+  'upstream-clawpatch-discovery-scenarios.json' \
+  "$repo_root/docs/skills/references/upstream-clawpatch-discovery.md"
+grep -Fq \
+  '](../upstream-dependency-reporting.md)' \
+  "$repo_root/docs/skills/references/upstream-clawpatch-discovery.md"
+grep -Fq \
+  '](../SKILL.md)' \
+  "$tmpdir/review-out/upstream-dependency-reporting/references/upstream-clawpatch-discovery.md"
+if grep -Fq \
+  '](../upstream-dependency-reporting.md)' \
+  "$tmpdir/review-out/upstream-dependency-reporting/references/upstream-clawpatch-discovery.md"; then
+  echo "projected reference retained a source-only skill backlink" >&2
+  exit 1
+fi
 
 echo "✓ skill generator safely projects manifests and community skills."

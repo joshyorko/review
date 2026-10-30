@@ -20,6 +20,7 @@ cd "$repo_root"
 python3 - "$@" <<'PY'
 import json
 import os
+import re
 import sys
 
 SKILL_DIR = "docs/skills"
@@ -29,6 +30,9 @@ ROUTER = "docs/SKILL.md"
 MAX_DESC = 256
 MAX_SOFT = 200
 MAX_HARD = 500
+RESOURCE_PATTERN = re.compile(
+    r"references/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:md|json)\Z"
+)
 
 REQUIRED_KEYS = [
     "name",
@@ -170,6 +174,27 @@ def check_file(path):
     elif "tags" in fm:
         error(path, "tags must be a list")
 
+    resources = fm.get("resources")
+    if resources is not None:
+        if not isinstance(resources, list):
+            error(path, "resources must be a list")
+        else:
+            seen_resources = set()
+            for resource in resources:
+                if not isinstance(resource, str):
+                    error(path, "resource must be a string path")
+                    continue
+                if not RESOURCE_PATTERN.fullmatch(resource) or ".." in resource:
+                    error(
+                        path,
+                        "resource must be a safe references/<file>.md or .json path",
+                    )
+                    continue
+                if resource in seen_resources:
+                    error(path, "duplicate resource '%s'" % resource)
+                    continue
+                seen_resources.add(resource)
+
     for key in ("id", "name"):
         if fm.get(key) not in (None, stem):
             error(path, "%s '%s' does not match filename stem '%s'" % (key, fm[key], stem))
@@ -206,6 +231,8 @@ def build_manifest(front_matter):
     for stem in sorted(front_matter):
         fm = front_matter[stem]
         entry = {field: fm.get(field) for field in MANIFEST_FIELDS}
+        if fm.get("resources"):
+            entry["resources"] = fm["resources"]
         metadata = fm.get("metadata")
         entry["doc_type"] = metadata.get("type") if isinstance(metadata, dict) else None
         skills.append(entry)

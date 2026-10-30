@@ -229,6 +229,10 @@
       "description": "Use when explicit ClawPatch discovery is requested, a Review build, hosted action, package, or runtime exposes a suspected upstream defect, or an existing upstream report needs follow-up.",
       "version": "1.0",
       "last_updated": "2026-10-30",
+      "resources": [
+        "references/upstream-clawpatch-discovery.md",
+        "references/upstream-clawpatch-discovery-scenarios.json"
+      ],
       "doc_type": "procedure"
     }
   ]

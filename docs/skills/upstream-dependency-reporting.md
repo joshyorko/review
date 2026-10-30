@@ -9,6 +9,9 @@ category: ci-ops
 status: active
 tags: [upstream, dependency, clawpatch, reproducibility, reporting, follow-up]
 description: "Use when explicit ClawPatch discovery is requested, a Review build, hosted action, package, or runtime exposes a suspected upstream defect, or an existing upstream report needs follow-up."
+resources:
+  - references/upstream-clawpatch-discovery.md
+  - references/upstream-clawpatch-discovery-scenarios.json
 metadata:
   type: procedure
   context7-sources: []

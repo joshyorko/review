@@ -10,7 +10,9 @@ This script accepts factory manifests plus local or remote community
 ``SKILL.md`` sources and writes ``<out>/<id>/SKILL.md`` for each active skill.
 It is a projection, not a migration: the original sources stay authoritative.
 Local community directories retain their standard sibling ``scripts``,
-``references`` and ``assets`` content.
+``references`` and ``assets`` content. Manifest-backed flat skills can declare
+individual ``references/<file>.md`` or ``.json`` resources; only those files
+are copied and their paths are checked before projection.
 
 Manifest-backed skills emit only ``name``, ``description`` and a nested
 ``metadata`` block. The factory frontmatter carries a further ten top-level
@@ -45,12 +47,13 @@ DEFAULT_RAW_BASE = str(DEFAULT_ROOT) + "/"
 MAX_DESCRIPTION = 256
 SKILL_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
-# Skill bodies link to sibling material as 'references/<name>.md'. Those files
-# are not listed in the manifest, so they are resolved from the body itself.
-# Without them a projected skill ships dangling links: 'pr-review' alone points
-# at four reference documents that never reached the image.
+# Community SKILL.md bodies may link sibling references not listed in a
+# manifest. Flat factory skills use explicit resource entries instead.
 REFERENCE_LINK_PATTERN = re.compile(r"\(\s*(references/[A-Za-z0-9._-]+\.md)\s*\)")
 REFERENCE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.md\Z")
+RESOURCE_PATH_PATTERN = re.compile(
+    r"references/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:md|json)\Z"
+)
 FRONTMATTER_NAME_PATTERN = re.compile(r"^name:\s*(.+?)\s*$", re.MULTILINE)
 
 
@@ -142,6 +145,65 @@ def reference_names(body: str) -> list[str]:
         if is_safe_reference(name) and name not in seen:
             seen.append(name)
     return seen
+
+
+def manifest_resource_paths(skill: dict) -> list[str] | None:
+    """Validate explicit reference resource paths from the manifest."""
+    if "resources" not in skill:
+        return []
+    resources = skill["resources"]
+    if not isinstance(resources, list):
+        return None
+    seen: set[str] = set()
+    for resource in resources:
+        if (
+            not isinstance(resource, str)
+            or not RESOURCE_PATH_PATTERN.fullmatch(resource)
+            or ".." in pathlib.PurePosixPath(resource).name
+            or resource in seen
+        ):
+            return None
+        seen.add(resource)
+    return resources
+
+
+def read_manifest_resources(
+    location: str, resources: list[str]
+) -> dict[str, str] | None:
+    """Read explicitly declared reference files without following local symlinks."""
+    contents: dict[str, str] = {}
+    for resource in resources:
+        if is_url(location):
+            base_url = urllib.parse.urljoin(location, "./")
+            resource_url = urllib.parse.urljoin(base_url, resource)
+            base = urllib.parse.urlparse(base_url)
+            candidate = urllib.parse.urlparse(resource_url)
+            if (
+                candidate.scheme != base.scheme
+                or candidate.netloc != base.netloc
+                or not candidate.path.startswith(base.path)
+            ):
+                return None
+            try:
+                contents[resource] = read_source(resource_url)
+            except (OSError, urllib.error.URLError):
+                return None
+            continue
+
+        source_root = pathlib.Path(location).parent.resolve()
+        candidate = source_root
+        for part in pathlib.PurePosixPath(resource).parts:
+            candidate = candidate / part
+            if candidate.is_symlink():
+                return None
+        try:
+            resolved = candidate.resolve(strict=True)
+            if source_root not in resolved.parents or not resolved.is_file():
+                return None
+            contents[resource] = resolved.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return None
+    return contents
 
 
 def unquote_yaml_scalar(value: str) -> str:
@@ -376,6 +438,25 @@ def project_manifest(
             skipped.append((skill_id, f"unreadable: {err}"))
             continue
 
+        resources = manifest_resource_paths(skill)
+        if resources is None:
+            skipped.append((skill_id, "invalid resources"))
+            continue
+        entry_path = pathlib.PurePosixPath(urllib.parse.urlparse(location).path)
+        if entry_path.name != "SKILL.md":
+            undeclared = [
+                f"references/{name}"
+                for name in reference_names(body)
+                if f"references/{name}" not in resources
+            ]
+            if undeclared:
+                skipped.append((skill_id, "undeclared reference resources"))
+                continue
+        resource_contents = read_manifest_resources(location, resources)
+        if resource_contents is None:
+            skipped.append((skill_id, "invalid resources"))
+            continue
+
         target = out_root / skill_id
         if not is_url(location):
             source_path = pathlib.Path(location)
@@ -404,19 +485,30 @@ def project_manifest(
                 )
                 continue
 
-        entry_path = pathlib.PurePosixPath(urllib.parse.urlparse(location).path)
+        for resource, contents in resource_contents.items():
+            if resource.endswith(".md"):
+                contents = contents.replace(
+                    f"](../{entry_path.name})", "](../SKILL.md)"
+                )
+            resource_path = target / pathlib.PurePosixPath(resource)
+            resource_path.parent.mkdir(parents=True, exist_ok=True)
+            resource_path.write_text(contents, encoding="utf-8")
+            references += 1
+
         if entry_path.name != "SKILL.md":
             continue
         for name in reference_names(body):
+            reference_path = target / "references" / name
+            if reference_path.is_file():
+                continue
             reference_location = urllib.parse.urljoin(location, f"references/{name}")
             try:
                 reference_body = read_source(reference_location)
             except (OSError, urllib.error.URLError) as err:
                 skipped.append((f"{skill_id}/references/{name}", f"unreadable: {err}"))
                 continue
-            reference_dir = target / "references"
-            reference_dir.mkdir(parents=True, exist_ok=True)
-            (reference_dir / name).write_text(reference_body, encoding="utf-8")
+            reference_path.parent.mkdir(parents=True, exist_ok=True)
+            reference_path.write_text(reference_body, encoding="utf-8")
             references += 1
 
     return emitted, references, skipped, None
