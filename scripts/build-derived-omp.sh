@@ -2,6 +2,14 @@
 set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 qualification_only=0
+memoryd_shim="${OMP_MEMORYD_SHIM:-0}"
+case "$memoryd_shim" in
+0|1) ;;
+*)
+  echo "invalid OMP_MEMORYD_SHIM value: $memoryd_shim (expected 0 or 1)" >&2
+  exit 2
+  ;;
+esac
 case "${1:-}" in
 --qualify-only)
   (($# == 1)) || {
@@ -20,7 +28,6 @@ esac
 : "${OMP_VERSION:?OMP_VERSION is required}"
 : "${OMP_SOURCE_COMMIT:?OMP_SOURCE_COMMIT is required}"
 : "${OMP_SOURCE_SHA256:?OMP_SOURCE_SHA256 is required}"
-: "${OMP_PATCH_SHA256:?OMP_PATCH_SHA256 is required}"
 : "${OMP_CLIPBOARD_PATCH_SOURCE_COMMIT:?OMP_CLIPBOARD_PATCH_SOURCE_COMMIT is required}"
 : "${OMP_CLIPBOARD_PATCH_SHA256:?OMP_CLIPBOARD_PATCH_SHA256 is required}"
 : "${OMP_CLIPBOARD_PATCH_PATH:?OMP_CLIPBOARD_PATCH_PATH is required}"
@@ -33,13 +40,20 @@ esac
 : "${OMP_NATIVES_VERSION:?OMP_NATIVES_VERSION is required}"
 : "${OMP_NATIVES_X86_64_SHA512:?OMP_NATIVES_X86_64_SHA512 is required}"
 : "${OMP_NATIVES_AARCH64_SHA512:?OMP_NATIVES_AARCH64_SHA512 is required}"
-: "${MEMORYD_SOURCE_COMMIT:?MEMORYD_SOURCE_COMMIT is required}"
-: "${MEMORYD_SOURCE_SHA256:?MEMORYD_SOURCE_SHA256 is required}"
-: "${OMP_PATCH_PATH:?OMP_PATCH_PATH is required}"
 : "${OMP_OUTPUT_PATH:?OMP_OUTPUT_PATH is required}"
+if [[ "$memoryd_shim" == 1 ]]; then
+  : "${MEMORYD_SOURCE_COMMIT:?MEMORYD_SOURCE_COMMIT is required when OMP_MEMORYD_SHIM=1}"
+  : "${MEMORYD_SOURCE_SHA256:?MEMORYD_SOURCE_SHA256 is required when OMP_MEMORYD_SHIM=1}"
+  : "${OMP_PATCH_PATH:?OMP_PATCH_PATH is required when OMP_MEMORYD_SHIM=1}"
+  : "${OMP_PATCH_SHA256:?OMP_PATCH_SHA256 is required when OMP_MEMORYD_SHIM=1}"
+fi
 
-if [[ ! "$OMP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$OMP_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$MEMORYD_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "invalid OMP, session lifecycle patch, clipboard patch, or MemoryD version/commit pin" >&2
+if [[ ! "$OMP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$OMP_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "invalid OMP, session lifecycle patch, or clipboard version/commit pin" >&2
+  exit 1
+fi
+if [[ "$memoryd_shim" == 1 && ! "$MEMORYD_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "invalid MemoryD source commit pin" >&2
   exit 1
 fi
 if ((qualification_only == 0)); then
@@ -64,10 +78,12 @@ for tool in curl git python3 tar sha256sum sha512sum install; do
     exit 1
   }
 done
-[[ -f "$OMP_PATCH_PATH" ]] || {
-  echo "OMP patch not found: $OMP_PATCH_PATH" >&2
-  exit 1
-}
+if [[ "$memoryd_shim" == 1 ]]; then
+  [[ -f "$OMP_PATCH_PATH" ]] || {
+    echo "MemoryD registration patch not found: $OMP_PATCH_PATH" >&2
+    exit 1
+  }
+fi
 [[ -f "$OMP_CLIPBOARD_PATCH_PATH" ]] || {
   echo "OMP clipboard patch not found: $OMP_CLIPBOARD_PATCH_PATH" >&2
   exit 1
@@ -76,7 +92,7 @@ done
   echo "OMP session lifecycle patch not found: $OMP_SESSION_LIFECYCLE_PATCH_PATH" >&2
   exit 1
 }
-if [[ "$OMP_PATCH_PATH" != /* ]]; then
+if [[ "$memoryd_shim" == 1 && "$OMP_PATCH_PATH" != /* ]]; then
   OMP_PATCH_PATH="$PWD/$OMP_PATCH_PATH"
 fi
 if [[ "$OMP_CLIPBOARD_PATCH_PATH" != /* ]]; then
@@ -114,7 +130,8 @@ esac
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 source_dir="$workdir/omp"
-mkdir -p "$source_dir" "$workdir/memoryd" "$workdir/bin" "$workdir/native"
+mkdir -p "$source_dir" "$workdir/bin" "$workdir/native"
+if [[ "$memoryd_shim" == 1 ]]; then mkdir -p "$workdir/memoryd"; fi
 
 omp_tag="refs/tags/v${OMP_VERSION}"
 tag_refs="$(git ls-remote --exit-code https://github.com/can1357/oh-my-pi.git "$omp_tag" "${omp_tag}^{}")"
@@ -138,15 +155,17 @@ printf '%s  %s\n' "$OMP_SOURCE_SHA256" "$omp_archive" | sha256sum --check --stat
   exit 1
 }
 tar --no-same-owner --extract --gzip --file "$omp_archive" --directory "$source_dir" --strip-components=1
-sha256sum "$OMP_PATCH_PATH" | {
-  read -r actual _
-  [[ "$actual" == "$OMP_PATCH_SHA256" ]]
-} || {
-  echo "OMP registration patch digest mismatch" >&2
-  exit 1
-}
-git -C "$source_dir" apply --check "$OMP_PATCH_PATH"
-git -C "$source_dir" apply "$OMP_PATCH_PATH"
+if [[ "$memoryd_shim" == 1 ]]; then
+  sha256sum "$OMP_PATCH_PATH" | {
+    read -r actual _
+    [[ "$actual" == "$OMP_PATCH_SHA256" ]]
+  } || {
+    echo "MemoryD registration patch digest mismatch" >&2
+    exit 1
+  }
+  git -C "$source_dir" apply --check "$OMP_PATCH_PATH"
+  git -C "$source_dir" apply "$OMP_PATCH_PATH"
+fi
 sha256sum "$OMP_CLIPBOARD_PATCH_PATH" | {
   read -r actual _
   [[ "$actual" == "$OMP_CLIPBOARD_PATCH_SHA256" ]]
@@ -166,19 +185,21 @@ sha256sum "$OMP_SESSION_LIFECYCLE_PATCH_PATH" | {
 git -C "$source_dir" apply --check "$OMP_SESSION_LIFECYCLE_PATCH_PATH"
 git -C "$source_dir" apply "$OMP_SESSION_LIFECYCLE_PATCH_PATH"
 
-memoryd_archive="$workdir/memoryd-source.tar.gz"
-curl --fail --location --show-error --silent \
-  "https://github.com/joshyorko/codex-memoryd/archive/${MEMORYD_SOURCE_COMMIT}.tar.gz" -o "$memoryd_archive"
-printf '%s  %s\n' "$MEMORYD_SOURCE_SHA256" "$memoryd_archive" | sha256sum --check --status || {
-  echo "MemoryD adapter source archive digest mismatch for ${MEMORYD_SOURCE_COMMIT}" >&2
-  exit 1
-}
-tar --no-same-owner --extract --gzip --file "$memoryd_archive" --directory "$workdir/memoryd" --strip-components=1
-adapter_source="$workdir/memoryd/adapters/omp-memory-provider/src"
-[[ -f "$adapter_source/index.ts" ]] || {
-  echo "pinned MemoryD source archive is missing the adapter" >&2
-  exit 1
-}
+if [[ "$memoryd_shim" == 1 ]]; then
+  memoryd_archive="$workdir/memoryd-source.tar.gz"
+  curl --fail --location --show-error --silent \
+    "https://github.com/joshyorko/codex-memoryd/archive/${MEMORYD_SOURCE_COMMIT}.tar.gz" -o "$memoryd_archive"
+  printf '%s  %s\n' "$MEMORYD_SOURCE_SHA256" "$memoryd_archive" | sha256sum --check --status || {
+    echo "MemoryD adapter source archive digest mismatch for ${MEMORYD_SOURCE_COMMIT}" >&2
+    exit 1
+  }
+  tar --no-same-owner --extract --gzip --file "$memoryd_archive" --directory "$workdir/memoryd" --strip-components=1
+  adapter_source="$workdir/memoryd/adapters/omp-memory-provider/src"
+  [[ -f "$adapter_source/index.ts" ]] || {
+    echo "pinned MemoryD source archive is missing the adapter" >&2
+    exit 1
+  }
+fi
 
 bun_archive="$workdir/$bun_asset"
 curl --fail --location --show-error --silent \
@@ -217,11 +238,17 @@ for addon in "$workdir/native/"*.node; do
 done
 cd "$source_dir"
 bun install --frozen-lockfile --no-progress
-bun --cwd="$workdir/memoryd/adapters/omp-memory-provider" test tests
+if [[ "$memoryd_shim" == 1 ]]; then
+  bun --cwd="$workdir/memoryd/adapters/omp-memory-provider" test tests
+fi
 bun --cwd=packages/coding-agent run check:types
-bun --cwd=packages/coding-agent test test/memory-backend-resolve.test.ts
+if [[ "$memoryd_shim" == 1 ]]; then
+  bun --cwd=packages/coding-agent test test/memory-backend-resolve.test.ts
+fi
 bun --cwd=packages/coding-agent test test/session-exit-lifecycle.test.ts
-bun --cwd=packages/coding-agent test test/modes/components/settings-selector-memory-refresh.test.ts
+if [[ "$memoryd_shim" == 1 ]]; then
+  bun --cwd=packages/coding-agent test test/modes/components/settings-selector-memory-refresh.test.ts
+fi
 bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"
 
 candidate="$source_dir/packages/coding-agent/binaries/omp-${omp_target}"
@@ -234,7 +261,10 @@ version_output="$("$candidate" --version)"
   echo "derived OMP version mismatch: ${version_output}" >&2
   exit 1
 }
-bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/canary"
+bun "$script_dir/derived-omp-lifecycle-canary.ts" "$candidate" "$workdir/lifecycle-canary"
+if [[ "$memoryd_shim" == 1 ]]; then
+  bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/memoryd-canary"
+fi
 if ((qualification_only)); then
   printf 'OMP patch qualification passed: version=%s commit=%s arch=%s; no OMP binary installed\n' "$OMP_VERSION" "$OMP_SOURCE_COMMIT" "$omp_target"
   exit 0
@@ -257,10 +287,16 @@ if not any(target.rglob("LICENSE*")):
 PYLICENSE
 
 printf 'OMP derived build: version=%s commit=%s arch=%s\n' "$OMP_VERSION" "$OMP_SOURCE_COMMIT" "$omp_target"
-printf 'OMP patch SHA-256: %s\n' "$OMP_PATCH_SHA256"
+if [[ "$memoryd_shim" == 1 ]]; then
+  printf 'OMP registration patch SHA-256: %s\n' "$OMP_PATCH_SHA256"
+fi
 printf 'OMP clipboard patch: path=%s source=%s SHA-256=%s\n' "$OMP_CLIPBOARD_PATCH_PATH" "$OMP_CLIPBOARD_PATCH_SOURCE_COMMIT" "$OMP_CLIPBOARD_PATCH_SHA256"
 printf 'OMP session lifecycle patch: path=%s source=%s SHA-256=%s\n' "$OMP_SESSION_LIFECYCLE_PATCH_PATH" "$OMP_SESSION_LIFECYCLE_PATCH_SOURCE_COMMIT" "$OMP_SESSION_LIFECYCLE_PATCH_SHA256"
-printf 'MemoryD source: %s (archive SHA-256 %s)\n' "$MEMORYD_SOURCE_COMMIT" "$MEMORYD_SOURCE_SHA256"
+if [[ "$memoryd_shim" == 1 ]]; then
+  printf 'MemoryD source: %s (archive SHA-256 %s)\n' "$MEMORYD_SOURCE_COMMIT" "$MEMORYD_SOURCE_SHA256"
+else
+  printf 'MemoryD shim: excluded (OMP_MEMORYD_SHIM=0)\n'
+fi
 printf 'Bun version: %s (archive SHA-256 %s)\n' "$OMP_BUN_VERSION" "$bun_sha"
 printf 'Native package: @oh-my-pi/%s@%s (archive SHA-512 %s)\n' "$native_package" "$OMP_NATIVES_VERSION" "$native_sha"
 printf 'Derived OMP SHA-256: '

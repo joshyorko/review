@@ -88,7 +88,7 @@ require image/extension/typesafe-omp-loader.mjs \
 require "$containerfile" \
   "io.github.joshyorko.review.omp.version=\"\${OMP_VERSION}\"" \
   "io.github.joshyorko.review.omp.source.commit=\"\${OMP_SOURCE_COMMIT}\"" \
-  "io.github.joshyorko.review.omp.patch.sha256=\"\${OMP_PATCH_SHA256}\""
+  "io.github.joshyorko.review.omp.memoryd.shim=\"\${OMP_MEMORYD_SHIM}\""
 
 forbid_secret
 

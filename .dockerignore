@@ -13,6 +13,7 @@
 !scripts/generate-appliance-sbom.py
 !scripts/build-derived-omp.sh
 !scripts/derived-omp-canary.ts
+!scripts/derived-omp-lifecycle-canary.ts
 !patches/
 !patches/omp/
 !patches/omp/memory-backend-registration.patch

@@ -4,7 +4,7 @@ The repository ships one OCI appliance from `image/appliance/Containerfile`. It 
 
 The image does not select a provider, model, or thinking effort. OMP resolves them from the user's active configuration. The launcher prefers Podman's `krun` runtime with KVM and falls back to isolated Apptainer when necessary. Review and Factory remain in the same appliance but keep separate authority and state.
 
-The Containerfile pins OMP's source tag/commit, source archive, generic registration patch, Bun toolchain, and per-architecture native packages. It builds the derived OMP binary on each native image architecture; it does not fetch a prebuilt OMP binary. GitHub CLI artifacts remain per-architecture SHA-256 verified. `scripts/update-omp-pins.mjs` refreshes the OMP source/native pins and `scripts/update-gh-pins.mjs` refreshes GitHub CLI pins; CI requirement hashes are refreshed by `scripts/update-requirements-ci-hashes.mjs`.
+The Containerfile pins OMP's source tag/commit, source archive, clipboard and lifecycle patches, Bun toolchain, and per-architecture native packages. It builds the derived OMP binary on each native image architecture; it does not fetch a prebuilt OMP binary. `OMP_MEMORYD_SHIM=0` is the default and excludes MemoryD adapter fetches and tests. The manual **Qualify optional MemoryD shim** workflow builds a job-local `review-memoryd-candidate` with `OMP_MEMORYD_SHIM=1`; it does not publish, activate, or distribute the candidate. GitHub CLI artifacts remain per-architecture SHA-256 verified. `scripts/update-omp-pins.mjs` refreshes the OMP source/native pins and `scripts/update-gh-pins.mjs` refreshes GitHub CLI pins; CI requirement hashes are refreshed by `scripts/update-requirements-ci-hashes.mjs`.
 
 ## Development
 

@@ -319,7 +319,6 @@ try {
     throw new Error("canary observed automatic or unexpected MemoryD writes");
   }
 
-  console.log("Derived OMP native session shutdown lifecycle capability v1: passed");
   console.log("Derived OMP provider-boundary canary: recall and daemon-down fail-open passed");
   console.log("Derived OMP native memory canary: status, search, explicit save, and disabled automatic writes passed");
 } finally {

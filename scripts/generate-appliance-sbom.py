@@ -115,7 +115,13 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
         )
     omp_sha = require_sha256(args.omp_sha256, "omp_sha256")
     source_sha = require_sha256(args.omp_source_sha256, "omp_source_sha256")
-    patch_sha = require_sha256(args.omp_patch_sha256, "omp_patch_sha256")
+    if args.omp_memoryd_shim not in {"0", "1"}:
+        raise SystemExit("omp_memoryd_shim must be 0 or 1")
+    memoryd_patch_sha = ""
+    if args.omp_memoryd_shim == "1":
+        memoryd_patch_sha = require_sha256(
+            args.omp_memoryd_patch_sha256, "omp_memoryd_patch_sha256"
+        )
     clipboard_patch_sha = require_sha256(
         args.omp_clipboard_patch_sha256, "omp_clipboard_patch_sha256"
     )
@@ -161,7 +167,7 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
     bun_asset = BUN_ARCHIVE[arch]
     bun_url = f"https://github.com/oven-sh/bun/releases/download/bun-v{omp_bun_version}/{bun_asset}"
     source_url = f"https://github.com/can1357/oh-my-pi/archive/{source_commit}.tar.gz"
-    patch_url = (
+    memoryd_patch_url = (
         f"https://github.com/joshyorko/review/blob/{args.revision}/"
         "patches/omp/memory-backend-registration.patch"
     )
@@ -179,7 +185,14 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
     builder = require_non_empty(args.runtime_builder_image, "runtime builder image")
     builder_sha = require_sha256(builder.rsplit("@sha256:", 1)[-1], "runtime builder digest")
     actionlint_arch = {"x86_64": "amd64", "aarch64": "arm64"}[arch]
-    return [
+    omp_comment = (
+        "Review-derived OMP executable built locally from the pinned source archive "
+        f"at {source_commit} (SHA-256 {source_sha}) with clipboard truthfulness patch "
+        f"(SHA-256 {clipboard_patch_sha}) and session lifecycle patch "
+        f"(SHA-256 {session_lifecycle_patch_sha}), Bun {omp_bun_version}, and verified native "
+        f"addon {native_package}@{natives_version}. Installed to /usr/bin/omp."
+    )
+    packages = [
         package("actionlint", actionlint_version,
                 f"https://github.com/rhysd/actionlint/releases/download/v{actionlint_version}/actionlint_{actionlint_version}_linux_{actionlint_arch}.tar.gz",
                 f"pkg:github/rhysd/actionlint@v{actionlint_version}",
@@ -193,12 +206,7 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             omp_version,
             "NOASSERTION",
             f"pkg:generic/omp-derived@{omp_version}",
-            "Review-derived OMP executable built locally from the pinned source archive "
-            f"at {source_commit} (SHA-256 {source_sha}) with the generic memory registration "
-            f"patch (SHA-256 {patch_sha}) and clipboard truthfulness patch "
-            f"(SHA-256 {clipboard_patch_sha}) and session lifecycle patch "
-            f"(SHA-256 {session_lifecycle_patch_sha}), Bun {omp_bun_version}, and verified native "
-            f"addon {native_package}@{natives_version}. Installed to /usr/bin/omp.",
+            omp_comment,
             "SHA256",
             omp_sha,
         ),
@@ -211,16 +219,6 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             "SHA-256 is verified before extraction.",
             "SHA256",
             source_sha,
-        ),
-        package(
-            "omp-memory-backend-patch",
-            args.revision,
-            patch_url,
-            f"pkg:generic/omp-memory-backend-registration-patch@{args.revision}",
-            "Generic native MemoryBackend registration patch applied to the pinned OMP source; "
-            "its SHA-256 is verified before application.",
-            "SHA256",
-            patch_sha,
         ),
         package(
             "omp-clipboard-truthfulness-patch",
@@ -321,6 +319,27 @@ def build_packages(args: argparse.Namespace, arch: str) -> list[dict]:
             "/usr/share/review/extension.",
         ),
     ]
+    if args.omp_memoryd_shim == "1":
+        omp_comment = omp_comment.replace(
+            "with clipboard truthfulness patch",
+            f"with MemoryD registration patch (SHA-256 {memoryd_patch_sha}), "
+            "clipboard truthfulness patch",
+        )
+        packages[2]["comment"] = omp_comment
+        packages.insert(
+            4,
+            package(
+                "omp-memory-backend-patch",
+                args.revision,
+                memoryd_patch_url,
+                f"pkg:generic/omp-memory-backend-registration-patch@{args.revision}",
+                "Optional MemoryD registration patch applied to the pinned OMP source for "
+                "manual qualification only; its SHA-256 is verified before application.",
+                "SHA256",
+                memoryd_patch_sha,
+            ),
+        )
+    return packages
 
 
 def main() -> int:
@@ -333,7 +352,8 @@ def main() -> int:
     parser.add_argument("--omp-sha256", required=True)
     parser.add_argument("--omp-source-commit", required=True)
     parser.add_argument("--omp-source-sha256", required=True)
-    parser.add_argument("--omp-patch-sha256", required=True)
+    parser.add_argument("--omp-memoryd-shim", default="0", help="whether the optional MemoryD patch is included (0 or 1)")
+    parser.add_argument("--omp-memoryd-patch-sha256", default="", help="verified MemoryD patch digest; required when the shim is enabled")
     parser.add_argument("--omp-clipboard-patch-source-commit", required=True)
     parser.add_argument("--omp-clipboard-patch-sha256", required=True)
     parser.add_argument("--omp-clipboard-patch-path", required=True)
@@ -368,7 +388,8 @@ def main() -> int:
         "SPDXID": "SPDXRef-DOCUMENT",
         "name": "joshyorko-review-appliance",
         "documentNamespace": "https://github.com/joshyorko/review/sbom/"
-        f"review-appliance-{args.version}-{args.revision}-{arch}",
+        f"review-appliance-{args.version}-{args.revision}-{arch}"
+        + ("-memoryd-shim-1" if args.omp_memoryd_shim == "1" else ""),
         "creationInfo": {
             "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "creators": ["Tool: review-generate-appliance-sbom"],

@@ -1,0 +1,67 @@
+name: Qualify optional MemoryD shim
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Committed source ref to qualify
+        required: false
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    if: github.repository == 'joshyorko/review'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out selected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_ref || 'main' }}
+          fetch-depth: 0
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.x'
+
+      - name: Record exact source identity
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Qualify MemoryD compatibility
+        env:
+          OMP_MEMORYD_SHIM: "1"
+        run: node scripts/qualify-omp-upgrade.mjs --if-stale
+
+      - name: Build isolated MemoryD candidate
+        run: |
+          set -euo pipefail
+          version="$(bash scripts/review-appliance-version.sh)"
+          podman build --format oci \
+            --build-arg REVIEW_VERSION="$version" \
+            --build-arg REVIEW_REVISION="${{ steps.source.outputs.sha }}" \
+            --build-arg OMP_MEMORYD_SHIM=1 \
+            -f image/appliance/Containerfile \
+            -t "localhost/review-memoryd-candidate:${{ steps.source.outputs.sha }}" .
+          podman image inspect \
+            --format '{{ index .Labels "io.github.joshyorko.review.omp.memoryd.shim" }}' \
+            "localhost/review-memoryd-candidate:${{ steps.source.outputs.sha }}" | grep -Fx 1
+          podman run --rm --entrypoint /usr/bin/jq \
+            "localhost/review-memoryd-candidate:${{ steps.source.outputs.sha }}" \
+            -e 'any(.packages[]; .name == "omp-memory-backend-patch")' \
+            /usr/share/review/sbom.spdx.json
+
+      - name: Record qualification boundary
+        env:
+          CANDIDATE_IMAGE: localhost/review-memoryd-candidate:${{ steps.source.outputs.sha }}
+        run: |
+          {
+            echo "## Optional MemoryD qualification"
+            echo
+            printf 'Built %s for this job only.\n\n' "$CANDIDATE_IMAGE"
+            printf '%s\n' 'This workflow does not publish, activate, or distribute the candidate.'
+          } >> "$GITHUB_STEP_SUMMARY"
