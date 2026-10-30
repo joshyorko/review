@@ -3,12 +3,12 @@ name: upstream-dependency-reporting
 version: "1.0"
 last_updated: "2026-10-30"
 id: upstream-dependency-reporting
-one_line_purpose: Report confirmed Review dependency defects with evidence and follow-through.
+one_line_purpose: Investigate dependency findings and carry confirmed defects through Review qualification.
 entry_point: docs/skills/upstream-dependency-reporting.md
 category: ci-ops
 status: active
-tags: [upstream, dependency, reproducibility, reporting, follow-up]
-description: "Use when a Review build, hosted action, packaged dependency, or runtime exposes a suspected third-party defect, or when an existing upstream report affecting Review needs follow-up."
+tags: [upstream, dependency, clawpatch, reproducibility, reporting, follow-up]
+description: "Use when explicit ClawPatch discovery is requested, a Review build, hosted action, package, or runtime exposes a suspected upstream defect, or an existing upstream report needs follow-up."
 metadata:
   type: procedure
   context7-sources: []
@@ -20,9 +20,13 @@ metadata:
 
 Load this skill when a specific Review test, build, release qualification, or
 runtime exposes a suspected dependency defect; before reporting or patching it
-upstream; or when a relevant upstream report changes state. Investigate the
-assigned finding only. This skill does not start a dependency audit, add an
-automation service, or grant GitHub write access.
+upstream; when a relevant upstream report changes state; or when the operator
+explicitly requests ClawPatch discovery or continuation. A supplied finding
+uses the direct investigation below; it does not trigger a repository-wide
+scan. For explicit ClawPatch discovery, read
+[`references/upstream-clawpatch-discovery.md`](references/upstream-clawpatch-discovery.md).
+This skill does not make ClawPatch a Review dependency, start automatic audits,
+or grant GitHub write access.
 
 Do not use it for a Review-owned pin, patch, launcher, image, or integration
 defect. Fix those here. Normal Review does not send reports to Hive Commons or

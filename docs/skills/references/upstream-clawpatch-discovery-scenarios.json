@@ -1,0 +1,123 @@
+{
+  "format": "synthetic offline application scenarios; evaluate each independently",
+  "execution_limit": "Do not run ClawPatch, tests, network calls, or GitHub writes while evaluating these fixtures.",
+  "cases": [
+    {
+      "id": "explicit-discovery-tool-unavailable",
+      "request": "Run ClawPatch discovery against Review.",
+      "authorization": "Read-only discovery; no installation, provider configuration, or external writes.",
+      "snapshot": {
+        "source_sha": "1111111111111111111111111111111111111111",
+        "clawpatch_on_path": false,
+        "existing_run": null,
+        "provider_configured": false
+      },
+      "checks": [
+        "Report ClawPatch discovery as NOT RUN.",
+        "Do not install/configure ClawPatch or claim the repository has no defects.",
+        "Offer only separately labeled supplemental work if authorized."
+      ]
+    },
+    {
+      "id": "supplied-finding-is-review-owned",
+      "request": "Investigate this supplied ClawPatch finding and fix or report it as appropriate.",
+      "authorization": "Review-local changes and a Review PR are authorized; no upstream writes.",
+      "snapshot": {
+        "finding_id": "cp-review-17",
+        "review_command": "FAIL: Review passes an unsupported option to Apptainer.",
+        "direct_pinned_apptainer": "PASS without that option",
+        "review_source": "The launcher constructs the unsupported option.",
+        "clawpatch_state": "Existing run available; no discovery requested."
+      },
+      "checks": [
+        "Investigate the supplied finding directly; do not start a full ClawPatch scan.",
+        "Attribute the defect to Review's launcher and test/fix only under the authorized Review path.",
+        "Do not report an Apptainer upstream issue or make an upstream write."
+      ]
+    },
+    {
+      "id": "runner-package-owner-ambiguous",
+      "request": "Continue the requested ClawPatch discovery and triage its Apptainer finding.",
+      "authorization": "Read-only investigation; no external writes.",
+      "snapshot": {
+        "source_sha": "2222222222222222222222222222222222222222",
+        "finding_id": "cp-runtime-8",
+        "symptom": "Apptainer feature unavailable on one hosted runner.",
+        "package_identity": "Unknown",
+        "repository_architecture_filter": "Not inspected",
+        "runner_kernel_profile": "Not inspected",
+        "direct_pinned_artifact_reproduction": "Not run"
+      },
+      "checks": [
+        "Keep attribution unconfirmed; do not file to Apptainer or the runner owner yet.",
+        "Inspect the exact installed artifact, repository/source metadata, installer path, and runner capability as separate layers.",
+        "Report the missing direct reproduction and the next isolation step."
+      ]
+    },
+    {
+      "id": "truncated-review-and-worker-context",
+      "request": "Finish the explicitly requested ClawPatch review of the recorded scope.",
+      "authorization": "Read-only review and supplemental source inspection.",
+      "snapshot": {
+        "source_sha": "3333333333333333333333333333333333333333",
+        "requested_modes": ["default", "deslopify"],
+        "completed_modes": ["default"],
+        "failed_slices": ["factory/recovery"],
+        "finding_ids": ["cp-a", "cp-b", "cp-c"],
+        "prompt_manifest": {
+          "image/extension/review/recovery.ts": {
+            "total_characters": 40000,
+            "included_characters": 24000
+          }
+        },
+        "provider_capture": {
+          "working_directory": "unknown",
+          "project_guidance": "generic review only",
+          "effective_tests": ["npm test", "node --test tests/recovery.test.ts"]
+        }
+      },
+      "checks": [
+        "Preserve all three finding IDs and report the failed slice and uncompleted mode.",
+        "Treat only the included prefix as reviewed; inspect any relevant omitted tail separately and label it supplemental.",
+        "Do not claim Review guidance reached the worker; inspect supported context transport and working directory.",
+        "Report both effective test commands and bind any verification to this source SHA."
+      ]
+    },
+    {
+      "id": "upstream-fix-not-consumed",
+      "request": "Continue the existing upstream dependency report through Review verification.",
+      "authorization": "Update the existing Review tracking issue; no duplicate upstream submissions.",
+      "snapshot": {
+        "finding_id": "cp-fix-9",
+        "existing_upstream_issue": "open",
+        "upstream_pr": "merged",
+        "upstream_release": "available",
+        "review_pin": "still affected release",
+        "qualification_run": "used old pinned artifact",
+        "tracking_record": "open"
+      },
+      "checks": [
+        "Update the one existing tracking record with current upstream links/state; do not open a duplicate.",
+        "Do not mark the Review defect consumed-and-qualified or close the record.",
+        "Next gate is updating the Review pin and qualifying the actual newly consumed artifact."
+      ]
+    },
+    {
+      "id": "omp-local-patch-drift",
+      "request": "Investigate the supplied OMP finding before opening an upstream report.",
+      "authorization": "Review-local patch qualification is authorized; no upstream writes.",
+      "snapshot": {
+        "finding_id": "cp-omp-4",
+        "review_omp_source": "Pinned commit A",
+        "review_patch_qualification": "FAIL: patch provenance/hash does not match commit A",
+        "unpatched_pinned_omp_reproduction": "PASS",
+        "review_sdk_integration": "Not isolated"
+      },
+      "checks": [
+        "Route the patch drift to Review; do not report an OMP defect.",
+        "Requalify Review's patch against the exact pinned source and isolate SDK/integration behavior.",
+        "Report upstream only if the unpatched exact pinned OMP source independently reproduces a contract defect."
+      ]
+    }
+  ]
+}
