@@ -9,6 +9,7 @@
     "typescript": "5.9.3",
     "nodeTypes": "24.19.2",
     "tsx": "4.21.0",
+    "sdkLockGeneratorNpm": "11.20.0",
     "renovate": "44.181.2",
     "renovateRe2": "1.27.0",
     "renovateInstallScripts": ["re2"],

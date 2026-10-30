@@ -73,7 +73,7 @@ var supportedSteps = map[string]string{
 	"appliance-contract":       "bash tests/appliance-contract.sh",
 	"package-review-contract":  "python3 tests/package_review_contract.py",
 	"release-version":           "python3 tests/release_version_test.py",
-	"review-changelog":           "bash scripts/ci/run-review-changelog.sh",
+	"review-changelog":           "REVIEW_CI_TOOLS_DIR=/opt/review-ci-tools bash scripts/ci/run-review-changelog.sh",
 	"package-oci-contract":     "python3 tests/package_oci_contract.py",
 	"appliance-sbom-contract":  "python3 tests/appliance_sbom_contract.py",
 	"version-derivation":       "bash tests/version-derivation.sh",
@@ -82,8 +82,8 @@ var supportedSteps = map[string]string{
 	"update-derived-pins":      "node --test tests/update-derived-pins.test.mjs",
 	"luna-factory":             "node --test tests/luna_factory.test.ts",
 	"luna-dogfood-contract":    "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/luna_factory_dogfood_contract.test.ts",
-	"sdk-types":                "bash scripts/ci/run-sdk-type-checks.sh",
-	"omp-source-regressions":   "bash scripts/ci/run-omp-source-regressions.sh",
+	"sdk-types":                "OMP_SDK_NODE_MODULES=/opt/review-sdk/node_modules bash scripts/ci/run-sdk-type-checks.sh",
+	"omp-source-regressions":   "OMP_SDK_NODE_MODULES=/opt/review-sdk/node_modules REVIEW_OMP_SOURCE=/opt/review-omp-source bash scripts/ci/run-omp-source-regressions.sh",
 	"renovate-config":          "@renovate-validator",
 }
 
@@ -106,6 +106,18 @@ func run(ctx context.Context, source *dagger.Directory, commands []string) (stri
 		WithWorkdir("/tooling").
 		WithExec([]string{"bash", "-lc", "git init -q --initial-branch=main /tooling && python3 -m pip install --require-hashes --no-warn-script-location -r requirements-ci.lock && pre-commit install-hooks --config .pre-commit-config.yaml"}).
 		WithExec([]string{"chown", "-R", "node:node", "/opt/review-pre-commit"}).
+		WithExec([]string{"mkdir", "-p", "/opt/review-sdk"}).
+		WithFile("/opt/review-sdk/package.json", source.File("ci/sdk-types/package.json")).
+		WithFile("/opt/review-sdk/package-lock.json", source.File("ci/sdk-types/package-lock.json")).
+		WithFile("/opt/review-sdk/toolchains.json", source.File("ci/toolchains.json")).
+		WithWorkdir("/opt/review-sdk").
+		WithExec([]string{"bash", "-lc", "expected_npm=\"$(node -p 'require(\"./toolchains.json\").verification.sdkLockGeneratorNpm')\"; test \"$(npm --version)\" = \"$expected_npm\"; npm ci --ignore-scripts --no-audit --no-fund"}).
+		WithWorkdir("/tooling").
+		WithFile("/tooling/install-git-cliff.sh", source.File("scripts/install-git-cliff.sh")).
+		WithFile("/tooling/ci/toolchains.json", source.File("ci/toolchains.json")).
+		WithExec([]string{"bash", "/tooling/install-git-cliff.sh", "/opt/review-ci-tools"}).
+		WithFile("/tooling/Containerfile", source.File("image/appliance/Containerfile")).
+		WithExec([]string{"bash", "-lc", "omp_version=\"$(sed -n 's/^ARG OMP_VERSION=//p' /tooling/Containerfile)\"; omp_commit=\"$(sed -n 's/^ARG OMP_SOURCE_COMMIT=//p' /tooling/Containerfile)\"; test -n \"$omp_version\" && test -n \"$omp_commit\"; git clone --quiet --depth 1 --branch \"v${omp_version}\" https://github.com/can1357/oh-my-pi.git /opt/review-omp-source; test \"$(git -C /opt/review-omp-source rev-parse HEAD)\" = \"$omp_commit\"; chown -R node:node /opt/review-omp-source"}).
 		WithDirectory("/src", source).
 		WithExec([]string{"chown", "-R", "node:node", "/src"}).
 		WithUser("node").
@@ -148,23 +160,12 @@ func runRenovate(ctx context.Context, source *dagger.Directory) (string, error) 
 	if toolchains.Verification.RenovateNodeImage != "node:24.15.0-bookworm-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d" || toolchains.Verification.Renovate != "44.181.2" || toolchains.Verification.RenovateRe2 != "1.27.0" {
 		return "", fmt.Errorf("Renovate toolchain pins do not match the reviewed runner contract")
 	}
-	packageJSON, err := json.Marshal(map[string]any{
-		"private": true,
-		"allowScripts": map[string]bool{"re2": true},
-		"dependencies": map[string]string{
-			"renovate": toolchains.Verification.Renovate,
-			"re2":      toolchains.Verification.RenovateRe2,
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("encode Renovate toolchain: %w", err)
-	}
 	return dag.Container().
 		From(toolchains.Verification.RenovateNodeImage).
-		WithExec([]string{"mkdir", "-p", "/tooling"}).
-		WithExec([]string{"node", "-e", "require('fs').writeFileSync('/tooling/package.json', process.argv[1])", string(packageJSON)}).
+		WithFile("/tooling/package.json", source.File("ci/renovate-validator/package.json")).
+		WithFile("/tooling/package-lock.json", source.File("ci/renovate-validator/package-lock.json")).
 		WithWorkdir("/tooling").
-		WithExec([]string{"npm", "install", "--no-save", "--no-package-lock", "--no-audit", "--no-fund"}).
+		WithExec([]string{"npm", "ci", "--no-audit", "--no-fund"}).
 		WithEnvVariable("RENOVATE_NODE_MODULES", "/tooling/node_modules").
 		WithDirectory("/src", source).
 		WithWorkdir("/src").

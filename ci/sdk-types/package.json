@@ -1,0 +1,10 @@
+{
+  "name": "review-ci-sdk-types",
+  "private": true,
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.14.0",
+    "@types/node": "24.19.2",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3"
+  }
+}

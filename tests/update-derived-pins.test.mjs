@@ -335,7 +335,11 @@ test("Renovate tracks only shipped Review and CI dependencies", async () => {
 	const typesafeRule = config.packageRules.find((rule) => rule.groupName === "TypeSafe runtime");
 	const pypiRule = config.packageRules.find((rule) => rule.matchDatasources?.includes("pypi"));
 	assert.deepEqual(ompRule.postUpgradeTasks.commands, ["node scripts/update-omp-pins.mjs"]);
-	assert.deepEqual(ompRule.postUpgradeTasks.fileFilters, ["image/appliance/Containerfile"]);
+	assert.deepEqual(ompRule.postUpgradeTasks.fileFilters, [
+		"image/appliance/Containerfile",
+		"ci/sdk-types/package.json",
+		"ci/sdk-types/package-lock.json",
+	]);
 	assert.deepEqual(ghRule.postUpgradeTasks.commands, ["node scripts/update-gh-pins.mjs"]);
 	assert.deepEqual(ghRule.postUpgradeTasks.fileFilters, ["image/appliance/Containerfile"]);
 	assert.deepEqual(rtkRule.postUpgradeTasks.commands, ["node scripts/update-rtk-pins.mjs"]);
