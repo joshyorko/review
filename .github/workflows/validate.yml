@@ -193,19 +193,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Install Apptainer as the release workflow does
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Apptainer through the upstream architecture index
         run: |
           set -euo pipefail
-          sudo add-apt-repository -y ppa:apptainer/ppa
-          arch="$(dpkg --print-architecture)"
-          sudo apt-get -o APT::Architecture="$arch" update -qq
-          printf 'dpkg architecture: %s\n' "$arch"
-          printf '\nApptainer PPA source:\n'
-          sudo grep -Rl 'ppa.launchpadcontent.net/apptainer/ppa/ubuntu' /etc/apt/sources.list.d \
-            | xargs -r -n1 sudo cat
-          printf '\nApptainer candidates:\n'
-          apt-cache -o APT::Architecture="$arch" policy apptainer "apptainer:$arch"
-          sudo apt-get -o APT::Architecture="$arch" install -y "apptainer:$arch"
+          bash scripts/install-apptainer-ci.sh
       - name: Verify upstream package profile and SIF execution
         run: |
           set -euo pipefail
