@@ -31,7 +31,7 @@
 
 # Run the local-first verification profile used by CI.
 ci:
-    bin/ci --profile pre-push
+    bin/ci --profile contract
 
 # Shared bash, 'eval''d at the top of recipes that need it:
 # GitHub authentication, host preflight, and runtime selection. Keeping

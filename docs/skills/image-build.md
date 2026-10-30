@@ -39,6 +39,8 @@ Before a push, workflow dispatch/rerun, or release action, run the declared
 must be reported as blocked when the required host boundary is unavailable;
 portable/container evidence does not stand in for native KVM, AppArmor, or
 architecture-specific package proof.
+Until the migration implements `pre-push`, `just ci` runs only the bootstrap
+contract smoke and is not a release or publication gate.
 
 `release.yml` automatically builds matching native OCI/SIF candidates at the exact successful `validate` commit on `main` when its `VERSION` is unpublished. Bump `VERSION` with a change to request a release; already published versions are skipped. The tools tap polls new stable releases hourly and updates its Dagger-verified formula automatically to use the original Review release assets. Review owns the only package release. Validate the candidate with the tools tap's Dagger and Homebrew checks before publishing a stable release. The tools tap owns the formula; no development tap is updated by this repository.
 

@@ -5,30 +5,51 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 profile="pre-push"
 while (($#)); do
   case "$1" in
-    --profile) profile="${2:?missing value for --profile}"; shift 2 ;;
-    --base|--ref|--require-os) shift 2 ;;
-    --require-native) shift ;;
-    -h|--help)
-      cat <<'HELP'
-Usage: bin/ci [--profile pre-push|contract|portable]
+  --profile)
+    profile="${2:?missing value for --profile}"
+    shift 2
+    ;;
+  --base | --ref | --require-os)
+    echo "bin/ci: $1 is blocked until exact-subject/native profiles are implemented" >&2
+    exit 3
+    ;;
+  --require-native)
+    echo "bin/ci: native proof is blocked until native adapters are implemented" >&2
+    exit 3
+    ;;
+  -h | --help)
+    cat <<'HELP'
+Usage: bin/ci [--profile contract|portable|pre-push]
 
 Runs the checked-in Review verification graph through Dagger. Native runtime
 and publication profiles are not yet available through this entrypoint.
 HELP
-      exit 0
-      ;;
-    *) echo "bin/ci: unsupported argument: $1" >&2; exit 2 ;;
+    exit 0
+    ;;
+  *)
+    echo "bin/ci: unsupported argument: $1" >&2
+    exit 2
+    ;;
   esac
 done
 
 case "$profile" in
-  pre-push|contract) dagger_profile=contract ;;
-  portable) dagger_profile=portable ;;
-  contract) dagger_profile=contract ;;
-  *) echo "bin/ci: profile '$profile' requires a native/authorized adapter not available in this checkpoint" >&2; exit 3 ;;
+pre-push)
+  echo "bin/ci: pre-push is blocked until changed-path and native requirements are enforced; contract is only a bootstrap smoke" >&2
+  exit 3
+  ;;
+contract) dagger_profile=contract ;;
+portable) dagger_profile=portable ;;
+*)
+  echo "bin/ci: profile '$profile' requires a native/authorized adapter not available in this checkpoint" >&2
+  exit 3
+  ;;
 esac
 
-command -v dagger >/dev/null || { echo "bin/ci: Dagger CLI 0.21.11 is required" >&2; exit 127; }
+command -v dagger >/dev/null || {
+  echo "bin/ci: Dagger CLI 0.21.11 is required" >&2
+  exit 127
+}
 version="$(dagger version)"
 [[ "$version" == "dagger v0.21.11 "* ]] || {
   echo "bin/ci: expected Dagger v0.21.11, found: $version" >&2
@@ -38,7 +59,9 @@ version="$(dagger version)"
 cd "$repo_root"
 snapshot="$(mktemp -d "${TMPDIR:-/tmp}/review-ci-source.XXXXXX")"
 trap 'rm -rf -- "$snapshot"' EXIT
-python3 scripts/ci/source-snapshot.py "$snapshot"
+snapshot_args=("$snapshot")
+[[ "$dagger_profile" != portable ]] || snapshot_args+=(--history)
+python3 scripts/ci/source-snapshot.py "${snapshot_args[@]}"
 env \
   -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_COPILOT_TOKEN -u COPILOT_GITHUB_TOKEN \
   -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u CONTEXT7_API_KEY \

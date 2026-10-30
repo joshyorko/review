@@ -3,7 +3,10 @@
   "profiles": {
     "contract": [
       "check-commit-message",
-      "just-onboarding"
+      "just-onboarding",
+      "ci-runner-contract",
+      "source-snapshot-contract",
+      "ci-shellcheck"
     ],
     "portable": [
       "skill-frontmatter",
