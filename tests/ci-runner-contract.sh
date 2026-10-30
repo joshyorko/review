@@ -24,9 +24,10 @@ assert_blocked() {
 }
 
 assert_blocked "pre-push profile" --profile pre-push
-assert_blocked "base selection" --profile pre-push --base origin/main
+assert_blocked "base selection on an explicit single profile" --profile contract --base origin/main
 assert_blocked "ref selection" --profile contract --ref HEAD
 assert_blocked "native requirement" --profile contract --require-native
 assert_blocked "OS requirement" --profile contract --require-os ubuntu:26.04
+assert_blocked "unavailable comparison base" --profile pre-push --base missing-base --plan-only
 
 echo "CI runner reports unimplemented subject and native gates as blocked."

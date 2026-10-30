@@ -56,11 +56,11 @@ leave `publish` disabled to test an unpublished committed ref.
 ## Validation
 
 Run `bin/ci --profile pre-push --base <base>` before each push, workflow
-dispatch/rerun, or release action. The complete profile is still being
-migrated; until it is available, this command fails blocked. `just ci` runs
-only the bootstrap contract smoke and is not a substitute for the pre-push
-gate. Native proof remains profile-specific; an unavailable required host
-capability is blocked rather than counted as pass.
+dispatch/rerun, or release action. It selects the changed-path portable suite
+and reports native requirements. Docs-only changes use the contract profile.
+`just ci` runs the bootstrap contract smoke. A pre-push profile that requires
+unavailable native proof returns blocked after portable checks; it is not a
+release gate.
 
 ```bash
 pre-commit run --all-files

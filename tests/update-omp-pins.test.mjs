@@ -128,6 +128,7 @@ test("SDK lock refresh receives an isolated npm home and preserves the exact OMP
 			installRoot = root;
 			assert.equal(environment.HOME, root);
 			assert.equal(environment.NPM_CONFIG_USERCONFIG, join(root, "empty.npmrc"));
+			assert.equal(environment.NPM_CONFIG_GLOBALCONFIG, join(root, "empty-global.npmrc"));
 			const lockPath = join(root, "package-lock.json");
 			const next = JSON.parse(await readFile(lockPath, "utf8"));
 			next.packages[""].dependencies["@oh-my-pi/pi-coding-agent"] = "18.3.0";
@@ -175,7 +176,7 @@ test("syncOmpPins resolves stable tag source and both scoped npm integrity pins"
 	});
 
 	assert.deepEqual(pins, EXPECTED_PINS);
-	assert.equal(sdkLockUpdateCalls, 0, "an unchanged OMP SDK version reuses its exact package lock");
+	assert.equal(sdkLockUpdateCalls, 1, "a same-version post-upgrade run refreshes a potentially stale SDK lock");
 	assert.deepEqual(new Set(urls), new Set([
 		"https://api.github.com/repos/can1357/oh-my-pi/releases/tags/v18.2.1",
 		"https://api.github.com/repos/can1357/oh-my-pi/commits/v18.2.1",
@@ -213,6 +214,33 @@ test("syncOmpPins fails closed on malformed npm integrity without rewriting pins
 
 	await assert.rejects(syncOmpPins({ root, fetchImpl }), /invalid SHA-512 registry integrity/);
 	assert.equal(await readFile(path, "utf8"), RENOVATED_CONTAINERFILE);
+});
+
+test("same-version Renovate replay repairs a stale SDK lock", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "omp-sdk-lock-stale-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	await mkdir(join(root, "image/appliance"), { recursive: true });
+	await writeFile(join(root, "image/appliance/Containerfile"), RENOVATED_CONTAINERFILE);
+	await writeSdkFixtures(root, "18.2.1");
+	const lockPath = join(root, SDK_LOCK);
+	const staleLock = JSON.parse(await readFile(lockPath, "utf8"));
+	staleLock.packages[""].dependencies["@oh-my-pi/pi-coding-agent"] = "18.1.22";
+	staleLock.packages["node_modules/@oh-my-pi/pi-coding-agent"].version = "18.1.22";
+	await writeFile(lockPath, `${JSON.stringify(staleLock, null, 2)}\n`);
+	let lockRefreshCalls = 0;
+
+	await syncOmpPins({
+		root,
+		fetchImpl: createFetcher().fetchImpl,
+		sdkLockUpdater: async input => {
+			lockRefreshCalls += 1;
+			return fixtureSdkLockUpdate(input);
+		},
+	});
+
+	const refreshedLock = JSON.parse(await readFile(lockPath, "utf8"));
+	assert.equal(lockRefreshCalls, 1);
+	assert.equal(refreshedLock.packages["node_modules/@oh-my-pi/pi-coding-agent"].version, "18.2.1");
 });
 
 test("OMP source updates regenerate the SDK lock before atomically writing its pins", async (t) => {

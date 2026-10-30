@@ -3,26 +3,49 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 profile="pre-push"
+base=""
+ref="HEAD"
+ref_set=0
+require_native=0
+require_os=""
+plan_only=0
 while (($#)); do
   case "$1" in
   --profile)
     profile="${2:?missing value for --profile}"
     shift 2
     ;;
-  --base | --ref | --require-os)
-    echo "bin/ci: $1 is blocked until exact-subject/native profiles are implemented" >&2
-    exit 3
+  --base)
+    base="${2:?missing value for --base}"
+    shift 2
+    ;;
+  --ref)
+    ref="${2:?missing value for --ref}"
+    ref_set=1
+    shift 2
     ;;
   --require-native)
-    echo "bin/ci: native proof is blocked until native adapters are implemented" >&2
-    exit 3
+    require_native=1
+    shift
+    ;;
+  --require-os)
+    require_os="${2:?missing value for --require-os}"
+    shift 2
+    ;;
+  --plan-only)
+    plan_only=1
+    shift
     ;;
   -h | --help)
     cat <<'HELP'
-Usage: bin/ci [--profile contract|portable|pre-push]
+Usage:
+  bin/ci --profile contract|portable
+  bin/ci --profile pre-push --base <git-ref> [--ref <git-ref>]
+         [--require-native] [--require-os <release>] [--plan-only]
 
-Runs the checked-in Review verification graph through Dagger. Native runtime
-and publication profiles are not yet available through this entrypoint.
+Runs the checked-in Dagger profile over a sanitized snapshot of the working
+tree. The pre-push planner includes staged, unstaged, untracked, renamed, and
+deleted paths. Native requirements that lack a same-host adapter return blocked.
 HELP
     exit 0
     ;;
@@ -33,15 +56,37 @@ HELP
   esac
 done
 
+dagger_profile=""
+native_state="not-required"
+plan_json=""
 case "$profile" in
 pre-push)
-  echo "bin/ci: pre-push is blocked until changed-path and native requirements are enforced; contract is only a bootstrap smoke" >&2
-  exit 3
+  if [[ -z "$base" ]]; then
+    echo "bin/ci: blocked pre-push: an explicit --base is required; no tests were selected" >&2
+    exit 3
+  fi
+  plan_args=(--repo "$repo_root" --base "$base" --ref "$ref")
+  ((require_native == 0)) || plan_args+=(--require-native)
+  [[ -z "$require_os" ]] || plan_args+=(--require-os "$require_os")
+  plan_json="$(python3 "$repo_root/scripts/ci/path-plan.py" "${plan_args[@]}")" || exit $?
+  dagger_profile="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["profile"])' <<<"$plan_json")"
+  native_state="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["native"])' <<<"$plan_json")"
+  printf 'bin/ci selected plan: %s\n' "$plan_json" >&2
+  if ((plan_only)); then
+    printf '%s\n' "$plan_json"
+    [[ "$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["blocked"]).lower())' <<<"$plan_json")" == false ]] || exit 3
+    exit 0
+  fi
   ;;
-contract) dagger_profile=contract ;;
-portable) dagger_profile=portable ;;
+contract | portable)
+  if [[ -n "$base" || "$ref_set" -eq 1 || "$require_native" -eq 1 || -n "$require_os" || "$plan_only" -eq 1 ]]; then
+    echo "bin/ci: blocked: --base/--ref/native options are only valid with --profile pre-push" >&2
+    exit 3
+  fi
+  dagger_profile="$profile"
+  ;;
 *)
-  echo "bin/ci: profile '$profile' requires a native/authorized adapter not available in this checkpoint" >&2
+  echo "bin/ci: profile '$profile' requires a native/authorized adapter not available in this runner" >&2
   exit 3
   ;;
 esac
@@ -58,10 +103,16 @@ version="$(dagger version)"
 
 cd "$repo_root"
 snapshot="$(mktemp -d "${TMPDIR:-/tmp}/review-ci-source.XXXXXX")"
-trap 'rm -rf -- "$snapshot"' EXIT
+trap 'python3 -c '\''import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)'\'' "$snapshot"' EXIT
 python3 scripts/ci/source-snapshot.py "$snapshot" --history
 env \
   -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_COPILOT_TOKEN -u COPILOT_GITHUB_TOKEN \
+  -u RENOVATE_TOKEN -u REVIEW_GH_TOKEN \
   -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u CONTEXT7_API_KEY \
   -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
   DAGGER_NO_NAG=1 dagger call check --source="$snapshot" --profile="$dagger_profile"
+
+if [[ "$native_state" != "not-required" ]]; then
+  echo "bin/ci: blocked native profile; status=$native_state. Portable checks passed but are not native proof." >&2
+  exit 3
+fi

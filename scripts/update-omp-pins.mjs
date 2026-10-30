@@ -68,6 +68,7 @@ export async function updateSdkLock({ packageJson, lockfile, version, npmVersion
 			PATH: process.env.PATH ?? "/usr/bin:/bin",
 			HOME: tempRoot,
 			NPM_CONFIG_USERCONFIG: join(tempRoot, "empty.npmrc"),
+			NPM_CONFIG_GLOBALCONFIG: join(tempRoot, "empty-global.npmrc"),
 			NPM_CONFIG_CACHE: join(tempRoot, "npm-cache"),
 			...Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"].filter(name => process.env[name]).map(name => [name, process.env[name]])),
 		};
@@ -169,12 +170,14 @@ export async function syncOmpPins({ root = process.cwd(), requestedVersion, fetc
 	const sdkLockPath = join(root, SDK_LOCK);
 	const sdkPackage = JSON.parse(await readFile(sdkPackagePath, "utf8"));
 	const originalSdkLock = await readFile(sdkLockPath, "utf8");
-	if (sdkPackage.dependencies?.["@oh-my-pi/pi-coding-agent"] !== pinnedVersion) {
-		throw new Error(`${SDK_PACKAGE}: OMP dependency must match Containerfile OMP_VERSION ${pinnedVersion}`);
-	}
+	const sdkVersion = sdkPackage.dependencies?.["@oh-my-pi/pi-coding-agent"];
+	if (!VERSION_PATTERN.test(sdkVersion ?? "")) throw new Error(`${SDK_PACKAGE}: invalid OMP SDK version ${sdkVersion ?? "missing"}`);
+	JSON.parse(originalSdkLock);
 	const updatedSdkPackage = { ...sdkPackage, dependencies: { ...sdkPackage.dependencies, "@oh-my-pi/pi-coding-agent": pins.version } };
 	const updatedSdkPackageText = `${JSON.stringify(updatedSdkPackage, null, 2)}\n`;
-	const updatedSdkLock = pins.version === pinnedVersion ? originalSdkLock : await sdkLockUpdater({
+	// Regenerate even when the package manifest already has this pin: a previous
+	// partial update may have left a stale lock that would otherwise be kept.
+	const updatedSdkLock = await sdkLockUpdater({
 		packageJson: updatedSdkPackageText,
 		lockfile: originalSdkLock,
 		version: pins.version,
