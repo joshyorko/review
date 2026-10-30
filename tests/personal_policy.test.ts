@@ -210,13 +210,13 @@ test("workflow-changing pull requests stay visible in the personal queue", async
 	assert.equal(mode.selectById("example/repo", 42), true);
 });
 
-test("personal autoslay dispatches a workflow-changing PR with OAuth workflow scope", async (t) => {
+test("personal slay dispatches a workflow-changing PR with OAuth workflow scope", async (t) => {
 	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch() as typeof fetch, env: ENV });
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
@@ -229,7 +229,6 @@ test("personal autoslay dispatches a workflow-changing PR with OAuth workflow sc
 
 test("personal workflow dispatch rejects push-only permission when workflow scope is omitted", async (t) => {
 	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
 		org: "example",
 		fetchImpl: makeFetch(null, "4".repeat(40), true, true, true, true) as typeof fetch,
@@ -238,6 +237,7 @@ test("personal workflow dispatch rejects push-only permission when workflow scop
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
@@ -247,7 +247,6 @@ test("personal workflow dispatch rejects push-only permission when workflow scop
 
 test("personal workflow dispatch rechecks named workflow paths when queue omits files", async (t) => {
 	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
 		org: "example",
 		fetchImpl: makeFetch("repo", "4".repeat(40), true, true, true, undefined, false, false) as typeof fetch,
@@ -256,6 +255,7 @@ test("personal workflow dispatch rechecks named workflow paths when queue omits 
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
@@ -265,7 +265,6 @@ test("personal workflow dispatch rechecks named workflow paths when queue omits 
 
 test("returned workflow PR repair still requires capability when scopes are omitted", async (t) => {
 	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
 		org: "example",
 		fetchImpl: makeFetch(null, "4".repeat(40), true, true, true, undefined, true) as typeof fetch,
@@ -274,6 +273,7 @@ test("returned workflow PR repair still requires capability when scopes are omit
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
@@ -283,7 +283,6 @@ test("returned workflow PR repair still requires capability when scopes are omit
 
 test("returned workflow repair fails closed without named file evidence", async (t) => {
 	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
 		org: "example",
 		fetchImpl: makeFetch(null, "4".repeat(40), true, true, false, undefined, true, false) as typeof fetch,
@@ -292,6 +291,7 @@ test("returned workflow repair fails closed without named file evidence", async 
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
@@ -301,11 +301,11 @@ test("returned workflow repair fails closed without named file evidence", async 
 
 test("personal workflow dispatch reports missing workflow write permission", async (t) => {
 	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch("repo") as typeof fetch, env: ENV });
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
@@ -315,11 +315,11 @@ test("personal workflow dispatch reports missing workflow write permission", asy
 
 test("personal workflow dispatch fails closed when OAuth scopes are unavailable", async (t) => {
 	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch(null) as typeof fetch, env: ENV });
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
@@ -329,11 +329,11 @@ test("personal workflow dispatch fails closed when OAuth scopes are unavailable"
 
 test("personal workflow dispatch fails closed when scope lookup fails", async (t) => {
 	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch("repo", "4".repeat(40), true, false) as typeof fetch, env: ENV });
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
@@ -343,11 +343,11 @@ test("personal workflow dispatch fails closed when scope lookup fails", async (t
 
 test("personal workflow dispatch fails closed when changed-file evidence is unavailable", async (t) => {
 	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], { org: "example", fetchImpl: makeFetch("repo, workflow", "4".repeat(40), true, true, false) as typeof fetch, env: ENV });
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 
@@ -732,7 +732,6 @@ test("live PR revalidation reconciles current mutable state into ReviewMode", ()
 
 test("live head changes still block the captured pull request", async (t) => {
 	const pi = fakeHost();
-	pi.flagValues.set("autoslay", true);
 	const review = createReviewExtension(pi as unknown as Parameters<typeof createReviewExtension>[0], {
 		org: "example",
 		fetchImpl: makeFetch("repo, workflow", "5".repeat(40), false) as typeof fetch,
@@ -741,6 +740,7 @@ test("live head changes still block the captured pull request", async (t) => {
 	const ctx = fakeCtx();
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
+	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	t.after(() => pi.events.get("session_shutdown")?.({}, ctx));
 	assert.equal(pi.messages.length, 0);
