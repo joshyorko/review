@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""Plan release requests locally; apply only through an explicit trusted-host flag."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+
+REPOSITORY = "joshyorko/review"
+ROOT = Path(__file__).resolve().parents[2]
+ALLOWED_PATHS = {"CHANGELOG.md", "VERSION"}
+SHA = re.compile(r"[0-9a-f]{40}\Z")
+SEMVER = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def canonical_json(value) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def command(args, *, cwd=ROOT, env=None, input_text=None, check=True):
+    result = subprocess.run(args, cwd=cwd, env=env, input=input_text, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if check and result.returncode:
+        details = result.stderr.strip() or result.stdout.strip() or f"exit status {result.returncode}"
+        raise RuntimeError(f"{args[0]} failed: {details}")
+    return result
+
+
+def normalize_releases(releases):
+    normalized = []
+    for release in releases:
+        if not isinstance(release, dict) or not isinstance(release.get("tag_name"), str):
+            raise ValueError("GitHub release response contains an invalid entry")
+        if type(release.get("draft")) is not bool or type(release.get("prerelease")) is not bool:
+            raise ValueError("GitHub release response omitted draft/prerelease booleans")
+        normalized.append({"tag": release["tag_name"], "draft": release["draft"], "prerelease": release["prerelease"]})
+    return sorted(normalized, key=lambda item: item["tag"])
+
+
+def validate_plan(plan, *, source_sha, releases, known_tags, root=ROOT):
+    if not isinstance(plan, dict) or plan.get("schemaVersion") != 1:
+        raise ValueError("release planner returned an unsupported plan schema")
+    if plan.get("publish") is not False:
+        raise ValueError("release plan must not authorize publication")
+    if plan.get("sourceSha") != source_sha or not SHA.fullmatch(source_sha):
+        raise ValueError("release plan source identity does not match the current main head")
+    if plan.get("plannedTag") != f"v{plan.get('requestedVersion')}" or not SEMVER.fullmatch(str(plan.get("requestedVersion", ""))):
+        raise ValueError("release plan has an invalid requested version or tag")
+    if not SEMVER.fullmatch(str(plan.get("currentVersion", ""))):
+        raise ValueError("release plan has an invalid current version")
+    if tuple(map(int, plan["requestedVersion"].split("."))) <= tuple(map(int, plan["currentVersion"].split("."))):
+        raise ValueError("release request version must be newer than current VERSION")
+    baseline = plan.get("publishedStableBaseline")
+    if not isinstance(baseline, dict) or not SEMVER.fullmatch(str(baseline.get("tag", "")).removeprefix("v")) or not SHA.fullmatch(str(baseline.get("commit", ""))):
+        raise ValueError("release plan has an invalid published stable baseline")
+    baseline_tag = f"refs/tags/{baseline['tag']}"
+    tag_commit = command(["git", "rev-parse", "--verify", f"{baseline_tag}^{{commit}}"], cwd=root).stdout.strip()
+    if tag_commit != baseline["commit"]:
+        raise ValueError("published baseline tag identity differs from the plan")
+    ancestor = command(["git", "merge-base", "--is-ancestor", baseline_tag, source_sha], cwd=root, check=False)
+    if ancestor.returncode:
+        raise ValueError("published stable baseline is not an ancestor of the source")
+
+    observed = plan.get("observed")
+    expected_releases = digest(canonical_json(normalize_releases(releases)))
+    expected_tags = digest(canonical_json(sorted(known_tags, key=lambda item: item["name"])))
+    if not isinstance(observed, dict) or observed.get("releaseMetadataSha256") != expected_releases or observed.get("knownTagsSha256") != expected_tags:
+        raise ValueError("release plan was made from a different GitHub release/tag observation")
+    tags_by_name = {item["name"]: item for item in known_tags}
+    if plan["plannedTag"] in set(tags_by_name) | {item["tag"] for item in normalize_releases(releases)}:
+        raise ValueError(f"{plan['plannedTag']} already exists as a GitHub tag or release")
+    remote_baseline = tags_by_name.get(baseline["tag"])
+    if not remote_baseline or remote_baseline.get("commitSha") != baseline["commit"] or remote_baseline.get("objectSha") != baseline.get("objectSha"):
+        raise ValueError("published baseline tag object/commit changed since planning")
+
+    files = plan.get("files")
+    if not isinstance(files, list) or len(files) != len(ALLOWED_PATHS):
+        raise ValueError("release plan must contain exactly VERSION and CHANGELOG.md")
+    paths = [item.get("path") if isinstance(item, dict) else None for item in files]
+    if set(paths) != ALLOWED_PATHS or len(set(paths)) != len(paths):
+        raise ValueError("release plan contains a duplicate or disallowed path")
+    canonical_files = []
+    for item in files:
+        path = root / item["path"]
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"release target is not a regular file: {item['path']}")
+        current_mode = format(stat.S_IMODE(info.st_mode), "04o")
+        if item.get("mode") != current_mode or current_mode != "0644":
+            raise ValueError(f"release target mode changed: {item['path']}")
+        current = path.read_bytes()
+        if digest(current) != item.get("expectedSha256"):
+            raise ValueError(f"release target changed since planning: {item['path']}")
+        if item["path"] == "VERSION" and current.decode("ascii").strip() != plan["currentVersion"]:
+            raise ValueError("VERSION content differs from the plan's current version")
+        try:
+            new_content = base64.b64decode(item.get("newContentBase64", ""), validate=True)
+        except (ValueError, TypeError) as error:
+            raise ValueError(f"invalid planned content for {item['path']}") from error
+        if digest(new_content) != item.get("newSha256"):
+            raise ValueError(f"planned content hash mismatch for {item['path']}")
+        if item["path"] == "VERSION" and new_content != (plan["requestedVersion"] + "\n").encode("ascii"):
+            raise ValueError("planned VERSION content does not match requested version")
+        canonical_files.append(item)
+    if digest(canonical_json(canonical_files)) != plan.get("patchDigest"):
+        raise ValueError("release patch digest does not match its file payloads")
+    return {item["path"]: base64.b64decode(item["newContentBase64"], validate=True) for item in files}
+
+
+def apply_files(payloads, *, root=ROOT):
+    """Replace both prevalidated files and restore originals on any local error."""
+    backups = {name: ((root / name).read_bytes(), stat.S_IMODE((root / name).stat().st_mode)) for name in payloads}
+    staged = {}
+    try:
+        for name, data in payloads.items():
+            path = root / name
+            fd, temporary = tempfile.mkstemp(prefix=f".{name}.", dir=root)
+            staged[name] = Path(temporary)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            staged[name].chmod(backups[name][1])
+        for name, temporary in staged.items():
+            os.replace(temporary, root / name)
+    except Exception:
+        for name, (contents, old_mode) in backups.items():
+            path = root / name
+            path.write_bytes(contents)
+            path.chmod(old_mode)
+        raise
+    finally:
+        for path in staged.values():
+            path.unlink(missing_ok=True)
+
+
+def parse_gh_json_lines(text, label):
+    try:
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+    except json.JSONDecodeError as error:
+        raise ValueError(f"GitHub returned invalid {label} JSON: {error}") from error
+
+
+def observe(gh, root=ROOT):
+    release_result = command([gh, "api", "--paginate", f"repos/{REPOSITORY}/releases",
+                              "--jq", ".[] | {tag_name, draft, prerelease}"], cwd=root)
+    releases = parse_gh_json_lines(release_result.stdout, "release metadata")
+    remote = command(["git", "ls-remote", "--tags", "origin"], cwd=root)
+    tag_objects = {}
+    peeled_commits = {}
+    for line in remote.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        ref_sha, ref = line.split("\t", 1)
+        if not SHA.fullmatch(ref_sha) or not ref.startswith("refs/tags/"):
+            raise ValueError("remote tag observation contains an invalid ref")
+        tag_name = ref.removeprefix("refs/tags/")
+        if tag_name.endswith("^{}"):
+            peeled_commits[tag_name[:-3]] = ref_sha
+        else:
+            tag_objects[tag_name] = ref_sha
+    tags = [{"name": name, "objectSha": object_sha, "commitSha": peeled_commits.get(name, object_sha)}
+            for name, object_sha in sorted(tag_objects.items())]
+    main = command(["git", "ls-remote", "--heads", "origin", "refs/heads/main"], cwd=root)
+    rows = [line.split("\t", 1)[0] for line in main.stdout.splitlines() if "\t" in line]
+    if len(rows) != 1 or not SHA.fullmatch(rows[0]):
+        raise ValueError("could not resolve exactly one remote main head")
+    return releases, tags, rows[0]
+
+
+def repository_identity(root=ROOT):
+    url = command(["git", "remote", "get-url", "origin"], cwd=root).stdout.strip()
+    normalized = re.sub(r"\.git$", "", url)
+    if normalized not in {"https://github.com/joshyorko/review", "git@github.com:joshyorko/review", "ssh://git@github.com/joshyorko/review"}:
+        raise ValueError("release requests are restricted to the joshyorko/review repository")
+    branch = command(["git", "branch", "--show-current"], cwd=root).stdout.strip()
+    if branch != "main":
+        raise ValueError("release request source must be checked out on main")
+    dirty = command(["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=root).stdout
+    if dirty:
+        raise ValueError("release request source checkout must be clean")
+    head = command(["git", "rev-parse", "HEAD"], cwd=root).stdout.strip()
+    if not SHA.fullmatch(head):
+        raise ValueError("current source HEAD is not a full commit SHA")
+    return head
+
+
+def load_plan(requested, releases, tags, source_sha, *, root=ROOT, dagger_cli="dagger"):
+    with tempfile.TemporaryDirectory(prefix="review-release-request-") as temporary:
+        snapshot = Path(temporary) / "source"
+        subprocess.run([sys.executable, str(root / "scripts/ci/source-snapshot.py"), str(snapshot), "--history"],
+                       cwd=root, check=True)
+        env = {key: value for key, value in os.environ.items()
+               if key not in {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+                              "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL"}}
+        env["DAGGER_NO_NAG"] = "1"
+        call = [dagger_cli, "--silent", "--mod", str(root / ".dagger/release-request"), "call", "release-plan",
+                f"--source={snapshot}", f"--requested-version={requested}",
+                f"--known-tags-json={json.dumps(tags, separators=(',', ':'))}",
+                f"--published-releases-json={json.dumps(releases, separators=(',', ':'))}",
+                f"--source-sha={source_sha}"]
+        result = command(call, cwd=root, env=env)
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"Dagger release planner did not return JSON: {error}") from error
+
+
+def remote_release_conflict(gh, branch, *, root=ROOT):
+    local_branch = command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False)
+    if local_branch.returncode == 0:
+        raise ValueError(f"local branch {branch} already exists; inspect it before retrying")
+    if local_branch.returncode != 1:
+        raise RuntimeError("could not check whether the local release branch already exists")
+    remote_branch = command(["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch}"], cwd=root, check=False)
+    if remote_branch.returncode not in (0, 2):
+        raise RuntimeError("could not check whether the release branch already exists")
+    if remote_branch.stdout.strip():
+        raise ValueError(f"release branch {branch} already exists; inspect its PR or remove it before retrying")
+    result = command([gh, "pr", "list", "--repo", REPOSITORY, "--head", branch,
+                      "--json", "number,headRefOid,baseRefName,url"], cwd=root)
+    prs = json.loads(result.stdout)
+    if prs:
+        raise ValueError(f"release PR for {branch} already exists; inspect its exact head before retrying")
+
+
+def apply_request(plan, payloads, *, gh, root=ROOT):
+    version = plan["requestedVersion"]
+    branch = f"release/v{version}"
+    remote_release_conflict(gh, branch, root=root)
+    command(["git", "switch", "-c", branch], cwd=root)
+    try:
+        apply_files(payloads, root=root)
+    except Exception:
+        command(["git", "switch", "main"], cwd=root, check=False)
+        command(["git", "branch", "-D", branch], cwd=root, check=False)
+        raise
+    command(["git", "add", "--", "VERSION", "CHANGELOG.md"], cwd=root)
+    command(["git", "-c", "user.name=github-actions[bot]",
+             "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+             "commit", "-m", f"chore: release {version}"], cwd=root)
+    commit = command(["git", "rev-parse", "HEAD"], cwd=root).stdout.strip()
+    command(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=root)
+    new_changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    start = re.search(r"^## \[" + re.escape(version) + r"\].*$", new_changelog, re.MULTILINE)
+    if start is None:
+        raise RuntimeError("planned changelog section is missing after commit")
+    next_heading = re.search(r"^## \[", new_changelog[start.end():], re.MULTILINE)
+    section = new_changelog[start.start():start.end() + next_heading.start() if next_heading else len(new_changelog)].strip()
+    body = f"Bump VERSION to {version}. After merge, successful main validation triggers publication.\n\n"
+    if plan.get("supersedesUnpublishedVersion"):
+        body += f"Supersedes unpublished v{plan['currentVersion']}; these notes include changes since the last published stable release.\n\n"
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="review-release-body-", delete=False) as stream:
+        stream.write(body + section + "\n")
+        body_path = Path(stream.name)
+    try:
+        command([gh, "pr", "create", "--repo", REPOSITORY, "--base", "main", "--head", branch,
+                 "--title", f"chore: release {version}", "--body-file", str(body_path)], cwd=root)
+    finally:
+        body_path.unlink(missing_ok=True)
+    pr = json.loads(command([gh, "pr", "view", branch, "--repo", REPOSITORY,
+                             "--json", "headRefOid,baseRefName,headRefName"], cwd=root).stdout)
+    if pr.get("headRefOid") != commit or pr.get("baseRefName") != "main" or pr.get("headRefName") != branch:
+        raise RuntimeError("created release PR does not point at the exact pushed commit and main base")
+    command([gh, "workflow", "run", "validate.yml", "--repo", REPOSITORY,
+             "--ref", branch, "-f", f"expected_sha={commit}"], cwd=root)
+    return {"branch": branch, "commit": commit, "pullRequest": pr}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--apply", action="store_true", help="apply the plan and create the release PR/validation dispatch")
+    parser.add_argument("--requested-version", default="", help="patch, minor, major, or an exact stable version")
+    parser.add_argument("--bump", default="", choices=("patch", "minor", "major"))
+    args = parser.parse_args()
+    root = ROOT
+    if os.environ.get("GITHUB_REPOSITORY", REPOSITORY) != REPOSITORY:
+        raise ValueError(f"release request workflow is restricted to {REPOSITORY}")
+    source_sha = repository_identity(root)
+    gh = shutil.which("gh")
+    if not gh:
+        raise RuntimeError("GitHub CLI is required for release metadata and request submission")
+    releases, tags, remote_main = observe(gh, root)
+    if source_sha != remote_main:
+        raise ValueError(f"checkout HEAD {source_sha} is stale; remote main is {remote_main}")
+    requested = args.requested_version or os.environ.get("REQUESTED_VERSION", "") or args.bump or os.environ.get("REQUESTED_BUMP", "patch")
+    plan = load_plan(requested, releases, tags, source_sha, root=root)
+    # Re-read all mutable remote observations after planning and before any write.
+    fresh_releases, fresh_tags, fresh_main = observe(gh, root)
+    if source_sha != repository_identity(root) or (fresh_releases, fresh_tags, fresh_main) != (releases, tags, remote_main):
+        raise ValueError("source or GitHub release/tag observation changed during planning; retry from fresh main")
+    payloads = validate_plan(plan, source_sha=source_sha, releases=fresh_releases, known_tags=fresh_tags, root=root)
+    remote_release_conflict(gh, f"release/v{plan['requestedVersion']}", root=root)
+    if not args.apply:
+        print(json.dumps(plan, sort_keys=True, indent=2))
+        print("Dry run only; no repository files, branches, pull requests, dispatches, tags, releases, or registries were written.", file=sys.stderr)
+        return 0
+    if not os.environ.get("GH_TOKEN"):
+        raise ValueError("--apply requires GH_TOKEN in the environment")
+    result = apply_request(plan, payloads, gh=gh, root=root)
+    print(json.dumps({"plan": plan, "applied": result}, sort_keys=True, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
+        print(f"release request failed: {error}", file=sys.stderr)
+        raise SystemExit(1)
