@@ -6,7 +6,8 @@
       "just-onboarding",
       "ci-runner-contract",
       "source-snapshot-contract",
-      "ci-shellcheck"
+      "ci-shellcheck",
+      "static-hygiene"
     ],
     "portable": [
       "skill-frontmatter",
@@ -22,7 +23,8 @@
       "version-derivation",
       "update-omp-pins",
       "update-derived-pins",
-      "luna-factory"
+      "luna-factory",
+      "static-hygiene"
     ]
   }
 }

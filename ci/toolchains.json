@@ -6,6 +6,9 @@
   "verification": {
     "nodeImage": "node:26.13.0-bookworm-slim@sha256:bc0a2afd3b74ce12222fc8bab99271e66257f021078f5f4a5d687a77d280c1d9",
     "pythonImage": "python:3.13.9-slim-bookworm@sha256:b685a4fa58bb19d1814d78a1ec0f0208f351452724f78b20212c984d6e124a34",
+    "preCommit": "4.7.0",
+    "requirementsCiLockSha256": "b17b7bc0e01c0a15ea290fa03092c8049d0036faaab91935732398a1085828b8",
+    "preCommitConfigSha256": "22dce5c43087664922d0765d6f774792148108e881f9ff1a72fc5eb3674e8124",
     "debianPackages": {
       "bash": "5.2.15-2+b13",
       "ca-certificates": "20250419~deb12u2",

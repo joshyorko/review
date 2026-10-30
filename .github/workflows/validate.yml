@@ -23,11 +23,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
       - name: Create a source-only Dagger input
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/review-ci-source"
           git archive HEAD | tar -x -C "$RUNNER_TEMP/review-ci-source"
+          mapfile -t reachable_tags < <(git tag --merged HEAD)
+          git bundle create "$RUNNER_TEMP/review-ci-source/.ci-history.bundle" HEAD "${reachable_tags[@]}"
       - name: Verify the local-first Dagger contract profile
         uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:

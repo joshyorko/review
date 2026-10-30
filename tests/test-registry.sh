@@ -35,7 +35,8 @@ done < <(
 # Dagger owns tests through verifier-approved step IDs in ci/suites.json. Resolve
 # those IDs against its closed Go step map so the registry follows the actual
 # invoked test files rather than YAML comments or descriptive labels.
-dagger_roots="$(python3 - "$repo_root" <<'PY'
+dagger_roots="$(
+  python3 - "$repo_root" <<'PY'
 import json
 import re
 import sys

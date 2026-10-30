@@ -28,17 +28,23 @@ def create_snapshot(root: Path, destination: Path, include_history: bool = False
         check=True,
         stdout=subprocess.PIPE,
     ).stdout
-    for raw_path in listed.split(b"\0"):
-        if not raw_path:
-            continue
-        relative = os.fsdecode(raw_path)
+    paths = {os.fsdecode(item) for item in listed.split(b"\0") if item}
+    project_skill = root / ".agents/skills/review-ci"
+    if project_skill.is_dir():
+        paths.update(
+            item.relative_to(root).as_posix()
+            for item in project_skill.rglob("*")
+            if item.is_file() or item.is_symlink()
+        )
+    for relative in sorted(paths):
         path = Path(relative)
         if path.is_absolute() or ".." in path.parts:
             raise ValueError(f"unsafe repository path: {relative!r}")
         secret_path = any(part == ".env" or part.startswith(".env.") for part in path.parts)
         transient_part = next((part for part in path.parts if part in EXCLUDED_TRANSIENT_PARTS), None)
         tracked_agent_skill = ".agents" in path.parts and relative in tracked
-        if secret_path or (transient_part and not tracked_agent_skill):
+        project_skill_file = relative.startswith(".agents/skills/review-ci/")
+        if secret_path or (transient_part and not tracked_agent_skill and not project_skill_file):
             if relative in tracked:
                 raise ValueError(f"tracked source matches excluded path policy: {relative}")
             continue
@@ -52,8 +58,11 @@ def create_snapshot(root: Path, destination: Path, include_history: bool = False
         elif source.is_file():
             shutil.copy2(source, target)
     if include_history:
+        reachable_tags = subprocess.run(
+            ["git", "tag", "--merged", "HEAD"], cwd=root, check=True, text=True, stdout=subprocess.PIPE
+        ).stdout.splitlines()
         subprocess.run(
-            ["git", "bundle", "create", str(destination / ".ci-history.bundle"), "HEAD"],
+            ["git", "bundle", "create", str(destination / ".ci-history.bundle"), "HEAD", *reachable_tags],
             cwd=root,
             check=True,
         )

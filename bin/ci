@@ -59,9 +59,7 @@ version="$(dagger version)"
 cd "$repo_root"
 snapshot="$(mktemp -d "${TMPDIR:-/tmp}/review-ci-source.XXXXXX")"
 trap 'rm -rf -- "$snapshot"' EXIT
-snapshot_args=("$snapshot")
-[[ "$dagger_profile" != portable ]] || snapshot_args+=(--history)
-python3 scripts/ci/source-snapshot.py "${snapshot_args[@]}"
+python3 scripts/ci/source-snapshot.py "$snapshot" --history
 env \
   -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_COPILOT_TOKEN -u COPILOT_GITHUB_TOKEN \
   -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u CONTEXT7_API_KEY \
