@@ -13,6 +13,7 @@ it scopes every task, so read it alongside the matching skill.
 | Maintain the OMP workbench review agents and policy seam | [`review-checks.md`](skills/review-checks.md) |
 | Maintain the opt-in Luna Factory extension | [`luna-factory.md`](skills/luna-factory.md) |
 | Build the Review appliance, OMP pins, SBOMs, or publication workflows | [`image-build.md`](skills/image-build.md) |
+| Diagnose a suspected third-party dependency defect or follow an upstream report | [`upstream-dependency-reporting.md`](skills/upstream-dependency-reporting.md) |
 | Configure explicitly selected optional Hive read-side context | [`hive-read-side.md`](skills/hive-read-side.md) |
 | Change queue ordering, issue batches, or workbench controls | [`review-dashboard.md`](skills/review-dashboard.md) |
 | Monitor running OMP workbenches | [`review-monitoring.md`](skills/review-monitoring.md) |
