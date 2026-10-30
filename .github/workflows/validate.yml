@@ -189,6 +189,31 @@ jobs:
 
           REVIEW_APPLIANCE_IMAGE=review:test bash tests/review-factory-coload-smoke.sh
 
-      # Interactive launchers prefer KVM and fall back to Apptainer. CI builds
-      # and executes the Review appliance natively; both launcher branches are
-      # exercised hermetically.
+  apptainer-ubuntu26-diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Apptainer through the upstream architecture index
+        run: |
+          set -euo pipefail
+          bash scripts/install-apptainer-ci.sh
+      - name: Verify upstream package profile and SIF execution
+        run: |
+          set -euo pipefail
+          cat /etc/os-release
+          printf '\nApptainer package: '
+          dpkg-query -W -f='${Version}\n' apptainer
+          printf '\nInstalled starter:\n'
+          dpkg-query -L apptainer | grep -E '/apptainer/bin/starter(-suid)?$'
+          printf '\nAppArmor profile:\n'
+          sudo cat /etc/apparmor.d/apptainer
+          printf '\nSIF execution probe:\n'
+          apptainer exec docker://ghcr.io/apptainer/lolcow /usr/bin/true \
+            >"$RUNNER_TEMP/apptainer-probe.log" 2>&1 || {
+              result=$?
+              cat "$RUNNER_TEMP/apptainer-probe.log"
+              exit "$result"
+            }
+          cat "$RUNNER_TEMP/apptainer-probe.log"
