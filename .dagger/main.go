@@ -34,6 +34,9 @@ func (m *ReviewCi) applianceImage(ctx context.Context, source *dagger.Directory,
 			return nil, "", "", fmt.Errorf("appliance source revision must be lowercase hexadecimal")
 		}
 	}
+	if err := m.verifySourceSubject(ctx, source, revision); err != nil {
+		return nil, "", "", err
+	}
 	version, err := source.File("VERSION").Contents(ctx)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("read Review VERSION: %w", err)
@@ -74,6 +77,20 @@ func (m *ReviewCi) applianceImage(ctx context.Context, source *dagger.Directory,
 		return nil, "", "", fmt.Errorf("resolve built appliance identity: %w", err)
 	}
 	return image, version, imageID, nil
+}
+
+func (m *ReviewCi) verifySourceSubject(ctx context.Context, source *dagger.Directory, revision string) error {
+	_, err := dag.Container().
+		From("python:3.13.9-slim-bookworm@sha256:b685a4fa58bb19d1814d78a1ec0f0208f351452724f78b20212c984d6e124a34").
+		WithExec([]string{"sh", "-c", "set -eu; apt-get update; apt-get install -y --no-install-recommends bash=5.2.15-2+b13 git=1:2.39.5-0+deb12u3 ca-certificates=20250419~deb12u2; rm -rf /var/lib/apt/lists/*"}).
+		WithDirectory("/src", source).
+		WithWorkdir("/src").
+		WithExec([]string{"bash", "scripts/ci/verify-source-identity.sh", revision}).
+		Stdout(ctx)
+	if err != nil {
+		return fmt.Errorf("verify appliance source against its committed tree: %w", err)
+	}
+	return nil
 }
 
 // Builds the exact-source appliance with Dagger Dockerfile compatibility and
@@ -144,9 +161,9 @@ var supportedSteps = map[string]string{
 	"ci-path-plan-contract":   "python3 tests/ci_path_plan_test.py",
 	"ci-registry-invocation-test": "python3 tests/ci_manifest_registry_test.py",
 	"release-dispatch-guard":      "python3 tests/release-dispatch-guard.py",
-	"ci-shellcheck":           "shellcheck --exclude=SC1090 --exclude=SC2034 bin/ci scripts/ci/native-appliance.sh scripts/ci/check-oci-digest.sh scripts/validate-release-source.sh tests/ci-runner-contract.sh tests/release-publication-source.sh",
+	"ci-shellcheck":           "shellcheck --exclude=SC1090 --exclude=SC2034 bin/ci scripts/ci/native-appliance.sh scripts/ci/check-oci-digest.sh scripts/ci/verify-source-identity.sh scripts/validate-release-source.sh tests/ci-runner-contract.sh tests/release-publication-source.sh",
 	"static-hygiene":          "SKIP=check-skill-frontmatter,generate-skills,omp-review-mode,appliance-contract pre-commit run --all-files --show-diff-on-failure",
-	"source-snapshot-contract": "python3 tests/ci_source_snapshot_test.py",
+	"source-snapshot-contract": "python3 tests/ci_source_snapshot_test.py && python3 tests/ci_appliance_subject_test.py && python3 tests/ci_native_adapter_contract.py",
 	"skill-frontmatter":        "bash scripts/check-skill-frontmatter.sh",
 	"generate-skills":          "bash tests/generate-skills.sh",
 	"test-registry":            "bash tests/test-registry.sh",
@@ -172,7 +189,7 @@ var supportedSteps = map[string]string{
 
 var requiredProfiles = map[string][]string{
 	"contract": {"check-commit-message", "just-onboarding", "ci-runner-contract", "ci-path-plan-contract", "source-snapshot-contract", "ci-registry-invocation-test", "ci-shellcheck", "static-hygiene"},
-	"portable": {"static-hygiene", "skill-frontmatter", "generate-skills", "test-registry", "check-commit-message", "release-dispatch-guard", "ci-path-plan-contract", "omp-review-mode", "just-onboarding", "appliance-contract", "package-review-contract", "release-version", "review-changelog", "package-oci-contract", "appliance-sbom-contract", "version-derivation", "update-omp-pins", "qualify-omp-upgrade-tests", "update-derived-pins", "luna-factory", "luna-dogfood-contract", "sdk-types", "omp-source-regressions", "renovate-config"},
+	"portable": {"static-hygiene", "skill-frontmatter", "generate-skills", "test-registry", "check-commit-message", "release-dispatch-guard", "ci-path-plan-contract", "source-snapshot-contract", "omp-review-mode", "just-onboarding", "appliance-contract", "package-review-contract", "release-version", "review-changelog", "package-oci-contract", "appliance-sbom-contract", "version-derivation", "update-omp-pins", "qualify-omp-upgrade-tests", "update-derived-pins", "luna-factory", "luna-dogfood-contract", "sdk-types", "omp-source-regressions", "renovate-config"},
 }
 
 func run(ctx context.Context, source *dagger.Directory, commands []string) (string, error) {

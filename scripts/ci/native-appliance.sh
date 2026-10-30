@@ -19,9 +19,10 @@ archive="$3"
 }
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/review-ci-native.XXXXXX")"
-image_ref="localhost/review-ci:${revision:0:12}-$$"
+run_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+image_ref="localhost/review-ci:${revision:0:12}-$run_nonce"
 image_id=""
-image_preexisting=0
+run_tag_owned=0
 blocked=0
 krun_runtime_path=""
 unset_args=(-u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_COPILOT_TOKEN -u COPILOT_GITHUB_TOKEN
@@ -32,9 +33,7 @@ for env_name in ${!APPTAINERENV_@} ${!SINGULARITYENV_@}; do
   unset_args+=(-u "$env_name")
 done
 cleanup() {
-  if [[ -n "$image_id" && "$image_preexisting" -eq 0 ]]; then
-    podman image rm --force "$image_id" >/dev/null 2>&1 || true
-  elif [[ -n "$image_id" ]]; then
+  if [[ "$run_tag_owned" -eq 1 ]]; then
     podman image rm "$image_ref" >/dev/null 2>&1 || true
   fi
   rm -rf -- "$work"
@@ -72,7 +71,6 @@ with tarfile.open(sys.argv[1]) as archive:
     print(config_digest)
 PY
   )"
-  if podman image exists "$expected_image_id"; then image_preexisting=1; fi
   load_output="$(podman load --input "$archive")"
   printf '%s\n' "$load_output"
   image_id="$(sed -n 's/^Loaded image: \(sha256:[0-9a-f]\{64\}\)$/\1/p' <<<"$load_output" | tail -n 1)"
@@ -84,7 +82,12 @@ PY
     printf 'native-appliance: imported config identity mismatch: expected %s, received %s\n' "$expected_image_id" "$image_id" >&2
     exit 1
   }
+  if podman image exists "$image_ref"; then
+    echo "native-appliance: refusing to replace existing run tag $image_ref" >&2
+    exit 1
+  fi
   podman tag "$image_id" "$image_ref"
+  run_tag_owned=1
   identity="$(podman image inspect --format '{{.Os}}/{{.Architecture}} {{index .Labels "org.opencontainers.image.revision"}} {{index .Labels "org.opencontainers.image.version"}}' "$image_ref")"
   [[ "$identity" == "linux/$expected_arch $revision $(<"$source_root/VERSION")" ]] || {
     printf 'native-appliance: loaded OCI identity mismatch: %s\n' "$identity" >&2

@@ -48,7 +48,6 @@ def test_publication_accepts_only_the_clean_current_main_source():
     assert '[[ -z "$(git status --porcelain=v1)" ]]' in guard
     assert '[[ "$publish" == true && "$source_sha" != "$main_sha" ]]' in guard
     assert 'scripts/ci/native-appliance.sh' not in workflow
-    assert 'appliance-archive' not in workflow
     assert "if: needs.prepare.outputs.publish == 'true' && github.ref == 'refs/heads/main'" in workflow
 
 
@@ -61,8 +60,14 @@ def test_candidate_build_has_no_registry_write_or_credential_boundary():
     assert "GITHUB_TOKEN" not in build
     assert "REVIEW_OCI_PUSH" not in build
     assert "podman push" not in build
+    assert "Create committed source snapshot for Dagger" in build
+    assert "appliance-archive" in build
+    assert "REVIEW_OCI_INPUT:" in build
     assert "REVIEW_OCI_ARCHIVE:" in build
-    assert "oci-archive:$REVIEW_OCI_ARCHIVE" in SCRIPT.read_text()
+    assert "source-snapshot.py" in build
+    assert "appliance-archive" in build
+    assert 'oci_archive_source="$REVIEW_OCI_ARCHIVE"' in SCRIPT.read_text()
+    assert 'sif_source="oci-archive:$oci_archive_source"' in SCRIPT.read_text()
     assert "if: needs.prepare.outputs.publish == 'true'" in workflow
     assert "packages: write" in publish
     assert 'skopeo copy --all --preserve-digests --dest-authfile "$authfile"' in publish

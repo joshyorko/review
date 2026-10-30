@@ -121,10 +121,23 @@ jobs:
         with:
           repository: joshyorko/homebrew-tools
           path: tools-tap
+      - name: Create committed source snapshot for Dagger
+        run: python3 scripts/ci/source-snapshot.py "$RUNNER_TEMP/review-source" --history
+      - name: Build the exact-source OCI artifact with Dagger
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
+        with:
+          version: '0.21.11'
+          verb: call
+          args: >-
+            appliance-archive
+            --source=${{ runner.temp }}/review-source
+            --revision=${{ needs.prepare.outputs.sha }}
+            -o=${{ runner.temp }}/review.oci.tar
       - name: Build committed launcher and matching native SIF
         env:
           SOURCE_REF: ${{ needs.prepare.outputs.sha }}
           REVIEW_SOURCE_REF: ${{ needs.prepare.outputs.sha }}
+          REVIEW_OCI_INPUT: ${{ runner.temp }}/review.oci.tar
           REVIEW_OCI_ARCHIVE: ${{ runner.temp }}/bundles/review-${{ matrix.arch }}.oci.tar
         # Candidate construction is local and credential-free; the publish job owns registry writes.
         run: ./scripts/package-review build "$SOURCE_REF" "$RUNNER_TEMP/bundles"

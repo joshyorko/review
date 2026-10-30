@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build an immutable checkout package, then publish it to the personal Brew tap.
+# Assemble a committed-source package; registry publication is a separate authorized job.
 set -euo pipefail
 repo="$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse --show-toplevel)"
 work=""
@@ -14,6 +14,7 @@ action="${1:-}"; shift || true
 case "$action" in
   build)
     (($# <= 2)) || fail 'usage: scripts/package-review build [ref] [output-directory]'
+    [[ "${REVIEW_OCI_PUSH:-0}" == 0 ]] || fail 'registry publication is not supported by package-review'
     if (($# == 0)); then
       [[ -z "$(git -C "$repo" status --porcelain)" ]] || fail 'commit checkout changes first, or name an explicit committed ref'
       ref="$(git -C "$repo" symbolic-ref --quiet --short HEAD || git -C "$repo" rev-parse HEAD)"
@@ -24,7 +25,15 @@ case "$action" in
     arch="$(uname -m)"
     [[ "$arch" == x86_64 || "$arch" == aarch64 ]] || fail 'native Linux x86_64 or aarch64 required'
     [[ "$(uname -s)" == Linux ]] || fail 'the SIF package requires Linux'
-    for tool in podman apptainer python3 tar; do command -v "$tool" >/dev/null || fail "missing prerequisite: $tool"; done
+    for tool in apptainer python3 tar; do command -v "$tool" >/dev/null || fail "missing prerequisite: $tool"; done
+    if [[ -z "${REVIEW_OCI_INPUT:-}" ]]; then
+      command -v podman >/dev/null || fail 'missing prerequisite: podman'
+    else
+      command -v skopeo >/dev/null || fail 'missing prerequisite: skopeo'
+      [[ -n "${REVIEW_OCI_ARCHIVE:-}" ]] || fail 'REVIEW_OCI_ARCHIVE is required with a Dagger OCI input'
+      [[ -s "$REVIEW_OCI_INPUT" ]] || fail 'REVIEW_OCI_INPUT must name a nonempty OCI archive'
+      [[ ! -e "$REVIEW_OCI_ARCHIVE" ]] || fail 'OCI archive destination already exists'
+    fi
     output="${2:-$repo/.cache/package-review/$sha}"
     mkdir -p "$output"
     output="$(cd "$output" && pwd)"
@@ -35,39 +44,41 @@ case "$action" in
     version="$(cd "$work/source" && bash scripts/review-appliance-version.sh)"
     oci_image="ghcr.io/joshyorko/review:sha-${sha}"
     oci_arch_image="${oci_image}-${arch}"
-    oci_digest=""
-    image="localhost/review:${sha:0:12}-$arch-$$"
-    (
-      cd "$work/source"
-      podman build --format oci --layers --force-rm \
-        --build-arg "REVIEW_VERSION=$version" \
-        --build-arg "REVIEW_REVISION=$sha" \
-        --label "io.github.joshyorko.review.source.ref=$source_ref" \
-        -f image/appliance/Containerfile -t "$image" .
-    )
-    if [[ "${REVIEW_OCI_PUSH:-0}" == 1 ]]; then
-      [[ -n "${REGISTRY_AUTH_FILE:-}" && -r "${REGISTRY_AUTH_FILE}" ]] || fail "REGISTRY_AUTH_FILE must name a readable registry auth file when OCI push is enabled"
-      podman_args=(--format oci --digestfile "$work/oci-digest" --authfile "${REGISTRY_AUTH_FILE}")
-      podman push "${podman_args[@]}" "$image" "docker://${oci_arch_image}"
-      oci_digest="$(< "$work/oci-digest")"
-      [[ "$oci_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "personal OCI push returned an invalid digest"
-    fi
-    podman save --format docker-archive -o "$work/review.tar" "$image"
-    # Local qualification retains the same built image in native OCI format.
-    if [[ -n "${REVIEW_OCI_ARCHIVE:-}" ]]; then
-      [[ ! -e "$REVIEW_OCI_ARCHIVE" ]] || fail "local OCI archive destination already exists"
-      podman save --format oci-archive -o "$REVIEW_OCI_ARCHIVE" "$image"
+    oci_archive_source=""
+    if [[ -n "${REVIEW_OCI_INPUT:-}" ]]; then
+      oci_identity="$(skopeo inspect --format '{{index .Labels "org.opencontainers.image.revision"}} {{index .Labels "org.opencontainers.image.version"}}' "oci-archive:$REVIEW_OCI_INPUT")"
+      [[ "$oci_identity" == "$sha $version" ]] || fail "Dagger OCI input identity mismatch: $oci_identity"
+      cp -- "$REVIEW_OCI_INPUT" "$REVIEW_OCI_ARCHIVE"
+      oci_archive_source="$REVIEW_OCI_ARCHIVE"
+    else
+      image="localhost/review:${sha:0:12}-$arch-$$"
+      (
+        cd "$work/source"
+        podman build --format oci --layers --force-rm \
+          --build-arg "REVIEW_VERSION=$version" \
+          --build-arg "REVIEW_REVISION=$sha" \
+          --label "io.github.joshyorko.review.source.ref=$source_ref" \
+          -f image/appliance/Containerfile -t "$image" .
+      )
+      if [[ -n "${REVIEW_OCI_ARCHIVE:-}" ]]; then
+        [[ ! -e "$REVIEW_OCI_ARCHIVE" ]] || fail 'local OCI archive destination already exists'
+        podman save --format oci-archive -o "$REVIEW_OCI_ARCHIVE" "$image"
+        oci_archive_source="$REVIEW_OCI_ARCHIVE"
+      else
+        podman save --format docker-archive -o "$work/review.tar" "$image"
+      fi
     fi
     sif_source="docker-archive:$work/review.tar"
-    [[ -z "${REVIEW_OCI_ARCHIVE:-}" ]] || sif_source="oci-archive:$REVIEW_OCI_ARCHIVE"
+    [[ -z "$oci_archive_source" ]] || sif_source="oci-archive:$oci_archive_source"
     APPTAINER_CACHEDIR="$work/apptainer-cache" apptainer build \
       "$work/payload/launcher/review.sif" "$sif_source"
     chmod 0755 "$work/payload/launcher/review.sif"
     apptainer inspect --json "$work/payload/launcher/review.sif" > "$work/image.json"
-    python3 - "$work/image.json" "$sha" <<'PY'
+    python3 - "$work/image.json" "$sha" "$version" <<'PY'
 import json,sys
 labels=json.load(open(sys.argv[1]))['data']['attributes']['labels']
 assert labels['org.opencontainers.image.revision']==sys.argv[2], 'SIF revision differs from checkout'
+assert labels['org.opencontainers.image.version']==sys.argv[3], 'SIF version differs from source package'
 PY
     apptainer exec "$work/payload/launcher/review.sif" /usr/bin/omp --version
     cp "$work/source/LICENSE" "$work/source/NOTICE" "$work/payload/"
@@ -79,13 +90,11 @@ PY
       "$work/payload/launcher/scripts/parse-review-args.sh"
     cp "$work/source/scripts/review-launch-plan.sh" \
       "$work/payload/launcher/scripts/review-launch-plan.sh"
-    python3 - "$work/payload" "$source_ref" "$sha" "$arch" "$oci_image" "$oci_arch_image" "$oci_digest" <<'PY'
+    python3 - "$work/payload" "$source_ref" "$sha" "$arch" "$oci_image" "$oci_arch_image" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
-p=Path(sys.argv[1]);ref,sha,arch,oci_image,oci_arch_image,oci_digest=sys.argv[2:]
+p=Path(sys.argv[1]);ref,sha,arch,oci_image,oci_arch_image=sys.argv[2:]
 meta={'version':(p/'VERSION').read_text().strip(),'ref':ref,'sha':sha,'arch':arch,'oci_image':oci_image,'oci_arch_image':oci_arch_image,'launcher_sha256':hashlib.sha256((p/'launcher/bin/review').read_bytes()).hexdigest(),'sif_sha256':hashlib.sha256((p/'launcher/review.sif').read_bytes()).hexdigest()}
-if oci_digest:
-    meta['oci_arch_digest']=oci_digest
 (p/'build.json').write_text(json.dumps(meta,indent=2)+'\n')
 (p/'build.txt').write_text(f'Review: {ref} @ {sha}\n')
 PY

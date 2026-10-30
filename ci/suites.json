@@ -19,6 +19,7 @@
       "check-commit-message",
       "release-dispatch-guard",
       "ci-path-plan-contract",
+      "source-snapshot-contract",
       "omp-review-mode",
       "just-onboarding",
       "appliance-contract",
