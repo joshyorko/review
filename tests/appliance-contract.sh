@@ -445,6 +445,8 @@ python3_contract_output="$(python3 tests/appliance_sbom_contract.py 2>&1)" || {
 bash tests/typesafe-appliance-contract.sh
 
 require .github/workflows/release.yml 'scripts/review-appliance-version.sh'
+grep -Eq '^[[:space:]]+- runner: ubuntu-24\.04$' .github/workflows/release.yml ||
+  fail 'release x86_64 build must use the supported Ubuntu 24.04 runner'
 
 # Exercise the launcher independently of a container engine. A fake omp makes
 # the profile boundary observable and proves that update never reaches omp.
