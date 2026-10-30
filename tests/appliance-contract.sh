@@ -276,6 +276,7 @@ require scripts/build-derived-omp.sh \
   'bun scripts/ci-release-build-binaries.ts "--targets=${omp_target}"' \
   'install -D -m 0755 "$workdir/bin/bun" /usr/local/bin/bun' \
   'bun "$script_dir/derived-omp-canary.ts" "$candidate" "$adapter_source/index.ts" "$workdir/memoryd-canary"'
+# shellcheck disable=SC2016 # These are literal source strings, not expansions.
 require scripts/build-derived-omp.sh \
   'bun "$script_dir/derived-omp-lifecycle-canary.ts" "$candidate" "$workdir/lifecycle-canary"' \
   'if [[ "$memoryd_shim" == 1 ]]; then'

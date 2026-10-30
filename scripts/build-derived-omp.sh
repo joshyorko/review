@@ -4,7 +4,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 qualification_only=0
 memoryd_shim="${OMP_MEMORYD_SHIM:-0}"
 case "$memoryd_shim" in
-0|1) ;;
+0 | 1) ;;
 *)
   echo "invalid OMP_MEMORYD_SHIM value: $memoryd_shim (expected 0 or 1)" >&2
   exit 2
