@@ -5,8 +5,11 @@ sudo add-apt-repository -y ppa:apptainer/ppa
 
 arch="$(dpkg --print-architecture)"
 case "$arch" in
-  amd64 | arm64) ;;
-  *) echo "unsupported Apptainer architecture: $arch" >&2; exit 1 ;;
+amd64 | arm64) ;;
+*)
+  echo "unsupported Apptainer architecture: $arch" >&2
+  exit 1
+  ;;
 esac
 
 mapfile -t ppa_sources < <(

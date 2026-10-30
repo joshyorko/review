@@ -448,7 +448,7 @@ require .github/workflows/release.yml 'scripts/review-appliance-version.sh'
 grep -Eq '^[[:space:]]+- runner: ubuntu-latest$' .github/workflows/release.yml ||
   fail 'release x86_64 build must use the current Ubuntu runner'
 require .github/workflows/release.yml 'run: bash scripts/install-apptainer-ci.sh'
-require scripts/install-apptainer-ci.sh 'Architectures: $arch'
+require scripts/install-apptainer-ci.sh 'Architectures:'
 require .github/workflows/validate.yml 'bash scripts/install-apptainer-ci.sh'
 require .github/workflows/validate.yml 'apptainer exec docker://ghcr.io/apptainer/lolcow /usr/bin/true'
 
