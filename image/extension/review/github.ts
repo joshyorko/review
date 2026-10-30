@@ -45,6 +45,14 @@ export interface QueueItem {
 	changedFiles?: number;
 	/** Exact head of the pull request at queue-read time. */
 	headSha?: string;
+	/** Exact GitHub PR node/branch/base identity from named-item reads. */
+	githubId?: string;
+	headRef?: string;
+	baseRef?: string;
+	baseSha?: string;
+	headRepo?: string;
+	baseRepo?: string;
+	defaultBranch?: string;
 	/** GitHub accepted this pull request into its auto-merge lifecycle. */
 	autoMergeEnabled?: boolean;
 	/** `owner/repo#number` of every issue this pull request closes. */
@@ -137,7 +145,12 @@ commits(last: 1) {
 
 /** Expensive PR evidence fetched only by bounded, named-item reads. */
 const PR_DETAIL_FIELDS = `
+id
+headRefName
+baseRefName
 baseRefOid
+headRepository { nameWithOwner }
+baseRepository { nameWithOwner }
 files(first: 100) {
 	pageInfo { hasNextPage endCursor }
 	nodes { path }
@@ -289,6 +302,7 @@ export async function fetchOAuthScopes(options: FetchOptions = {}): Promise<read
 
 
 interface SearchNode {
+	id?: string;
 	number?: number;
 	title?: string;
 	url?: string;
@@ -301,6 +315,10 @@ interface SearchNode {
 	closed?: boolean;
 	changedFiles?: number;
 	baseRefOid?: string;
+	headRefName?: string;
+	baseRefName?: string;
+	headRepository?: { nameWithOwner?: string } | null;
+	baseRepository?: { nameWithOwner?: string } | null;
 	autoMergeRequest?: { enabledAt?: string } | null;
 	author?: { login?: string } | null;
 	repository?: { nameWithOwner?: string } | null;
@@ -416,7 +434,7 @@ function toReviewState(value?: string | null): ReviewState {
 	}
 }
 
-function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
+function toQueueItem(node: SearchNode, mode: QueueMode, defaultBranch?: string): QueueItem | undefined {
 	if (typeof node.number !== "number" || !node.repository?.nameWithOwner) return undefined;
 	const updated = node.updatedAt ? Date.parse(node.updatedAt) : Number.NaN;
 	const commit = node.commits?.nodes?.[0]?.commit;
@@ -448,6 +466,13 @@ function toQueueItem(node: SearchNode, mode: QueueMode): QueueItem | undefined {
 		deletions: node.deletions,
 		changedFiles: node.changedFiles,
 		headSha: node.headRefOid,
+		githubId: mode === "prs" ? node.id : undefined,
+		headRef: mode === "prs" ? node.headRefName : undefined,
+		baseRef: mode === "prs" ? node.baseRefName : undefined,
+		baseSha: mode === "prs" ? node.baseRefOid : undefined,
+		headRepo: mode === "prs" ? node.headRepository?.nameWithOwner : undefined,
+		baseRepo: mode === "prs" ? node.baseRepository?.nameWithOwner : undefined,
+		defaultBranch: mode === "prs" ? defaultBranch : undefined,
 		autoMergeEnabled: Boolean(node.autoMergeRequest?.enabledAt),
 		workflowFiles:
 			mode === "prs" && files !== undefined
@@ -793,7 +818,8 @@ export async function fetchItemsByKey(
 		.map(
 			({ alias, owner, name, number }) =>
 				`\t${alias}: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) {\n` +
-				`\t\tissueOrPullRequest(number: ${number}) { ... on ${wanted} { closed ${QUEUE_FIELDS} ${extras} } }\n\t}`,
+				`\t\tissueOrPullRequest(number: ${number}) { ... on ${wanted} { closed ${QUEUE_FIELDS} ${extras} } }\n` +
+				`\t\tdefaultBranchRef { name }\n\t}`,
 		)
 		.join("\n")}\n}`;
 
@@ -812,7 +838,7 @@ export async function fetchItemsByKey(
 			? await readBoundedJson(response, PR_DETAIL_MAX_RESPONSE_BYTES)
 			: await response.json();
 		const payload = rawPayload as {
-			data?: Record<string, { issueOrPullRequest?: SearchNode | null } | null>;
+			data?: Record<string, { issueOrPullRequest?: SearchNode | null; defaultBranchRef?: { name?: string } | null } | null>;
 			errors?: Array<{ message?: string }>;
 		};
 		// Partial data is normal here: one unreadable repository must not discard
@@ -839,7 +865,7 @@ export async function fetchItemsByKey(
 					itemNode = { ...node, files: completeFiles.files };
 				}
 			}
-			const item = toQueueItem(itemNode, mode);
+			const item = toQueueItem(itemNode, mode, payload.data?.[target.alias]?.defaultBranchRef?.name);
 			if (item) {
 				// Named reads are the mutation boundary. Missing expensive evidence
 				// must fail closed rather than look like a clean PR.

@@ -37,7 +37,7 @@ export function loadWave(root: string, owner: string): PersistedRepositoryBatch 
 			|| !["slay", "fix", "diff"].includes(batch.kind) || !Array.isArray(batch.waves)
 			|| !batch.waves[batch.currentWave]?.items?.length) return;
 		if (batch.version === 1 && (batch.issueOutcome !== undefined || batch.issuePrDeadlineAt !== undefined || batch.issuePrRepairLimit !== undefined
-			|| batch.issueTaskAssignments !== undefined || batch.issueWorkerReceipts !== undefined || batch.issuePrReadiness !== undefined)) return;
+			|| batch.issueDispatchPromptedKeys !== undefined || batch.issueTaskAssignments !== undefined || batch.issueWorkerReceipts !== undefined || batch.issuePrReadiness !== undefined)) return;
 		if (batch.version === 2 && (batch.issueOutcome !== "pr-ready" || batch.kind === "diff"
 			|| !Number.isFinite(batch.issuePrDeadlineAt) || !Number.isSafeInteger(batch.issuePrRepairLimit) || batch.issuePrRepairLimit < 1 || batch.issuePrRepairLimit > 3
 			|| !batch.waves.every((wave: { items?: Array<{ type?: string }> }) => Array.isArray(wave.items) && wave.items.length > 0 && wave.items.every((item) => item.type === "issue")))) return;
@@ -50,6 +50,8 @@ export function loadWave(root: string, owner: string): PersistedRepositoryBatch 
 					|| typeof assignment.assignmentDigest !== "string" || !/^[a-f0-9]{64}$/.test(assignment.assignmentDigest)
 					|| !Number.isSafeInteger(assignment.attempt) || assignment.attempt < 0 || assignment.attempt > batch.issuePrRepairLimit
 					|| assignment.jobId !== undefined && (typeof assignment.jobId !== "string" || !assignment.jobId)))) return;
+			if (batch.issueDispatchPromptedKeys !== undefined && (!Array.isArray(batch.issueDispatchPromptedKeys)
+				|| !batch.issueDispatchPromptedKeys.every((key: unknown) => typeof key === "string" && keys.has(key)))) return;
 			if (batch.issueWorkerReceipts !== undefined && (!batch.issueWorkerReceipts || typeof batch.issueWorkerReceipts !== "object" || Array.isArray(batch.issueWorkerReceipts)
 				|| Object.entries(batch.issueWorkerReceipts).some(([key, receipt]) => !keys.has(key) || receipt.issueKey !== key
 					|| typeof receipt.toolCallId !== "string" || !receipt.toolCallId || typeof receipt.agentId !== "string" || !receipt.agentId
@@ -64,14 +66,19 @@ export function loadWave(root: string, owner: string): PersistedRepositoryBatch 
 					|| receipt.acceptance.criteria.some((criterion: { id?: unknown; evidence?: unknown }) => typeof criterion.id !== "string" || !criterion.id.trim() || criterion.id.length > 256 || typeof criterion.evidence !== "string" || !criterion.evidence.trim() || criterion.evidence.length > 4096)
 					|| receipt.outcome === "pr-ready" && (!receipt.pullRequest || !Number.isSafeInteger(receipt.pullRequest.number) || receipt.pullRequest.number < 1
 						|| typeof receipt.pullRequest.url !== "string" || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(receipt.pullRequest.url)
+						|| typeof receipt.pullRequest.branch !== "string" || !receipt.pullRequest.branch.trim() || typeof receipt.pullRequest.baseRef !== "string" || !receipt.pullRequest.baseRef.trim()
+						|| typeof receipt.pullRequest.baseSha !== "string" || !/^[a-f0-9]{40}$/.test(receipt.pullRequest.baseSha)
 						|| typeof receipt.pullRequest.headSha !== "string" || !/^[a-f0-9]{40}$/.test(receipt.pullRequest.headSha))))) return;
 			if (batch.issuePrReadiness !== undefined && (!batch.issuePrReadiness || typeof batch.issuePrReadiness !== "object" || Array.isArray(batch.issuePrReadiness)
 				|| Object.entries(batch.issuePrReadiness).some(([key, readiness]) => !keys.has(key) || readiness.issueKey !== key
-					|| !["unknown", "waiting", "repair-required", "repairing", "ready"].includes(readiness.state)
+					|| !["unknown", "waiting", "repair-required", "repairing", "review-required", "ready"].includes(readiness.state)
 					|| !Number.isFinite(readiness.admittedAt) || !Number.isFinite(readiness.deadlineAt) || readiness.deadlineAt !== batch.issuePrDeadlineAt
+					|| !Number.isSafeInteger(readiness.observationCount) || readiness.observationCount < 0 || readiness.observationCount > 100
 					|| !Number.isSafeInteger(readiness.repairCount) || readiness.repairCount < 0 || readiness.repairCount > batch.issuePrRepairLimit
 					|| readiness.nextObservationAt !== undefined && !Number.isFinite(readiness.nextObservationAt)
 					|| readiness.repairPromptSentAt !== undefined && !Number.isFinite(readiness.repairPromptSentAt)
+					|| readiness.reviewerPromptSentAt !== undefined && !Number.isFinite(readiness.reviewerPromptSentAt)
+					|| readiness.reviewerDeadlineAt !== undefined && !Number.isFinite(readiness.reviewerDeadlineAt)
 					|| readiness.reason !== undefined && (typeof readiness.reason !== "string" || readiness.reason.length > 8192)
 					|| readiness.failureKey !== undefined && (typeof readiness.failureKey !== "string" || !/^[a-f0-9]{64}$/.test(readiness.failureKey))
 					|| readiness.workerReceiptDigest !== undefined && (typeof readiness.workerReceiptDigest !== "string" || !/^[a-f0-9]{64}$/.test(readiness.workerReceiptDigest))

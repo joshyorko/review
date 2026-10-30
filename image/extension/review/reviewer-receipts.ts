@@ -466,6 +466,18 @@ export function getCleanReviewerReceipt(
 		!state.admissions[receipt.toolCallId]?.rejected && state.admissions[receipt.toolCallId]?.deliveredJobIds.includes(receipt.jobId));
 }
 
+/** Return the latest delivered exact-head reviewer verdict, including findings/unknown. */
+export function getDeliveredReviewerReceipt(
+	state: ReviewerReceiptState,
+	input: { waveIdentity: string; subject: ReviewSubject; excludedAgentIds?: readonly string[] },
+): ReviewerReceipt | undefined {
+	if (!validSubject(input.subject) || !input.waveIdentity) return undefined;
+	return Object.values(state.admissions).flatMap(admission => admission.result ? [admission.result] : []).filter(receipt =>
+		receipt.waveIdentity === input.waveIdentity && canonical(receipt.subject) === canonical(input.subject) && receipt.agentSource === "user" &&
+		receipt.agentId !== undefined && !input.excludedAgentIds?.includes(receipt.agentId) &&
+		!state.admissions[receipt.toolCallId]?.rejected && state.admissions[receipt.toolCallId]?.deliveredJobIds.includes(receipt.jobId)).at(-1);
+}
+
 /** Parse durable wave-store data without accepting partial or forged receipts. */
 export function parseReviewerReceiptState(value: unknown): ReviewerReceiptState | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
