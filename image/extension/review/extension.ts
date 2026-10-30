@@ -16,6 +16,7 @@ import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
 import { registerFactoryClaimInspector, registerFactoryReconciler, registeredFactoryReconciler, registerFactorySelection, factoryBatchSubmitterRegistered, factoryCommand, factoryControllerRegistered, factoryDashboardOpenerRegistered, factoryLoadDiagnostic, openFactoryDashboard, submitFactoryBatch, type ClaimOwnerObservation, type ClaimOwnerWorkerObservation } from "../luna-factory/omp/batch-bridge.ts";
 import { ResourceClaims, factoryClaimsRoot, factoryStateRoot } from "../luna-factory/omp/batch-store.ts";
+import { BatchGitHub, type HostedChecksObservation, type OwnedPullRequest } from "../luna-factory/omp/batch-github.ts";
 import { workbenchPainter } from "./paint.ts";
 import { type RailKey, ReviewRail, statusSegment } from "./rail.ts";
 import type { KeyMatcher } from "./keys.ts";
@@ -28,7 +29,7 @@ import { readOperatorPolicy, writeOperatorPolicy, operatorPolicyCurrent, operato
 import { observeHumanReviewPolicy } from "./human-review-policy.ts";
 import { operatorLandingDecision } from "./operator-landing.ts";
 import { mcpExpectedHeadQualified } from "./merge-transport.ts";
-import { createReviewerOutputSchema, createReviewerReceiptState, admitReviewerTask, captureReviewerResult, captureReviewerTaskProgress, captureReviewerDelivery, getCleanReviewerReceipt, reviewerDefinitionTrusted, type ReviewerReceiptState, type ReviewSubject } from "./reviewer-receipts.ts";
+import { createReviewerOutputSchema, createReviewerReceiptState, admitReviewerTask, captureReviewerResult, captureReviewerTaskProgress, captureReviewerDelivery, getCleanReviewerReceipt, getDeliveredReviewerReceipt, reviewerDefinitionTrusted, type ReviewerReceiptState, type ReviewSubject } from "./reviewer-receipts.ts";
 import {
 	commentInvocation,
 	createCommentActionPlan,
@@ -96,7 +97,12 @@ type ReconcileObservation =
 type ReconciliationResult = { settled: string[]; unknown: string[]; submittedPrs: string[]; nonSuccessItems?: string[]; observedPrHeads?: Readonly<Record<string, string>> };
 
 export interface PersistedRepositoryBatch {
-	readonly version: 1;
+	readonly version: 1 | 2;
+	/** Version-2 issue waves explicitly promise PR-ready, not merely submitted-PR work. */
+	readonly issueOutcome?: "pr-ready";
+	readonly issuePrDeadlineAt?: number;
+	readonly issuePrRepairLimit?: number;
+	readonly issueDispatchPromptedKeys?: readonly string[];
 	readonly id: string;
 	readonly kind: RepositoryBatchKind;
 	readonly waves: ReadonlyArray<{ readonly repo: string; readonly items: readonly QueueItem[] }>;
@@ -135,9 +141,58 @@ export interface PersistedRepositoryBatch {
 	readonly waveWriterAgents?: readonly string[];
 	/** Baseline issue submissions captured before this wave was dispatched. */
 	readonly issueSubmittedPrs?: Readonly<Record<string, readonly string[]>>;
+	/** Dispatch-time task-to-issue mapping captured before OMP starts each worker. */
+	readonly issueTaskAssignments?: Readonly<Record<string, PersistedIssueTaskAssignment>>;
+	/** A delivered structured OMP result tied to the exact issue task and PR candidate. */
+	readonly issueWorkerReceipts?: Readonly<Record<string, PersistedIssueWorkerReceipt>>;
+	/** Hosted-check state is keyed by issue, never inferred from the queue's selected row. */
+	readonly issuePrReadiness?: Readonly<Record<string, PersistedIssuePrReadiness>>;
 	/** Operator requested cancellation; the current wave must drain before archive. */
 	readonly cancelRequested?: boolean;
 	readonly error?: string;
+}
+
+export interface PersistedIssueWorkerReceipt {
+	readonly issueKey: string;
+	readonly toolCallId: string;
+	readonly agentId: string;
+	readonly jobId?: string;
+	readonly assignmentDigest: string;
+	readonly resultDigest: string;
+	readonly deliveredAt: number;
+	readonly attempt: number;
+	readonly outcome: "pr-ready" | "blocked";
+	readonly pullRequest?: { readonly number: number; readonly url: string; readonly branch: string; readonly headSha: string; readonly baseRef: string; readonly baseSha: string };
+	readonly checks: readonly { readonly command: string; readonly exitCode: number }[];
+	readonly acceptance: { readonly summary: string; readonly criteria: readonly { readonly id: string; readonly evidence: string }[] };
+	readonly blocker?: string;
+}
+
+export interface PersistedIssueTaskAssignment {
+	readonly issueKey: string;
+	readonly toolCallId: string;
+	readonly agentId: string;
+	readonly assignmentDigest: string;
+	readonly attempt: number;
+	readonly jobId?: string;
+}
+
+export interface PersistedIssuePrReadiness {
+	readonly issueKey: string;
+	readonly state: "unknown" | "waiting" | "repair-required" | "repairing" | "review-required" | "ready";
+	readonly pullRequest?: { readonly repo: string; readonly number: number; readonly url: string; readonly nodeId: string; readonly branch: string; readonly headSha: string; readonly baseRef: string; readonly baseSha: string; readonly mergeSha?: string };
+	readonly workerReceiptDigest?: string;
+	readonly observation?: HostedChecksObservation;
+	readonly admittedAt: number;
+	readonly deadlineAt: number;
+	readonly nextObservationAt?: number;
+	readonly observationCount: number;
+	readonly repairCount: number;
+	readonly repairPromptSentAt?: number;
+	readonly reviewerPromptSentAt?: number;
+	readonly reviewerDeadlineAt?: number;
+	readonly reason?: string;
+	readonly failureKey?: string;
 }
 
 export interface PersistedCommentResult {
@@ -150,6 +205,9 @@ export interface PersistedCommentResult {
 
 /** Queue refetch cadence. GitHub search is rate limited. */
 const QUEUE_POLL_MS = 60_000;
+const ISSUE_PR_OBSERVE_MS = 20_000;
+const ISSUE_PR_TIMEOUT_MS = 30 * 60_000;
+const ISSUE_PR_REPAIR_LIMIT = 1;
 
 function slayBashBlockReason(command: string): string | undefined {
 	if (/\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i.test(command)) {
@@ -616,6 +674,142 @@ function preToolRuntimeSettled(ctx: CtxLike, batch: PersistedRepositoryBatch): b
 export function isImplementationAction(action: DashboardAction): boolean {
 	return action.kind === "fix" || action.kind === "slay" || action.kind === "autoslay";
 }
+
+export function issuePrReadyOutputSchema(issueKey: string): Record<string, unknown> {
+	return {
+		type: "object",
+		additionalProperties: false,
+		required: ["issueKey", "outcome", "pullRequest", "checks", "acceptance", "blocker"],
+		properties: {
+			issueKey: { type: "string", const: issueKey },
+			outcome: { type: "string", enum: ["pr-ready", "blocked"] },
+			pullRequest: {
+				type: "object", additionalProperties: false, required: ["number", "url", "branch", "headSha", "baseRef", "baseSha"],
+				properties: { number: { type: "integer" }, url: { type: "string" }, branch: { type: "string" }, headSha: { type: "string" }, baseRef: { type: "string" }, baseSha: { type: "string" } },
+			},
+			checks: {
+				type: "array", items: {
+					type: "object", additionalProperties: false, required: ["command", "exitCode"],
+					properties: { command: { type: "string" }, exitCode: { type: "integer" } },
+				},
+			},
+			acceptance: {
+				type: "object", additionalProperties: false, required: ["summary", "criteria"],
+				properties: {
+					summary: { type: "string" },
+					criteria: { type: "array", items: {
+						type: "object", additionalProperties: false, required: ["id", "evidence"],
+						properties: { id: { type: "string" }, evidence: { type: "string" } },
+					} },
+				},
+			},
+			blocker: { type: "string" },
+		},
+	};
+}
+
+function issuePrReadySchemaMatches(value: unknown, issueKey: string): boolean {
+	if (!isRecord(value) || value.type !== "object" || value.additionalProperties !== false || !Array.isArray(value.required) || !isRecord(value.properties)) return false;
+	const required = new Set(value.required.filter((entry): entry is string => typeof entry === "string"));
+	const properties = value.properties;
+	const pullRequest = properties.pullRequest;
+	const checks = properties.checks;
+	const acceptance = properties.acceptance;
+	if (!required.has("issueKey") || !required.has("outcome") || !required.has("pullRequest") || !required.has("checks") || !required.has("acceptance") || !required.has("blocker")) return false;
+	if (!isRecord(properties.issueKey) || properties.issueKey.const !== issueKey || !isRecord(properties.outcome) || !Array.isArray(properties.outcome.enum)
+		|| !properties.outcome.enum.includes("pr-ready") || !properties.outcome.enum.includes("blocked")) return false;
+	if (!isRecord(pullRequest) || pullRequest.type !== "object" || !Array.isArray(pullRequest.required) || !isRecord(pullRequest.properties)
+		|| !["number", "url", "branch", "headSha", "baseRef", "baseSha"].every((key) => pullRequest.required.includes(key))) return false;
+	if (!isRecord(checks) || checks.type !== "array" || !isRecord(checks.items) || !Array.isArray(checks.items.required)
+		|| !["command", "exitCode"].every((key) => checks.items.required.includes(key))) return false;
+	if (!isRecord(acceptance) || acceptance.type !== "object" || !isRecord(acceptance.properties) || !isRecord(acceptance.properties.criteria)
+		|| acceptance.properties.criteria.type !== "array" || !isRecord(acceptance.properties.criteria.items)
+		|| !Array.isArray(acceptance.properties.criteria.items.required)
+		|| !["id", "evidence"].every((key) => acceptance.properties.criteria.items.required.includes(key))) return false;
+	return isRecord(properties.blocker) && properties.blocker.type === "string";
+}
+
+function issueTaskAssignmentsForCall(
+	batch: PersistedRepositoryBatch,
+	toolCallId: string,
+	input: unknown,
+): { readonly assignments?: Readonly<Record<string, PersistedIssueTaskAssignment>>; readonly reason?: string } {
+	const wave = batch.waves[batch.currentWave];
+	if (batch.version !== 2 || batch.issueOutcome !== "pr-ready" || !wave || !wave.items.length || wave.items.some((item) => item.type !== "issue")) return { reason: "issue PR-ready task is outside an admitted issue wave" };
+	if (!isRecord(input)) return { reason: "issue PR-ready task input is unavailable" };
+	const tasks = Array.isArray(input.tasks) ? input.tasks : [input];
+	const repairingKeys = new Set(Object.entries(batch.issuePrReadiness ?? {}).filter(([, value]) => value.state === "repair-required").map(([key]) => key));
+	const remainingKeys = new Set(wave.items.map((item) => `${item.repo.toLowerCase()}#${item.id}`).filter((key) => !batch.issueTaskAssignments?.[key]));
+	const allowedKeys = repairingKeys.size > 0 ? repairingKeys : remainingKeys;
+	if (tasks.length === 0 || tasks.length > allowedKeys.size) return { reason: "issue PR-ready task count does not match the unassigned items or authorized repairs" };
+	const assignments = { ...(batch.issueTaskAssignments ?? {}) };
+	const seenIssues = new Set<string>();
+	const seenAgents = new Set<string>();
+	for (const task of tasks) {
+		if (!isRecord(task) || typeof task.name !== "string" || !task.name.trim() || task.agent === "reviewer" || typeof task.task !== "string") return { reason: "issue PR-ready task requires a named writable worker and task text" };
+		const schema = isRecord(task.outputSchema) ? task.outputSchema : undefined;
+		const properties = schema && isRecord(schema.properties) ? schema.properties : undefined;
+		const issueKey = properties && isRecord(properties.issueKey) && typeof properties.issueKey.const === "string" ? properties.issueKey.const : undefined;
+		if (!issueKey || task.schemaMode !== "strict" || !issuePrReadySchemaMatches(schema, issueKey) || !task.task.includes(issueKey)) return { reason: "issue worker must receive its exact issue key and strict PR-ready result schema" };
+		const item = wave.items.find((candidate) => `${candidate.repo.toLowerCase()}#${candidate.id}` === issueKey);
+		if (!item || !allowedKeys.has(issueKey) || seenIssues.has(issueKey) || seenAgents.has(task.name)) return { reason: "issue task mapping is duplicate or outside the unassigned/repairable wave items" };
+		seenIssues.add(issueKey); seenAgents.add(task.name);
+		const previous = assignments[issueKey];
+		let attempt = 0;
+		if (previous) {
+			const readiness = batch.issuePrReadiness?.[issueKey];
+			const pr = readiness?.pullRequest;
+			if (!readiness || readiness.state !== "repair-required" || readiness.repairPromptSentAt === undefined || !pr
+				|| readiness.repairCount > batch.issuePrRepairLimit! || !task.task.includes(pr.url) || !task.task.includes(pr.headSha)) {
+				return { reason: `duplicate issue task cannot be admitted without the retained same-PR repair receipt for ${issueKey}` };
+			}
+			attempt = previous.attempt + 1;
+			if (attempt > batch.issuePrRepairLimit!) return { reason: `original bounded repair limit is exhausted for ${issueKey}` };
+		}
+		assignments[issueKey] = { issueKey, toolCallId, agentId: task.name, assignmentDigest: promptDigest(task.task), attempt };
+	}
+	if (seenIssues.size !== tasks.length) return { reason: "issue task call did not create an exact one-to-one issue assignment" };
+	return { assignments };
+}
+
+function issueWorkerData(value: unknown, issueKey: string): Omit<PersistedIssueWorkerReceipt, "toolCallId" | "agentId" | "jobId" | "assignmentDigest" | "resultDigest" | "deliveredAt" | "attempt"> | undefined {
+	if (!isRecord(value) || value.issueKey !== issueKey || !["pr-ready", "blocked"].includes(String(value.outcome)) || !isRecord(value.pullRequest)
+		|| !Array.isArray(value.checks) || !isRecord(value.acceptance) || typeof value.acceptance.summary !== "string"
+		|| !Array.isArray(value.acceptance.criteria) || typeof value.blocker !== "string") return undefined;
+	const checks = value.checks;
+	if (checks.length > 64 || checks.some((check) => !isRecord(check) || typeof check.command !== "string" || !check.command.trim() || check.command.length > 4096 || !Number.isInteger(check.exitCode))) return undefined;
+	const criteria = value.acceptance.criteria;
+	if (criteria.length > 100 || criteria.some((criterion) => !isRecord(criterion) || typeof criterion.id !== "string" || !criterion.id.trim() || typeof criterion.evidence !== "string" || !criterion.evidence.trim() || criterion.id.length > 256 || criterion.evidence.length > 4096)) return undefined;
+	const pullRequest = value.pullRequest;
+	const outcome = value.outcome as "pr-ready" | "blocked";
+	if (outcome === "pr-ready" && (typeof pullRequest.number !== "number" || !Number.isSafeInteger(pullRequest.number) || pullRequest.number < 1
+		|| typeof pullRequest.url !== "string" || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(pullRequest.url)
+		|| typeof pullRequest.branch !== "string" || !pullRequest.branch.trim() || typeof pullRequest.baseRef !== "string" || !pullRequest.baseRef.trim()
+		|| typeof pullRequest.baseSha !== "string" || !/^[a-f0-9]{40}$/.test(pullRequest.baseSha)
+		|| typeof pullRequest.headSha !== "string" || !/^[a-f0-9]{40}$/.test(pullRequest.headSha)
+		|| checks.length === 0 || checks.some((check) => check.exitCode !== 0) || criteria.length === 0)) return undefined;
+	return {
+		issueKey,
+		outcome,
+		...(outcome === "pr-ready" ? { pullRequest: { number: pullRequest.number as number, url: pullRequest.url as string, branch: pullRequest.branch as string, headSha: pullRequest.headSha as string, baseRef: pullRequest.baseRef as string, baseSha: pullRequest.baseSha as string } } : {}),
+		checks: checks as { command: string; exitCode: number }[],
+		acceptance: { summary: value.acceptance.summary.slice(0, 4096), criteria: criteria as { id: string; evidence: string }[] },
+		...(value.blocker.trim() ? { blocker: value.blocker.slice(0, 4096) } : {}),
+	};
+}
+
+function parseSubmittedPrReference(value: string): { repo: string; number: number; url: string } | undefined {
+	const key = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([1-9][0-9]*)$/.exec(value);
+	if (key) return { repo: key[1]!.toLowerCase(), number: Number(key[2]), url: `https://github.com/${key[1]}/pull/${key[2]}` };
+	try {
+		const url = new URL(value);
+		if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com" || url.username || url.password || url.search || url.hash) return undefined;
+		const match = /^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)\/?$/.exec(url.pathname);
+		if (!match) return undefined;
+		const repo = `${match[1]}/${match[2]}`;
+		return { repo: repo.toLowerCase(), number: Number(match[3]), url: `https://github.com/${repo}/pull/${match[3]}` };
+	} catch { return undefined; }
+}
 /**
  * Prompts the action keys send. Each one names the evidence the agent must use.
  *
@@ -655,10 +849,13 @@ export function actionPrompt(
 	const evidence = `Evidence is bounded and read once. Start with \`${evidenceTool}\` using both \`pull_request\` and explicit \`repo\`; child agents do not inherit the coordinator's selected repository. Use \`gh pr diff <n> --repo <r> --name-only\` only to confirm filenames, inspect only relevant hunks or failing logs, and cite file:line evidence. Never sleep or poll. Never assume a checkout exists. Check a repository-specific validator once; if the minimal appliance lacks that toolchain, use hosted check evidence and report the local verification gap instead of installing packages or retrying the absent command. Treat \`merge=dirty\` as repair work: merge the base into the branch, resolve deliberately, and never rebase, force-push, or choose \`--ours\`/\`--theirs\` wholesale. Revalidate live state before any comment, label, assignment, close, push, approval, or merge.`;
 	const reviewFinish = "Report one terminal outcome per item, then stop. The workbench owns the next repository wave. Never approve or merge.";
 	const slayContinuation = "Review Slay coordinator ownership persists through the selected lifecycle's declared terminal condition. Review completion, a fixer return, a push, green checks, or knowing the next action is progress, not completion. Continue already-authorized in-scope work without asking for confirmation already supplied by the objective; authorized actions need no second confirmation, while new scope or effects still require authority. A partial status report is not terminal. If one lane is blocked, finish independent authorized work before reporting that lane's exact blocker and evidence. Stop only when the requested terminal outcome is satisfied and verified, a concrete external blocker prevents further authorized progress, or continuing requires authority or scope the operator did not grant. Existing live GitHub policy, permissions, exact-head checks, holds, self-review rules, and mutation guards still bind terminal conditions. Never sleep or poll. Workers remain bounded and return to the coordinator.";
+	const issueWorkerFinish = "A worker finishes one bounded issue attempt after publishing its PR candidate; return the exact issue key, PR URL/number/head SHA, local verification commands and exits, and acceptance evidence in the task result. Do not claim hosted checks passed unless the result contains current evidence. The Review coordinator, not the worker, owns the admitted PR-ready outcome.";
+	const issueCoordinatorContinuation = "This newly admitted issue wave promises PR-ready work. A worker return, issue link, push, or passing check alone is not completion. Review remains owner through exact worker-result/operation attribution, current-head hosted checks and the issue's declared acceptance evidence. Do not infer ownership from PR body, author, branch or timestamp. Pending checks use Review's bounded host observer; do not spend model turns sleeping or polling. Repair only the same exactly associated PR within the captured attempt limit; a new head invalidates old proof. Keep UNKNOWN/blocked lanes and claims when association, policy, checks or acceptance are incomplete. Never merge, approve or release.";
 	const slayFinish = `The maintainer's slay action authorizes review, repair, and landing for exactly these pull requests and their captured heads. Review each head with a fresh ${reviewerAgent} using a unique named task, strict outputSchema pinned to repository/PR/head, and no tools override. If it has findings, dispatch one fresh fixer with the exact repository, pull-request number, and head. Each fixer must use its own distinct target checkout under \`$HOME/worktrees\`, created with \`gh repo clone\` and \`gh pr checkout\`, and no two workers may share a checkout or conversation; never assume the working directory is a checkout, clone into \`/tmp/\`, or assume a fork branch exists on the base remote. Push without force, read the new head, and run a fresh review of that head. Before landing, re-read the live head, base, labels, reviews, checks, mergeability, and effective rules via \`gh api repos/<owner>/<repo>/rules/branches/<branch>\`. The reviewed head must equal the live head. Submit the current maintainer's approval only for a clean PR they did not author; never fabricate reviewers or a fixed approval threshold. Then run \`gh pr merge <n> --repo <r> --squash --match-head-commit <reviewed-sha>\`; GitHub rules remain authoritative and may leave it queued or blocked on additional required human reviews. If GitHub says the merge queue owns the strategy, its effective squash rule wins: do not disable and re-arm auto-merge because \`autoMergeRequest.mergeMethod\` says \`MERGE\`. An accepted auto-merge request is terminal for this wave: report the outstanding approval gate and move on. Never use \`--admin\`, remove holds, weaken protections, or force-push. If Review blocks landing, identify it as Review's local guard, not a GitHub rejection. Do not call an observed check required without live rules evidence. Report the current head and whether CI is pending or failing, include the PR URL, and give these recovery steps explicitly: ${slayLandingRecovery(selected)} Never end with only "resume once checks clear" or imply that reconcile will merge the PR. Report one terminal outcome per item, then stop. The workbench owns the next repository wave.`;
 	const repairFinish = "These pull requests were returned to their authenticated author with requested changes. Read the review threads and failing checks, diagnose every requested correction, then dispatch one fresh fixer per pull request. Each fixer owns one unique target checkout under `$HOME/worktrees`, created with `gh repo clone` and `gh pr checkout`; no two workers share a checkout or conversation. Make the smallest complete correction, run focused verification, and push a new head without force. Never review, approve, auto-merge, or merge the author's own pull request. A repair is terminal only after GitHub shows a new head SHA. Report the pushed head and pull-request URL for every item, then stop; the workbench owns the next repository wave.";
 	const issueEvidence = `Evidence is bounded and read once. Call \`review_workbench_issue\` with explicit \`issue\` and \`repo\` to inspect the complete GitHub issue description before deciding how to implement it. Read the target repository's \`AGENTS.md\` and applicable contribution or pull-request guidance before creating a branch. Never assume the working directory is a checkout: use \`gh repo clone <owner/repo> $HOME/worktrees/<owner>-<repo>-issue-<number>\` to materialize one unique workspace per issue under \`$HOME/worktrees\`, then enter that checkout before examining relevant source files and tests. Never clone into \`/tmp\`. Create a dedicated feature branch from the correct target base specified by current operator instructions or repository guidance; use live repository integration state when the base is not explicit, and never assume it is \`main\`. Do not write directly to the base branch. Before running \`gh pr create\`, verify the current branch is the dedicated feature branch and the explicit proposed base matches that resolved target. If the current branch is the integration branch, the intended base is ambiguous or conflicting, or the proposed base differs from policy, do not run \`gh pr create\`; stop and report BLOCKED with the observed head branch, intended and proposed bases, and the policy source. Cite file:line evidence, never sleep or poll, diagnose the root cause, make the smallest complete change, run focused verification, and open a review-ready pull request targeting that same base whose body contains \`Closes <owner/repo>#<number>\`. Never force-push. Never merge or approve your own pull request.`;
 	const issueWorkflow = "Use the `task` tool once with one fresh item per issue through OMP workflowz. Each worker must use the unique target checkout named in its prompt; do not share a checkout or conversation between items.";
+	const issueWorkerContracts = selected.map((candidate) => `- ${cite(candidate)}: unique task name, exact issue key in task prompt, schemaMode:"strict", outputSchema=${JSON.stringify(issuePrReadyOutputSchema(`${candidate.repo.toLowerCase()}#${candidate.id}`))}`).join("\n");
 	const issueInspectEvidence = `Evidence is bounded and read once. Call \`review_workbench_issue\` with explicit \`issue\` and \`repo\` to read the complete issue body, discussion, and linked pull requests. Inspect only the relevant source files, citing file:line evidence. Do not call pull-request diff tools for an issue. Never sleep or poll. Never assume a checkout exists. Report the request, its current state, and concrete risks.`;
 
 	if (selected.length > 1) {
@@ -668,12 +865,12 @@ export function actionPrompt(
 		const reviewRules = `<<<SUBAGENT-RULES\n${evidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
 		const slayRules = `<<<SUBAGENT-RULES\n${evidence} ${slayFinish}\nSUBAGENT-RULES>>>`;
 		const repairRules = `<<<SUBAGENT-RULES\n${evidence} ${repairFinish}\nSUBAGENT-RULES>>>`;
-		const issueRules = `<<<SUBAGENT-RULES\n${issueEvidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
+		const issueRules = `<<<SUBAGENT-RULES\n${issueEvidence} ${issueWorkerFinish} ${reviewFinish}\nSUBAGENT-RULES>>>`;
 		const issueInspectRules = `<<<SUBAGENT-RULES\n${issueInspectEvidence} ${reviewFinish}\nSUBAGENT-RULES>>>`;
 		switch (action.kind) {
 			case "slay":
 				if (allIssues) {
-					return `Implement this issue wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\n${slayContinuation} ${issueWorkflow} Copy this block verbatim into every worker prompt:\n${issueRules}`;
+						return `Implement this issue wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\n${slayContinuation} ${issueCoordinatorContinuation} ${issueWorkflow}\nPer-issue strict worker schemas:\n${issueWorkerContracts}\nCopy this block verbatim into every worker prompt:\n${issueRules}`;
 				}
 				if (repairWave) {
 					return `Repair this returned pull-request wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh fixer per pull request through OMP workflowz. Do not share a checkout or conversation between items. Copy this block verbatim into every worker prompt:\n${repairRules}`;
@@ -685,7 +882,7 @@ export function actionPrompt(
 					: `Inspect this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue or pull request through OMP workflowz. Do not reuse a worker across repositories. Use ${evidenceTool} and report the object evidence and concrete risks. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
 			case "fix":
 				return allIssues
-					? `Implement this repository wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue through OMP workflowz. Each worker must use its unique target checkout under \`$HOME/worktrees\`; do not share a checkout or conversation between write-capable items. Diagnose each root cause, implement the smallest complete fix, and run focused verification. Copy this block verbatim into every worker prompt:\n${issueRules}`
+						? `Implement this repository wave for ${repository}, opening one review-ready pull request per issue:\n\n${list}\n\n${issueCoordinatorContinuation} Use the \`task\` tool once with one fresh item per issue through OMP workflowz. Each worker must use its unique target checkout under \`$HOME/worktrees\`; do not share a checkout or conversation between write-capable items. Diagnose each root cause, implement the smallest complete fix, and run focused verification. Per-issue strict worker schemas:\n${issueWorkerContracts}\nCopy this block verbatim into every worker prompt:\n${issueRules}`
 					: `Fix this repository wave for ${repository}:\n\n${list}\n\nUse the \`task\` tool once with one fresh item per issue or pull request through OMP workflowz. Each worker must use its unique target checkout under \`$HOME/worktrees\`; do not share a checkout or conversation between write-capable items. Address findings at source, run focused verification, and push repaired heads for independent review. Copy this block verbatim into every worker prompt:\n${reviewRules}`;
 		}
 	}
@@ -703,7 +900,7 @@ export function actionPrompt(
 			return `Review ${cite(action.item)}. Read bounded diffs and recorded pipelines before judging. Report findings by severity with file:line evidence, covering correctness, security, tests, and simplicity. State explicitly what you verified and what you could not. ${reviewFinish}`;
 		case "slay":
 			if (allIssues) {
-				return `Implement ${cite(item)} as an issue. ${slayContinuation} ${issueWorkflow} ${issueEvidence} ${reviewFinish}`;
+				return `Implement ${cite(item)} as an issue. ${slayContinuation} ${issueCoordinatorContinuation} ${issueWorkflow} schemaMode:"strict" outputSchema=${JSON.stringify(issuePrReadyOutputSchema(`${item.repo.toLowerCase()}#${item.id}`))}. ${issueEvidence} ${issueWorkerFinish} ${reviewFinish}`;
 			}
 			if (repairWave) {
 				return `Repair ${cite(item)} after requested changes. Use ${evidenceTool} and read the review threads, then push a corrected head. ${workflow} ${repairFinish}`;
@@ -715,7 +912,7 @@ export function actionPrompt(
 				: `Call ${evidenceTool} for ${cite(item)} and summarize the changed files and concrete risks. ${workflow} ${reviewFinish}`;
 		case "fix":
 			return item.type === "issue"
-				? `Implement ${cite(item)}. ${issueWorkflow} ${issueEvidence} ${reviewFinish}`
+				? `Implement ${cite(item)}. ${issueCoordinatorContinuation} ${issueWorkflow} schemaMode:"strict" outputSchema=${JSON.stringify(issuePrReadyOutputSchema(`${item.repo.toLowerCase()}#${item.id}`))}. ${issueEvidence} ${issueWorkerFinish} ${reviewFinish}`
 				: `Fix ${cite(item)} in its own unique \`$HOME/worktrees\` target checkout. Re-read the live diff and failing checks, diagnose each root cause, run focused verification, and push one clean commit for independent review. ${workflow} ${reviewFinish}`;
 		case "request_reviewer":
 			return `Request review on ${cite(action.item)} from repository collaborators. Use \`gh pr edit ${action.item.id} --repo ${action.item.repo} --add-reviewer <reviewer>\` to assign reviewers and prioritize in their maintainer queue.`;
@@ -860,6 +1057,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let started: Promise<void> = Promise.resolve();
 	const recoveryBatches = new Map<string, PersistedRepositoryBatch>();
 	let activeBatch: PersistedRepositoryBatch | undefined;
+	let issuePrObserverInFlight = false;
 	let batchRequestGeneration = 0;
 	// Local teardown identity distinguishes late callbacks from a restored session
 	// that legitimately reuses the same durable OMP session ID.
@@ -901,6 +1099,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		current !== undefined
 		&& expected.id === current.id
 		&& JSON.stringify([
+			expected.version,
+			expected.issueOutcome,
+			expected.issuePrDeadlineAt,
+			expected.issuePrRepairLimit,
+		expected.issueDispatchPromptedKeys,
 			expected.kind,
 			expected.waves,
 			expected.currentWave,
@@ -923,9 +1126,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			expected.waveReviewerReceipts,
 			expected.waveWriterAgents,
 			expected.issueSubmittedPrs,
+			expected.issueTaskAssignments,
+			expected.issueWorkerReceipts,
+			expected.issuePrReadiness,
 			expected.skippedItems,
 			expected.cancelRequested,
 		]) === JSON.stringify([
+			current.version,
+			current.issueOutcome,
+			current.issuePrDeadlineAt,
+			current.issuePrRepairLimit,
+			current.issueDispatchPromptedKeys,
 			current.kind,
 			current.waves,
 			current.currentWave,
@@ -948,6 +1159,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			current.waveReviewerReceipts,
 			current.waveWriterAgents,
 			current.issueSubmittedPrs,
+			current.issueTaskAssignments,
+			current.issueWorkerReceipts,
+			current.issuePrReadiness,
 			current.skippedItems,
 			current.cancelRequested,
 		]);
@@ -1389,6 +1603,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			const matches = observed.filter((job) => job.type === "task" && job.agentId === worker.agentId && !baseline.has(job.id));
 			return matches.length === 1 ? { ...worker, jobId: matches[0].id } : worker;
 		})]));
+		const issueTaskAssignments = activeBatch.version === 2 ? Object.fromEntries(Object.entries(activeBatch.issueTaskAssignments ?? {}).map(([key, assignment]) => {
+			const worker = workers[assignment.toolCallId]?.find((candidate) => candidate.agentId === assignment.agentId);
+			return [key, worker?.jobId && assignment.jobId !== worker.jobId ? { ...assignment, jobId: worker.jobId } : assignment];
+		})) : undefined;
 		const mapped = new Set(Object.values(workers).flatMap((workers) => workers.flatMap((worker) => worker.jobId ? [worker.jobId] : [])));
 		const associated = observed.filter((job) => mapped.has(job.id));
 		const ids = [...new Set([...(activeBatch.waveJobIds ?? []), ...associated.map((job) => job.id)])].sort();
@@ -1402,8 +1620,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const resources = activeBatch.kind === "diff" || !wave
 			? []
 			: [...new Set(wave.items.flatMap((item) => [`repo:${item.repo.toLowerCase()}`, `item:${item.repo.toLowerCase()}#${item.id}`]))].sort();
-		if (JSON.stringify(activeBatch.waveTaskWorkers ?? {}) === JSON.stringify(workers) && JSON.stringify(activeBatch.waveJobIds ?? []) === JSON.stringify(ids) && JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) === JSON.stringify(terminal) && JSON.stringify(activeBatch.waveEffectResources ?? []) === JSON.stringify(resources)) return;
-		persistBatch(ctx, { ...activeBatch, waveTaskWorkers: workers, waveJobIds: ids, waveTerminalJobStatuses: terminal, waveEffectResources: resources });
+		const issueAssignmentsChanged = activeBatch.version === 2 && JSON.stringify(activeBatch.issueTaskAssignments ?? {}) !== JSON.stringify(issueTaskAssignments);
+		if (JSON.stringify(activeBatch.waveTaskWorkers ?? {}) === JSON.stringify(workers) && !issueAssignmentsChanged && JSON.stringify(activeBatch.waveJobIds ?? []) === JSON.stringify(ids) && JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) === JSON.stringify(terminal) && JSON.stringify(activeBatch.waveEffectResources ?? []) === JSON.stringify(resources)) return;
+		persistBatch(ctx, { ...activeBatch, waveTaskWorkers: workers, ...(issueTaskAssignments ? { issueTaskAssignments } : {}), waveJobIds: ids, waveTerminalJobStatuses: terminal, waveEffectResources: resources });
 	};
 	// OMP 18.4 task details expose the primary async job id directly. Persist it
 	// immediately for single-spawn calls instead of racing the transient job
@@ -1430,10 +1649,77 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		}
 		if (JSON.stringify(state) !== JSON.stringify(activeBatch.waveReviewerReceipts) || JSON.stringify([...writers]) !== JSON.stringify(activeBatch.waveWriterAgents ?? [])) persistBatch(ctx, { ...activeBatch, waveReviewerReceipts: state, waveWriterAgents: [...writers] });
 	};
+	const rememberIssueWorkerReceipt = (ctx: CtxLike, input: { toolCallId?: string; agentId?: string; jobId?: string; status?: string; schema?: unknown }): void => {
+		const batch = activeBatch;
+		if (!batch || batch.version !== 2 || batch.issueOutcome !== "pr-ready" || input.status !== "completed" || !isRecord(input.schema)
+			|| input.schema.source !== "caller" || input.schema.mode !== "strict" || input.schema.status !== "valid" || !isRecord(input.schema.data)) return;
+		const matches = Object.entries(batch.issueTaskAssignments ?? {}).filter(([, assignment]) => assignment.agentId === input.agentId
+			&& (input.toolCallId === undefined || assignment.toolCallId === input.toolCallId)
+			&& (input.jobId === undefined || assignment.jobId === input.jobId));
+		if (matches.length !== 1) return;
+		const [issueKey, assignment] = matches[0]!;
+		if (input.jobId !== undefined && assignment.jobId !== input.jobId) return;
+		const data = issueWorkerData(input.schema.data, issueKey);
+		if (!data || data.outcome === "pr-ready" && data.blocker) return;
+		const priorReadiness = batch.issuePrReadiness?.[issueKey];
+		if (assignment.attempt > 0) {
+			const prior = priorReadiness?.pullRequest;
+			if (!prior || data.outcome !== "pr-ready" || !data.pullRequest || data.pullRequest.number !== prior.number || data.pullRequest.url !== prior.url
+				|| data.pullRequest.branch !== prior.branch || data.pullRequest.baseRef !== prior.baseRef || data.pullRequest.baseSha !== prior.baseSha || data.pullRequest.headSha === prior.headSha) {
+				const reason = `same-PR repair receipt is stale or changed PR identity for ${issueKey}; preserve UNKNOWN and claims`;
+				persistBatch(ctx, { ...batch, issuePrReadiness: { ...batch.issuePrReadiness, [issueKey]: { ...priorReadiness!, issueKey, state: "unknown", reason } } });
+				return;
+			}
+		}
+		const receipt: PersistedIssueWorkerReceipt = {
+			...data,
+			issueKey,
+			toolCallId: assignment.toolCallId,
+			agentId: assignment.agentId,
+			...(input.jobId ? { jobId: input.jobId } : {}),
+			assignmentDigest: assignment.assignmentDigest,
+			resultDigest: promptDigest(JSON.stringify(input.schema.data)),
+			deliveredAt: Date.now(),
+			attempt: assignment.attempt,
+		};
+		const issueWorkerReceipts = { ...batch.issueWorkerReceipts, [issueKey]: receipt };
+		const repairedPullRequest = assignment.attempt > 0 && priorReadiness?.pullRequest && receipt.pullRequest
+			? { ...priorReadiness.pullRequest, headSha: receipt.pullRequest.headSha, mergeSha: undefined }
+			: undefined;
+		const issuePrReadiness = {
+			...batch.issuePrReadiness,
+			[issueKey]: receipt.outcome === "pr-ready" ? {
+				issueKey,
+				state: "waiting" as const,
+				workerReceiptDigest: receipt.resultDigest,
+				...(repairedPullRequest ? { pullRequest: repairedPullRequest } : {}),
+				admittedAt: batch.startedAt,
+				deadlineAt: batch.issuePrDeadlineAt!,
+				observationCount: priorReadiness?.observationCount ?? 0,
+				repairCount: assignment.attempt,
+			} : {
+				issueKey,
+				state: "unknown" as const,
+				reason: receipt.blocker || "worker reported blocked without a concrete reason",
+				admittedAt: batch.startedAt,
+				deadlineAt: batch.issuePrDeadlineAt!,
+				observationCount: priorReadiness?.observationCount ?? 0,
+				repairCount: assignment.attempt,
+			},
+		};
+		persistBatch(ctx, { ...batch, issueWorkerReceipts, issuePrReadiness });
+	};
 	const rememberTaskResult = (ctx: CtxLike, call: string, result: unknown, delivered = false): void => {
 		rememberReviewerResult(ctx, call, result, delivered);
 		if (!activeBatch?.waveToolCallIds?.includes(call) || !result || typeof result !== "object" || !("details" in result)) return;
 		const details = result.details;
+		if (activeBatch.version === 2 && activeBatch.issueOutcome === "pr-ready" && isRecord(details) && Array.isArray(details.results)) {
+			for (const row of details.results) {
+				if (!isRecord(row) || typeof row.id !== "string" || typeof row.exitCode !== "number") continue;
+				const assignment = Object.values(activeBatch.issueTaskAssignments ?? {}).find((candidate) => candidate.toolCallId === call && candidate.agentId === row.id);
+				if (assignment) rememberIssueWorkerReceipt(ctx, { toolCallId: call, agentId: row.id, jobId: assignment.jobId, status: row.exitCode === 0 ? "completed" : "failed", schema: row.structuredOutput });
+			}
+		}
 		if (!details || typeof details !== "object" || !("async" in details) || !details.async || typeof details.async !== "object" || !("type" in details.async) || details.async.type !== "task" || !("progress" in details) || !Array.isArray(details.progress)) return;
 		const asyncJobId = "jobId" in details.async && typeof details.async.jobId === "string" && details.async.jobId ? details.async.jobId : undefined;
 		const asyncState = "state" in details.async && typeof details.async.state === "string" ? details.async.state : undefined;
@@ -1452,6 +1738,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			...worker,
 			...(workers.length === 1 && asyncJobId ? { jobId: asyncJobId } : {}),
 		}));
+		const issueTaskAssignments = activeBatch.version === 2 ? Object.fromEntries(Object.entries(activeBatch.issueTaskAssignments ?? {}).map(([key, assignment]) => {
+			const worker = assignment.toolCallId === call ? updated.find((candidate) => candidate.agentId === assignment.agentId) : undefined;
+			return [key, worker?.jobId && assignment.jobId !== worker.jobId ? { ...assignment, jobId: worker.jobId } : assignment];
+		})) : undefined;
 		const jobIds = [...new Set([...(activeBatch.waveJobIds ?? []), ...updated.flatMap((worker) => worker.jobId ? [worker.jobId] : [])])].sort();
 		const terminal = { ...(activeBatch.waveTerminalJobStatuses ?? {}) };
 		if (workers.length === 1 && asyncJobId && asyncState !== "running") {
@@ -1459,10 +1749,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			if (status) terminal[asyncJobId] = status;
 		}
 		if (JSON.stringify(previous) !== JSON.stringify(updated)
+			|| activeBatch.version === 2 && JSON.stringify(activeBatch.issueTaskAssignments ?? {}) !== JSON.stringify(issueTaskAssignments)
 			|| JSON.stringify(activeBatch.waveJobIds ?? []) !== JSON.stringify(jobIds)
 			|| JSON.stringify(activeBatch.waveTerminalJobStatuses ?? {}) !== JSON.stringify(terminal)) {
 			persistBatch(ctx, {
 				...activeBatch,
+				...(issueTaskAssignments ? { issueTaskAssignments } : {}),
 				waveTaskWorkers: { ...activeBatch.waveTaskWorkers, [call]: updated },
 				waveJobIds: jobIds,
 				waveTerminalJobStatuses: terminal,
@@ -1476,6 +1768,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		if (!message || typeof message !== "object" || !("customType" in message) || message.customType !== "async-result" || !("details" in message)) return;
 		const details = message.details;
 		if (!details || typeof details !== "object" || !("jobs" in details) || !Array.isArray(details.jobs)) return;
+		if (activeBatch.version === 2 && activeBatch.issueOutcome === "pr-ready") for (const job of details.jobs) {
+			if (!isRecord(job) || job.type !== "task" || job.status !== "completed" || typeof job.agentId !== "string" || typeof job.jobId !== "string") continue;
+			rememberIssueWorkerReceipt(ctx, { agentId: job.agentId, jobId: job.jobId, status: job.status, schema: job.schema });
+		}
 		if (activeBatch.waveOperatorPolicy && activeBatch.waveIdentity && activeBatch.waveReviewerReceipts) {
 			let state = activeBatch.waveReviewerReceipts;
 			for (const admission of Object.values(state.admissions)) state = captureReviewerDelivery(state, { waveIdentity: activeBatch.waveIdentity, subject: admission.subject, toolCallId: admission.toolCallId, details });
@@ -2652,8 +2948,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				.filter((item) => item.type === "issue")
 				.map((item) => [`${item.repo.toLowerCase()}#${item.id}`, [...(item.submittedPrs ?? [])]]),
 		);
+		const issueOutcome = kind !== "diff" && items.length > 0 && items.every((item) => item.type === "issue") ? "pr-ready" as const : undefined;
 		const batch: PersistedRepositoryBatch = {
-			version: 1,
+			version: issueOutcome ? 2 : 1,
+			...(issueOutcome ? { issueOutcome } : {}),
+			...(issueOutcome ? { issuePrDeadlineAt: startedAt + ISSUE_PR_TIMEOUT_MS, issuePrRepairLimit: ISSUE_PR_REPAIR_LIMIT } : {}),
 			id: `batch-${startedAt.toString(36)}-${randomUUID()}`,
 			kind,
 			waves,
@@ -3383,6 +3682,317 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		void openDashboard(ctx).catch((error: unknown) => reportDashboardFailure(ctx, error));
 	};
 
+	const observeIssuePrReadyBatch = async (
+		ctx: CtxLike,
+		batch: PersistedRepositoryBatch,
+		wave: PersistedRepositoryBatch["waves"][number],
+	): Promise<boolean> => {
+		if (issuePrObserverInFlight) return false;
+		issuePrObserverInFlight = true;
+		const updates: Record<string, PersistedIssuePrReadiness> = { ...(batch.issuePrReadiness ?? {}) };
+		const unknown: string[] = [];
+		const active: string[] = [];
+		const repairs: Array<{ item: QueueItem; pr: NonNullable<PersistedIssuePrReadiness["pullRequest"]>; receipt: PersistedIssueWorkerReceipt; failures: string[] }> = [];
+		const reviewers: Array<{ item: QueueItem; pr: NonNullable<PersistedIssuePrReadiness["pullRequest"]> }> = [];
+		const now = Date.now();
+		const issueItems = wave.items.filter((item) => item.type === "issue");
+		const currentWave = () => activeBatch?.id === batch.id && activeBatch.currentWave === batch.currentWave
+			&& activeBatch.waveIdentity === batch.waveIdentity && activeBatch.issueOutcome === "pr-ready"
+			&& activeBatch.state === "running" && !activeBatch.waveExit && !activeBatch.cancelRequested;
+		const unknownState = (item: QueueItem, reason: string, prior?: PersistedIssuePrReadiness, pr?: PersistedIssuePrReadiness["pullRequest"], observation?: HostedChecksObservation) => {
+			const key = item.repo.toLowerCase() + "#" + item.id;
+			updates[key] = {
+				...(prior ?? {}),
+				issueKey: key,
+				state: "unknown",
+				reason,
+				...(pr ? { pullRequest: pr } : {}),
+				...(observation ? { observation } : {}),
+				admittedAt: prior?.admittedAt ?? batch.startedAt,
+				deadlineAt: batch.issuePrDeadlineAt!,
+				observationCount: prior?.observationCount ?? 0,
+				repairCount: prior?.repairCount ?? 0,
+			};
+			unknown.push(key + ": " + reason);
+		};
+		try {
+			if (!batch.issuePrDeadlineAt || now >= batch.issuePrDeadlineAt) {
+				for (const item of issueItems) unknownState(item, "the original PR-ready observation deadline expired; claims require explicit reconciliation");
+				const error = "Issue PR-ready is UNKNOWN: " + unknown.join("; ");
+				if (currentWave()) {
+					persistBatch(ctx, { ...activeBatch!, issuePrReadiness: updates, state: "blocked", error });
+					notifyUser(ctx, error, "warning");
+				}
+				return false;
+			}
+
+			const missingAssignments = issueItems.filter((item) => !batch.issueTaskAssignments?.[item.repo.toLowerCase() + "#" + item.id]);
+			if (missingAssignments.length > 0) {
+				const prompted = new Set(batch.issueDispatchPromptedKeys ?? []);
+				const next = missingAssignments.filter((item) => !prompted.has(item.repo.toLowerCase() + "#" + item.id));
+				if (next.length > 0 && currentWave()) {
+					const keys = next.map((item) => item.repo.toLowerCase() + "#" + item.id);
+					const contracts = next.map((item) => "- " + item.repo + "#" + item.id + ": unique writable worker name, exact issue key in task text, schemaMode:\"strict\", outputSchema=" + JSON.stringify(issuePrReadyOutputSchema(item.repo.toLowerCase() + "#" + item.id))).join("\n");
+					const prompt = "Continue only the still-unassigned issue items from the original PR-ready wave. Do not repeat any admitted task, create another PR for an assigned issue, merge, approve, or expand scope. Dispatch one bounded task per listed issue with the strict receipt schema below; Review has already recorded the original budget and ownership.\n" + contracts + "\nReturn after dispatch; Review will continue the bounded lifecycle.";
+					persistBatch(ctx, { ...activeBatch!, issueDispatchPromptedKeys: [...prompted, ...keys], error: "Waiting for exact worker assignments for " + keys.join(", ") });
+					try { pi.sendUserMessage(prompt, { deliverAs: "followUp", waveId: batch.id + ":" + batch.currentWave }); }
+					catch (error) {
+						const reason = "issue task follow-up delivery is uncertain; do not resend blindly: " + (error instanceof Error ? error.message : String(error));
+						if (activeBatch?.id === batch.id) persistBatch(ctx, { ...activeBatch, state: "blocked", error: reason });
+						notifyUser(ctx, reason, "warning");
+					}
+					return false;
+				}
+				for (const item of missingAssignments) {
+					const key = item.repo.toLowerCase() + "#" + item.id;
+					updates[key] = updates[key] ?? {
+						issueKey: key, state: "waiting", reason: "waiting for the remaining admitted worker task; duplicate dispatch remains fenced",
+						admittedAt: batch.startedAt, deadlineAt: batch.issuePrDeadlineAt!, observationCount: 0, repairCount: 0,
+					};
+					active.push(key);
+				}
+				if (currentWave()) persistBatch(ctx, { ...activeBatch!, issuePrReadiness: updates, state: "running", error: "Waiting for remaining admitted issue workers" });
+				return false;
+			}
+
+			const tokenOptions = mode.tokenOptions();
+			const liveIssues = await fetchItemsByKey(issueItems.map((item) => item.repo + "#" + item.id), "issues", tokenOptions);
+			if (!currentWave()) return false;
+			if (liveIssues.error || liveIssues.items.length !== issueItems.length) {
+				for (const item of issueItems) unknownState(item, liveIssues.error ?? "the selected issue disappeared during PR-ready observation", updates[item.repo.toLowerCase() + "#" + item.id]);
+				const error = "Issue PR-ready is UNKNOWN: " + unknown.join("; ");
+				persistBatch(ctx, { ...activeBatch!, issuePrReadiness: updates, state: "blocked", error });
+				notifyUser(ctx, error, "warning");
+				return false;
+			}
+
+			const hosted = new BatchGitHub(tokenOptions.token ?? resolveToken(env), options.fetchImpl);
+			for (const issue of issueItems) {
+				const key = issue.repo.toLowerCase() + "#" + issue.id;
+				const prior = updates[key] ?? batch.issuePrReadiness?.[key];
+				const receipt = batch.issueWorkerReceipts?.[key];
+				const assignment = batch.issueTaskAssignments?.[key];
+				if (!receipt || receipt.outcome !== "pr-ready" || !receipt.pullRequest || !assignment
+					|| receipt.issueKey !== key || receipt.toolCallId !== assignment.toolCallId || receipt.agentId !== assignment.agentId
+					|| receipt.jobId !== assignment.jobId || receipt.assignmentDigest !== assignment.assignmentDigest || receipt.attempt !== assignment.attempt) {
+					unknownState(issue, "exact delivered worker-result/PR association is missing or contradictory", prior);
+					continue;
+				}
+				if (prior?.state === "unknown") {
+					unknownState(issue, prior.reason ?? "acceptance remains unverified", prior);
+					continue;
+				}
+				if ((prior?.observationCount ?? 0) >= 100) {
+					unknownState(issue, "the bounded hosted-check observation budget of 100 is exhausted; retain claims for explicit reconciliation", prior, prior.pullRequest, prior.observation);
+					continue;
+				}
+				if (prior?.state === "repair-required" && prior.repairPromptSentAt !== undefined && assignment.attempt <= receipt.attempt) {
+					updates[key] = prior;
+					active.push(key);
+					continue;
+				}
+
+				const liveIssue = liveIssues.items.find((candidate) => candidate.repo.toLowerCase() === issue.repo.toLowerCase() && candidate.id === issue.id);
+				const submissions = liveIssue ? expectedIssueSubmission(batch, issue, liveIssue) : undefined;
+				const submitted = submissions?.length === 1 ? parseSubmittedPrReference(submissions[0]!) : undefined;
+				if (!submitted || submitted.repo !== issue.repo.toLowerCase() || submitted.number !== receipt.pullRequest.number || submitted.url !== receipt.pullRequest.url) {
+					unknownState(issue, "GitHub issue linkage does not match this issue's exact delivered worker result", prior);
+					continue;
+				}
+				const prResult = await fetchItemsByKey([submitted.repo + "#" + submitted.number], "prs", tokenOptions);
+				if (!currentWave()) return false;
+				const pr = prResult.items.length === 1 ? prResult.items[0] : undefined;
+				if (prResult.error || !pr || pr.repo.toLowerCase() !== submitted.repo || pr.id !== submitted.number || pr.url !== submitted.url
+					|| pr.draft || !pr.githubId || !pr.headRef || !pr.baseRef || !pr.baseSha || !pr.defaultBranch
+					|| pr.headRepo?.toLowerCase() !== submitted.repo || pr.baseRepo?.toLowerCase() !== submitted.repo
+					|| pr.headSha !== receipt.pullRequest.headSha || pr.headRef !== receipt.pullRequest.branch
+					|| pr.baseRef !== receipt.pullRequest.baseRef || pr.baseSha !== receipt.pullRequest.baseSha) {
+					unknownState(issue, prResult.error ?? "live PR identity, repository, target branch, base SHA, or head SHA contradicts the worker receipt", prior);
+					continue;
+				}
+				const retainMergeSha = prior?.pullRequest?.headSha === pr.headSha && prior.pullRequest.baseSha === pr.baseSha
+					? prior.pullRequest.mergeSha : undefined;
+				const owned: NonNullable<PersistedIssuePrReadiness["pullRequest"]> = {
+					repo: pr.repo, number: pr.id, url: pr.url, nodeId: pr.githubId!, branch: pr.headRef!,
+					headSha: pr.headSha!, baseRef: pr.baseRef!, baseSha: pr.baseSha!,
+					...(retainMergeSha ? { mergeSha: retainMergeSha } : {}),
+				};
+				if (prior?.pullRequest && (prior.pullRequest.nodeId !== owned.nodeId || prior.pullRequest.repo.toLowerCase() !== owned.repo.toLowerCase()
+					|| prior.pullRequest.number !== owned.number || prior.pullRequest.url !== owned.url || prior.pullRequest.branch !== owned.branch
+					|| prior.pullRequest.baseRef !== owned.baseRef || prior.pullRequest.baseSha !== owned.baseSha
+					|| prior.pullRequest.headSha !== owned.headSha && receipt.attempt === 0)) {
+					unknownState(issue, "owned PR identity or target changed without an admitted same-PR repair", prior, owned);
+					continue;
+				}
+
+				const reviewerSubject: ReviewSubject = { repository: owned.repo.toLowerCase(), number: owned.number, headSha: owned.headSha };
+				const reviewerReceipt = batch.waveReviewerReceipts && batch.waveIdentity
+					? getDeliveredReviewerReceipt(batch.waveReviewerReceipts, { waveIdentity: batch.waveIdentity, subject: reviewerSubject, excludedAgentIds: batch.waveWriterAgents })
+					: undefined;
+				const cleanReviewer = reviewerReceipt?.verdict === "clean" ? reviewerReceipt : undefined;
+				if (prior?.state === "review-required" && prior.reviewerPromptSentAt !== undefined && !cleanReviewer && !reviewerReceipt) {
+					const reviewerDeadline = prior.reviewerDeadlineAt ?? Math.min(batch.issuePrDeadlineAt, prior.reviewerPromptSentAt + 5 * 60_000);
+					if (now >= reviewerDeadline) unknownState(issue, "trusted independent exact-head acceptance review did not return a clean receipt before its bounded deadline", prior, owned, prior.observation);
+					else {
+						updates[key] = { ...prior, pullRequest: owned, reviewerDeadlineAt: reviewerDeadline, nextObservationAt: reviewerDeadline };
+						active.push(key);
+					}
+					continue;
+				}
+				if (prior?.state === "waiting" && prior.nextObservationAt !== undefined && now < prior.nextObservationAt
+					&& prior.workerReceiptDigest === receipt.resultDigest) {
+					updates[key] = { ...prior, pullRequest: owned };
+					active.push(key);
+					continue;
+				}
+
+				let observation: HostedChecksObservation;
+				try {
+					const request: OwnedPullRequest = { repository: owned.repo, identity: owned.nodeId, number: owned.number, url: owned.url,
+						branch: owned.branch, headSha: owned.headSha, baseRef: owned.baseRef, baseSha: owned.baseSha, ...(owned.mergeSha ? { mergeSha: owned.mergeSha } : {}) };
+					observation = await hosted.observeHostedChecks(owned.repo, request, new Date(now).toISOString(), pr.defaultBranch);
+				} catch (error) {
+					unknownState(issue, "hosted check observation failed: " + (error instanceof Error ? error.message : String(error)), prior, owned);
+					continue;
+				}
+				if (!currentWave() || activeBatch?.issueWorkerReceipts?.[key]?.resultDigest !== receipt.resultDigest) return false;
+				if (observation.mergeSha !== undefined && !/^[a-f0-9]{40}$/.test(observation.mergeSha)) {
+					unknownState(issue, "GitHub returned a malformed current synthetic merge identity", prior, owned, observation);
+					continue;
+				}
+				if (owned.mergeSha !== undefined && observation.mergeSha !== owned.mergeSha) {
+					unknownState(issue, "the retained synthetic merge identity changed for the same exact PR head/base", prior, owned, observation);
+					continue;
+				}
+				const observedOwned = observation.mergeSha ? { ...owned, mergeSha: observation.mergeSha } : owned;
+				const observationCount = (prior?.observationCount ?? 0) + 1;
+				const nextDelay = Math.min(5 * 60_000, 60_000 * (2 ** Math.min(observationCount - 1, 2)));
+				const baseReadiness = {
+					issueKey: key, pullRequest: observedOwned, workerReceiptDigest: receipt.resultDigest,
+					admittedAt: prior?.admittedAt ?? batch.startedAt, deadlineAt: batch.issuePrDeadlineAt!,
+					observationCount, repairCount: prior?.repairCount ?? 0,
+				};
+				if (observation.result === "pending") {
+					updates[key] = { ...baseReadiness, state: "waiting", observation, nextObservationAt: Math.min(now + nextDelay, batch.issuePrDeadlineAt!) };
+					active.push(key);
+					continue;
+				}
+				if (observation.result === "unknown") {
+					if (observation.reason === "GitHub returned no declared required-check policy" && observation.policyFingerprint) {
+						unknownState(issue, "no required hosted-check policy is declared; worker-reported local commands and acceptance text do not prove PR-ready", prior, observedOwned, observation);
+						continue;
+					}
+					if (observation.retryAfter && Date.parse(observation.retryAfter) > now) {
+						updates[key] = { ...baseReadiness, state: "waiting", observation, reason: observation.reason, nextObservationAt: Math.min(Date.parse(observation.retryAfter), batch.issuePrDeadlineAt!) };
+						active.push(key);
+						continue;
+					}
+					unknownState(issue, observation.reason ?? "hosted-check policy/source/subject evidence is unknown", prior, observedOwned, observation);
+					continue;
+				}
+				if (observation.result === "failed") {
+					const failures = observation.failures ?? [];
+					const repairable = failures.length > 0 && failures.every((failure) => isRecord(failure)
+						&& failure.classification === "repairable-code" && failure.candidateHead === owned.headSha && failure.annotationsComplete === true
+						&& isRecord(failure.checkRun) && Number.isSafeInteger(failure.checkRun.id));
+					const failureKey = promptDigest(failures.map((failure) => isRecord(failure) && typeof failure.key === "string" ? failure.key : "").sort().join("\n"));
+					if (!repairable || failures.some((failure) => !isRecord(failure) || typeof failure.key !== "string")
+						|| baseReadiness.repairCount >= batch.issuePrRepairLimit! || prior?.failureKey === failureKey) {
+						unknownState(issue, "hosted checks failed without complete current source-bound repair diagnostics or the original repair limit is exhausted", prior, observedOwned, observation);
+						continue;
+					}
+					updates[key] = { ...baseReadiness, state: "repair-required", observation, failureKey,
+						repairPromptSentAt: now, reason: observation.reason ?? "current required check failed with complete diagnostics" };
+					repairs.push({ item: issue, pr: owned, receipt, failures: failures.map((failure) => isRecord(failure) && isRecord(failure.checkRun) && typeof failure.checkRun.name === "string" ? failure.checkRun.name : "current required check") });
+					active.push(key);
+					continue;
+				}
+				if (observation.result === "passed") {
+					if (observation.coverage !== "complete" || !observation.policyFingerprint || !observation.eligibleSubject
+						|| observation.headSha !== owned.headSha
+						|| observation.eligibleSubject.sha !== (observation.eligibleSubject.subject === "head" ? owned.headSha : observedOwned.mergeSha)) {
+						unknownState(issue, "passing CI lacks complete current-subject policy coverage", prior, observedOwned, observation);
+						continue;
+					}
+					if (reviewerReceipt?.verdict === "findings") {
+						const findings = reviewerReceipt.payload.findings;
+						const actionable = findings.length > 0 && findings.length <= 20 && findings.every((finding) =>
+							finding.title.trim() && finding.body.trim() && finding.file.trim() && Number.isSafeInteger(finding.line) && finding.line > 0);
+						const failureKey = promptDigest(JSON.stringify(findings));
+						if (!actionable || baseReadiness.repairCount >= batch.issuePrRepairLimit! || prior?.failureKey === failureKey) {
+							unknownState(issue, "independent exact-head reviewer returned findings that are not actionable within the original repair bound", prior, observedOwned, observation);
+							continue;
+						}
+						updates[key] = { ...baseReadiness, state: "repair-required", observation, failureKey, repairPromptSentAt: now,
+							reason: "trusted independent exact-head reviewer returned actionable findings" };
+						const repairFindings = findings.map((finding) => JSON.stringify({ file: finding.file, line: finding.line, title: finding.title, body: finding.body }));
+						repairs.push({ item: issue, pr: observedOwned, receipt, failures: repairFindings });
+						active.push(key);
+						continue;
+					}
+					if (cleanReviewer) {
+						updates[key] = { ...baseReadiness, state: "ready", observation };
+						continue;
+					}
+					const trust = reviewerTrust();
+					if (!trust.trusted) {
+						unknownState(issue, "trusted read-only reviewer is unavailable: " + trust.reason, prior, observedOwned, observation);
+						continue;
+					}
+					if (prior?.reviewerPromptSentAt !== undefined) {
+						const reviewerDeadline = prior.reviewerDeadlineAt ?? Math.min(batch.issuePrDeadlineAt!, prior.reviewerPromptSentAt + 5 * 60_000);
+						if (now >= reviewerDeadline) unknownState(issue, "independent exact-head acceptance review did not return a clean receipt before its bounded deadline", prior, owned, observation);
+						else {
+							updates[key] = { ...baseReadiness, state: "review-required", observation, reviewerPromptSentAt: prior.reviewerPromptSentAt, reviewerDeadlineAt: reviewerDeadline, nextObservationAt: reviewerDeadline };
+							active.push(key);
+						}
+						continue;
+					}
+					const reviewerDeadlineAt = Math.min(batch.issuePrDeadlineAt!, now + 5 * 60_000);
+					updates[key] = { ...baseReadiness, state: "review-required", observation, reviewerPromptSentAt: now, reviewerDeadlineAt, nextObservationAt: reviewerDeadlineAt };
+					reviewers.push({ item: issue, pr: owned });
+					active.push(key);
+				}
+			}
+
+			if (!currentWave()) return false;
+			const allReady = issueItems.every((item) => updates[item.repo.toLowerCase() + "#" + item.id]?.state === "ready");
+			const hasActiveFollowUp = Object.values(updates).some((readiness) => ["waiting", "repair-required", "repairing", "review-required"].includes(readiness.state));
+			const state: RepositoryBatchState = unknown.length > 0 && !hasActiveFollowUp ? "blocked" : "running";
+			const error = unknown.length > 0 ? "Issue PR-ready has unresolved evidence: " + unknown.join("; ") : undefined;
+			persistBatch(ctx, { ...activeBatch!, issuePrReadiness: updates, state, error });
+			if (state === "blocked" && error) notifyUser(ctx, error, "warning");
+
+			if (repairs.length > 0 || reviewers.length > 0) {
+				const repairText = repairs.map(({ item, pr, receipt, failures }) =>
+					"- " + item.repo + "#" + item.id + " -> same PR " + pr.url + " at " + pr.headSha + "; current actionable failures: " + failures.join(", ")
+					+ ". The worker receipt is task " + receipt.toolCallId + "/" + receipt.agentId + "; do not open another PR or touch another issue. Use one fresh named writable worker with the exact strict output schema for " + item.repo.toLowerCase() + "#" + item.id + ".").join("\n");
+				const reviewerText = reviewers.map(({ item, pr }) => {
+					const subject = { repository: pr.repo.toLowerCase(), number: pr.number, headSha: pr.headSha };
+					return "- " + item.repo + "#" + item.id + " -> PR " + pr.url + " at " + pr.headSha + "; review the complete issue acceptance criteria, exact PR diff, and hosted-check evidence. Worker-reported commands/results are hints, not proof. Use one fresh trusted read-only reviewer with schemaMode:\"strict\", no tools override, and outputSchema=" + JSON.stringify(createReviewerOutputSchema(subject)) + ".";
+				}).join("\n");
+				const prompt = "Continue the original admitted PR-ready issue wave. Do not broaden scope, merge, approve, or publish a release.\n"
+					+ (repairText ? "\nSame-PR repairs required:\n" + repairText : "")
+					+ (reviewerText ? "\nIndependent exact-head acceptance reviews required:\n" + reviewerText : "")
+					+ "\nReturn bounded task results; Review will revalidate the exact PR/head and hosted checks. Do not sleep or poll.";
+				try {
+					pi.sendUserMessage(prompt, { deliverAs: "followUp", waveId: batch.id + ":" + batch.currentWave });
+				} catch (errorValue) {
+					const latest = activeBatch;
+					if (latest?.id === batch.id) {
+						const reason = "bounded PR-ready follow-up delivery is uncertain; preserve claims and do not resend blindly: " + (errorValue instanceof Error ? errorValue.message : String(errorValue));
+						persistBatch(ctx, { ...latest, state: "blocked", error: reason });
+						notifyUser(ctx, reason, "warning");
+					}
+					return false;
+				}
+			}
+			return allReady && state === "running";
+		} finally {
+			issuePrObserverInFlight = false;
+		}
+	};
+
 	const advanceRepositoryBatch = async (ctx: CtxLike) => {
 		if (!activeBatch || (activeBatch.state !== "running" && !(activeBatch.state === "paused" && activeBatch.cancelRequested))) return;
 		if (activeBatch.waveExit) return;
@@ -3415,6 +4025,52 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			await drainCancelledBatch(ctx, activeBatch);
 			return;
 		}
+			if (activeBatch.version === 2 && activeBatch.issueOutcome === "pr-ready") {
+				const issues = wave.items.filter((item) => item.type === "issue");
+				const missingAssignments = issues.filter((item) => !activeBatch!.issueTaskAssignments?.[`${item.repo.toLowerCase()}#${item.id}`]);
+				if (missingAssignments.length > 0) {
+					if (Date.now() >= (activeBatch.issuePrDeadlineAt ?? 0)) {
+						const error = `Issue PR-ready is UNKNOWN: no exact worker assignment was admitted for ${missingAssignments.map((item) => `${item.repo}#${item.id}`).join(", ")}; keep claims for explicit reconciliation`;
+						persistBatch(ctx, { ...activeBatch, state: "blocked", error });
+						notifyUser(ctx, error, "warning");
+						return;
+					}
+					const prompted = new Set(activeBatch.issueDispatchPromptedKeys ?? []);
+					const next = missingAssignments.filter((item) => !prompted.has(`${item.repo.toLowerCase()}#${item.id}`));
+					const issuePrReadiness = { ...activeBatch.issuePrReadiness };
+					for (const item of missingAssignments) {
+						const key = `${item.repo.toLowerCase()}#${item.id}`;
+						issuePrReadiness[key] ??= { issueKey: key, state: "waiting", reason: "awaiting an exact per-issue worker assignment", admittedAt: activeBatch.startedAt, deadlineAt: activeBatch.issuePrDeadlineAt!, observationCount: 0, repairCount: 0 };
+					}
+					if (next.length > 0) {
+						const keys = next.map((item) => `${item.repo.toLowerCase()}#${item.id}`);
+					const contracts = next.map((item) => `- ${item.repo}#${item.id}: task text must include this issue key, with schemaMode:"strict" and outputSchema=${JSON.stringify(issuePrReadyOutputSchema(`${item.repo.toLowerCase()}#${item.id}`))}`).join("\n");
+						const prompt = `Continue only the still-unassigned issues in the original PR-ready wave. Do not repeat an assigned issue, open duplicate PRs, merge, approve, or expand scope. Dispatch one bounded task per listed issue using the exact contract below. Review will retain the original budget and verify the returned worker/PR association.\n${contracts}\nReturn after dispatch; do not sleep or poll.`;
+						persistBatch(ctx, { ...activeBatch, issueDispatchPromptedKeys: [...prompted, ...keys], issuePrReadiness, error: `Waiting for exact worker assignments for ${keys.join(", ")}` });
+						try { pi.sendUserMessage(prompt, { deliverAs: "followUp", waveId: `${activeBatch.id}:${activeBatch.currentWave}` }); }
+						catch (errorValue) {
+							const error = `Issue worker follow-up delivery is uncertain; preserve claims and do not resend blindly: ${errorValue instanceof Error ? errorValue.message : String(errorValue)}`;
+							persistBatch(ctx, { ...activeBatch!, state: "blocked", error });
+							notifyUser(ctx, error, "warning");
+						}
+					} else persistBatch(ctx, { ...activeBatch, issuePrReadiness, error: `Waiting for the previously requested worker assignments for ${missingAssignments.map((item) => `${item.repo}#${item.id}`).join(", ")}` });
+					return;
+				}
+				const missingReceipt = issues.filter((item) => {
+					const key = `${item.repo.toLowerCase()}#${item.id}`;
+					const receipt = activeBatch!.issueWorkerReceipts?.[key];
+					return !receipt || receipt.issueKey !== key || receipt.outcome !== "pr-ready" || !receipt.pullRequest
+						|| !receipt.toolCallId || !receipt.agentId;
+				});
+				if (missingReceipt.length > 0) {
+					const keys = missingReceipt.map((item) => `${item.repo}#${item.id}`).join(", ");
+					const error = `issue PR-ready outcome remains UNKNOWN: exact delivered worker-result/PR attribution is unavailable for ${keys}; keep claims and inspect the original task receipt`;
+					persistBatch(ctx, { ...activeBatch, state: "blocked", error });
+					notifyUser(ctx, error, "warning");
+					return;
+				}
+				if (!await observeIssuePrReadyBatch(ctx, activeBatch, wave)) return;
+			}
 		if (activeBatch.kind === "slay" && wave.items.every((item) => item.type === "pr")) {
 			const live = await fetchItemsByKey(
 				wave.items.map((item) => `${item.repo}#${item.id}`),
@@ -3488,7 +4144,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const completedItems = activeBatch.completedItems + wave.items.length;
 		if (nextWave >= activeBatch.waves.length) {
 			persistBatch(ctx, { ...activeBatch, currentWave: nextWave, completedItems, state: "complete" });
-			notifyUser(ctx, activeBatch.kind === "slay" ? "Slay complete" : "Repository run complete", "info");
+			notifyUser(ctx, activeBatch.issueOutcome === "pr-ready" ? "Issue wave PR-ready" : activeBatch.kind === "slay" ? "Slay complete" : "Repository run complete", "info");
 			return;
 		}
 		const pauseNextWave = mode.paused;
@@ -3592,6 +4248,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		// session that refreshes itself.
 		every(QUEUE_POLL_MS, () => {
 			void refreshQueue(ctx);
+		});
+		every(ISSUE_PR_OBSERVE_MS, () => {
+			const batch = activeBatch;
+			if (!batch || batch.version !== 2 || batch.issueOutcome !== "pr-ready" || batch.state !== "running" || batch.waveExit) return;
+			if (!Object.values(batch.issuePrReadiness ?? {}).some((readiness) => ["waiting", "repair-required", "review-required", "repairing"].includes(readiness.state))) return;
+			void advanceRepositoryBatch(ctx).catch((error: unknown) => reportDashboardFailure(ctx, error));
 		});
 
 		// Detached: nothing awaits this, so an escaping rejection would take the
@@ -3722,11 +4384,38 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const { toolCallId, toolName, input } = event as { toolCallId?: string; toolName?: string; input?: unknown };
 		const batchActive = activeBatch && ["running", "paused", "blocked"].includes(activeBatch.state);
 		if (toolCallId && activeCtx) rememberToolInvocation(activeCtx, toolCallId);
+		if (toolName === "task" && toolCallId && activeBatch?.state === "running" && activeCtx && activeBatch.version === 2 && activeBatch.issueOutcome === "pr-ready") {
+			const batch = activeBatch;
+			const issueTasks = isRecord(input) && Array.isArray(input.tasks) ? input.tasks : [input];
+			const reviewerOnly = issueTasks.length > 0 && issueTasks.every((task) => isRecord(task) && task.agent === "reviewer");
+			if (!reviewerOnly) {
+				const admitted = issueTaskAssignmentsForCall(batch, toolCallId, input);
+				if (admitted.reason || !admitted.assignments) return { block: true, reason: `Review issue PR-ready guard: ${admitted.reason ?? "task-to-issue association is unknown"}` };
+				if (activeBatch?.id !== batch.id || activeBatch.waveIdentity !== batch.waveIdentity || activeBatch.waveExit) return { block: true, reason: "Review issue PR-ready wave changed during task admission" };
+				const issuePrReadiness = { ...(activeBatch.issuePrReadiness ?? {}) };
+				let repairAdmitted = false;
+				for (const [key, assignment] of Object.entries(admitted.assignments)) {
+					const previous = activeBatch.issueTaskAssignments?.[key];
+					if (previous && assignment.attempt > previous.attempt) {
+						const readiness = issuePrReadiness[key];
+						if (!readiness || readiness.state !== "repair-required" || readiness.repairPromptSentAt === undefined
+							|| readiness.repairCount >= activeBatch.issuePrRepairLimit!) return { block: true, reason: `Review issue PR-ready repair admission was already consumed or exhausted for ${key}` };
+						issuePrReadiness[key] = { ...readiness, state: "repairing" };
+						repairAdmitted = true;
+					}
+				}
+				persistBatch(activeCtx, { ...activeBatch, issueTaskAssignments: admitted.assignments, ...(repairAdmitted ? { issuePrReadiness } : {}) });
+			}
+		}
 		if (toolName === "task" && toolCallId && activeBatch?.state === "running" && activeCtx) {
-			const ids = [...new Set([...(activeBatch.waveToolCallIds ?? []), toolCallId])].sort();
-			persistBatch(activeCtx, { ...activeBatch, waveToolCallIds: ids });
+			const taskItems = isRecord(input) && Array.isArray(input.tasks) ? input.tasks : [input];
+			const issueReviewerCall = activeBatch.version === 2 && activeBatch.issueOutcome === "pr-ready"
+				&& taskItems.length > 0 && taskItems.every((task) => isRecord(task) && task.agent === "reviewer");
+			if (!issueReviewerCall) {
+				const ids = [...new Set([...(activeBatch.waveToolCallIds ?? []), toolCallId])].sort();
+				persistBatch(activeCtx, { ...activeBatch, waveToolCallIds: ids });
+			}
 			if (activeBatch.waveOperatorPolicy && activeBatch.waveIdentity && isRecord(input)) {
-				const taskItems = Array.isArray(input.tasks) ? input.tasks : [input];
 				const reviewerItems = taskItems.filter((item) => isRecord(item) && item.agent === "reviewer");
 				if (reviewerItems.length > 0) {
 					if (taskItems.length !== 1 || !isRecord(reviewerItems[0])) return { block: true, reason: "Review requires one named, subject-bound reviewer per task invocation" };
@@ -3739,7 +4428,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 					const subject: ReviewSubject = { repository, number, headSha };
 					const batch = activeBatch;
 					if (batch.waveWriterAgents?.includes(task.name) || Object.values(batch.waveReviewerReceipts?.admissions ?? {}).some((admitted) => admitted.agentId === task.name && admitted.toolCallId !== toolCallId)) return { block: true, reason: "Review requires a fresh reviewer identity; fixers and earlier reviewers cannot be reused" };
-					if (!batch.waves[batch.currentWave]?.items.some((item) => item.type === "pr" && item.repo.toLowerCase() === repository && item.id === number)) return { block: true, reason: "Reviewer subject is outside the admitted wave" };
+					const directPrSubject = batch.waves[batch.currentWave]?.items.some((item) => item.type === "pr" && item.repo.toLowerCase() === repository && item.id === number);
+					const issuePrSubject = batch.version === 2 && batch.issueOutcome === "pr-ready"
+						&& Object.values(batch.issuePrReadiness ?? {}).some((readiness) => readiness.state === "review-required"
+							&& readiness.pullRequest?.repo.toLowerCase() === repository && readiness.pullRequest.number === number && readiness.pullRequest.headSha === headSha);
+					if (!directPrSubject && !issuePrSubject) return { block: true, reason: "Reviewer subject is outside the admitted wave or its exact linked issue PR head" };
 					const trust = reviewerTrust();
 					if (!trust.trusted) return { block: true, reason: `Review reviewer definition is unavailable: ${trust.reason}` };
 					const live = await fetchItemsByKey([`${repository}#${number}`], "prs", mode.tokenOptions());

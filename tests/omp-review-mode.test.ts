@@ -36,6 +36,7 @@ import {
 	HANDOFF_ENTRY,
 	GENERIC_WORKBENCH_POLICY,
 	actionPrompt,
+	issuePrReadyOutputSchema,
 	createReviewExtension as createReviewExtensionImpl,
 	NOTICE_ENTRY,
 	taskSchemaSupportsStructuredOutput,
@@ -445,6 +446,102 @@ function issueBackedFetch(states) {
 	};
 }
 
+function issuePrHostedFetch(states, pullRequest, checkRun) {
+	const issueFetch = issueBackedFetch(states);
+	const requestedCheckShas = [];
+	pullRequest.requestedCheckShas = requestedCheckShas;
+	const response = (body) => ({ ok: true, status: 200, statusText: "OK", headers: { get: () => null }, json: async () => body });
+	const prNode = () => ({
+		id: pullRequest.identity, number: pullRequest.number, title: "issue implementation", url: pullRequest.url,
+		updatedAt: new Date(NOW).toISOString(), isDraft: false, mergeable: "MERGEABLE", reviewDecision: "REVIEW_REQUIRED",
+		headRefOid: pullRequest.headSha, headRefName: pullRequest.branch, baseRefName: pullRequest.baseRef, baseRefOid: pullRequest.baseSha,
+		headRepository: { nameWithOwner: pullRequest.repository }, baseRepository: { nameWithOwner: pullRequest.repository },
+		changedFiles: 1, files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "src/fix.ts" }] },
+		author: { login: "maintainer" }, repository: { nameWithOwner: pullRequest.repository }, labels: { nodes: [] },
+		commits: { nodes: [{ commit: { statusCheckRollup: null, checkSuites: { pageInfo: { hasNextPage: false }, nodes: [{ status: checkRun.status.toUpperCase(), conclusion: checkRun.conclusion?.toUpperCase() ?? null }] } } }] },
+	});
+	return async (url, init) => {
+		const target = String(url);
+		if (target.includes("/graphql")) {
+			const body = JSON.parse(String(init?.body ?? "{}"));
+			if (body.variables?.search !== undefined) return issueFetch(url, init);
+			const fileQuery = /pullRequest\(number: (\d+)\)/.exec(body.query);
+			if (fileQuery) return response({ data: { w0: { nameWithOwner: pullRequest.repository, pullRequest: {
+				number: pullRequest.number, closed: false, headRefOid: pullRequest.headSha, baseRefOid: pullRequest.baseSha, changedFiles: 1,
+				files: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ path: "src/fix.ts" }] },
+			} } } });
+			const original = await issueFetch(url, init);
+			const payload = await original.json();
+			const data = { ...payload.data };
+			const aliases = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
+			for (const [, alias, owner, repo, number] of body.query.matchAll(aliases)) {
+				if (`${owner}/${repo}`.toLowerCase() !== pullRequest.repository.toLowerCase() || Number(number) !== pullRequest.number) continue;
+				data[alias] = { defaultBranchRef: { name: "main" }, issueOrPullRequest: prNode() };
+			}
+			return response({ ...payload, data });
+		}
+		if (target === `https://api.github.com/repos/${pullRequest.repository}/pulls/${pullRequest.number}`) return response({
+			id: pullRequest.databaseId, node_id: pullRequest.identity, number: pullRequest.number, html_url: pullRequest.url,
+			state: "open", merged: false, draft: false,
+			head: { ref: pullRequest.branch, sha: pullRequest.headSha, repo: { full_name: pullRequest.repository } },
+			base: { ref: pullRequest.baseRef, sha: pullRequest.baseSha, repo: { full_name: pullRequest.repository } },
+			merge_commit_sha: pullRequest.mergeSha ?? null,
+		});
+		if (target === `https://api.github.com/repos/${pullRequest.repository}/branches/${encodeURIComponent(pullRequest.baseRef)}/protection/required_status_checks`) {
+			return response({ strict: true, contexts: [], checks: [{ context: "unit", app_id: 42 }] });
+		}
+		if (target.startsWith(`https://api.github.com/repos/${pullRequest.repository}/rulesets?`)) return response([]);
+		const checkRequest = new RegExp(`^https://api\\.github\\.com/repos/${pullRequest.repository}/commits/([a-f0-9]{40})/check-runs\\?per_page=100$`).exec(target);
+		if (checkRequest) {
+			const sha = checkRequest[1];
+			requestedCheckShas.push(sha);
+			const expectedSha = checkRun.subject === "merge" ? pullRequest.mergeSha : pullRequest.headSha;
+			if (sha !== expectedSha) return response({ total_count: 0, check_runs: [] });
+			return response({ total_count: 1, check_runs: [{
+				id: 501, name: "unit", head_sha: sha, status: checkRun.status, conclusion: checkRun.conclusion,
+				created_at: new Date(NOW).toISOString(), started_at: new Date(NOW - 1000).toISOString(),
+				app: { id: 42, slug: "review-ci" }, check_suite: { id: 500 },
+			}] });
+		}
+		return issueFetch(url, init);
+	};
+}
+
+async function deliverIssuePrReadyWorker(pi, ctx, { issueKey, pullRequest, toolCallId, agentId, jobId, headSha = pullRequest.headSha }) {
+	const task = `Implement ${issueKey} in its admitted checkout. Keep ${pullRequest.url} on branch ${pullRequest.branch} and report exact head ${headSha}.`;
+	await pi.events.get("tool_call")({ toolName: "task", toolCallId, input: { tasks: [{
+		agent: "fixer", name: agentId, task, schemaMode: "strict", outputSchema: issuePrReadyOutputSchema(issueKey),
+	}] } }, ctx);
+	ctx.asyncJobs.recent = [{ id: jobId, agentId, type: "task", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("tool_execution_end")({ toolCallId, isError: false, result: { details: {
+		async: { type: "task", state: "completed", jobId }, progress: [{ id: agentId, index: 0, status: "completed" }], results: [],
+	} } }, ctx);
+	const data = {
+		issueKey, outcome: "pr-ready",
+		pullRequest: { number: pullRequest.number, url: pullRequest.url, branch: pullRequest.branch, headSha, baseRef: pullRequest.baseRef, baseSha: pullRequest.baseSha },
+		checks: [{ command: "npm test", exitCode: 0 }],
+		acceptance: { summary: "Acceptance evidence recorded", criteria: [{ id: "behavior", evidence: "Worker-reported evidence is untrusted." }] },
+		blocker: "",
+	};
+	await deliverTaskResults(pi, ctx, [jobId], [{ jobId, type: "task", agentId, status: "completed", schema: { source: "caller", mode: "strict", status: "valid", data } }]);
+}
+
+async function deliverIssueReviewer(pi, ctx, { issueKey, pullRequest, toolCallId, agentId, verdict, findings = [] }) {
+	const subject = { repository: pullRequest.repository.toLowerCase(), number: pullRequest.number, headSha: pullRequest.headSha };
+	await pi.events.get("tool_call")({ toolName: "task", toolCallId, input: {
+		agent: "reviewer", name: agentId, task: `Review ${issueKey} at ${subject.headSha}.`, schemaMode: "strict", outputSchema: createReviewerOutputSchema(subject),
+	} }, ctx);
+	const data = { ...subject, verdict, findings, summary: verdict === "clean" ? "Exact-head acceptance review is clean." : "Review found a source-bound actionable issue." };
+	await pi.events.get("tool_execution_end")({ toolCallId, isError: false, result: { details: {
+		progress: [{ id: agentId, index: 0, agent: "reviewer", agentSource: "user", status: "completed" }],
+		results: [{ id: agentId, agent: "reviewer", agentSource: "user", exitCode: 0, structuredOutput: { source: "caller", mode: "strict", status: "valid", data } }],
+	} } }, ctx);
+}
+
+function issueTaskInput(issueKey, name, task = `Implement ${issueKey} in its admitted checkout.`) {
+	return { tasks: [{ agent: "fixer", name, task, schemaMode: "strict", outputSchema: issuePrReadyOutputSchema(issueKey) }] };
+}
+
 function recoveredPrSlayFetch(items, effects, options = {}) {
 	const queueNodes = () => items.filter((item) => effects[item.id]?.state === "OPEN").map((item) => ({
 		number: item.id,
@@ -618,8 +715,8 @@ function savedReviewNoticeText(pi) {
  * only when that component calls `done`. Resolving immediately would hide a
  * session-start handler that blocks OMP.
  */
-function observeTask(pi, ctx, id, call = `call-${id}`) {
-	pi.events.get("tool_call")({ toolCallId: call, toolName: "task", input: { isolated: false } }, ctx);
+function observeTask(pi, ctx, id, call = `call-${id}`, input = { isolated: false }) {
+	if (input !== null) pi.events.get("tool_call")({ toolCallId: call, toolName: "task", input }, ctx);
 	for (const job of [...ctx.asyncJobs.running, ...ctx.asyncJobs.recent]) {
 		if (job.id === id) { job.agentId = id; job.type = "task"; }
 	}
@@ -2130,6 +2227,80 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	assert.ok(frame().some((row) => row.includes("comment")), "help lists supported actions");
 	assert.ok(frame().some((row) => row.includes("slay")), "help exposes mass autoreview");
 });
+
+test("dashboard defaults to a selected-item Inspector and labels global roots SESSION TRACE", (t) => {
+	const mode = new ReviewMode({ org: "projectbluefin", env: { ...ISOLATED_ENV } });
+	mode.items = [
+		queueItem({ id: 17, type: "issue", repo: "projectbluefin/review", title: "selected issue", url: "https://github.com/projectbluefin/review/issues/17" }),
+		queueItem({ id: 44, type: "pr", repo: "projectbluefin/other", title: "unrelated pull request", url: "https://github.com/projectbluefin/other/pull/44", headSha: "4".repeat(40), ciStatus: "success" }),
+	];
+	mode.session.startTurn(NOW);
+	mode.session.startTool("issue-trace", "bash", { command: "issue-17-local-check" }, NOW + 1);
+	mode.session.endTool("issue-trace", "failed", true, NOW + 2);
+	mode.session.endTurn(NOW + 3);
+	mode.session.startTurn(NOW + 100);
+	mode.session.startTool("pr-trace", "bash", { command: "unrelated-pr-44-check" }, NOW + 101);
+	mode.session.endTool("pr-trace", "failed", true, NOW + 102);
+	mode.session.endTurn(NOW + 103);
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+	t.after(() => dashboard.dispose());
+
+	const inspector = dashboard.render(160).join("\n");
+	assert.match(inspector, /INSPECTOR projectbluefin\/review#17/);
+	assert.match(inspector, /Item-specific local verification\/activity: not observed/i);
+	assert.doesNotMatch(inspector, /issue-17-local-check|unrelated-pr-44-check/, "session activity is not attributed to the selected issue");
+
+	dashboard.handleInput("t");
+	const sessionTrace = dashboard.render(160).join("\n");
+	assert.match(sessionTrace, /SESSION TRACE/);
+	assert.match(sessionTrace, /issue-17-local-check/);
+	assert.match(sessionTrace, /unrelated-pr-44-check/);
+	assert.doesNotMatch(sessionTrace, /SESSION TRACE projectbluefin\/review#17/);
+
+	dashboard.handleInput("t");
+	dashboard.handleInput("j");
+	const nextInspector = dashboard.render(160).join("\n");
+	assert.match(nextInspector, /INSPECTOR projectbluefin\/other#44/);
+	assert.doesNotMatch(nextInspector, /issue-17-local-check|unrelated-pr-44-check/);
+});
+
+test("Inspector keeps the last successful queue age when a refresh fails on head A", async (t) => {
+	const item = queueItem({ id: 42, type: "pr", repo: "projectbluefin/review", headSha: "a".repeat(40), ciStatus: "success" });
+	let failRefresh = false;
+	const successFetch = githubQueueFetch([item]);
+	const fetchImpl = async (url, init) => failRefresh
+		? { ok: false, status: 503, statusText: "Unavailable", json: async () => ({}) }
+		: successFetch(url, init);
+	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl, env: { ...ISOLATED_ENV } });
+	mode.setToken("token");
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+	t.after(() => dashboard.dispose());
+	const actualNow = Date.now;
+	let now = NOW;
+	Date.now = () => now;
+	try {
+		const first = await mode.refreshQueue();
+		assert.equal(first.error, undefined);
+		const observedAt = mode.fetchedAt;
+		assert.equal(mode.lastSuccessfulFetchedAt, observedAt);
+		assert.equal(mode.items[0]?.headSha, "a".repeat(40));
+
+		now += 120_000;
+		failRefresh = true;
+		const failed = await mode.refreshQueue();
+		assert.match(failed.error ?? "", /503|Unavailable/);
+		assert.ok(mode.fetchedAt > observedAt, "the failed attempt retains its own attempt timestamp");
+		assert.equal(mode.lastSuccessfulFetchedAt, observedAt, "a failed refresh cannot advance successful-observation age");
+		assert.equal(mode.items[0]?.headSha, "a".repeat(40), "cached selected head A remains visible");
+		const inspector = dashboard.render(160).join("\n");
+		assert.match(inspector, /last successful queue observation: 2m0s ago/i);
+		assert.match(inspector, /latest refresh failed/i);
+		assert.match(inspector, new RegExp("Head: " + "a".repeat(40)));
+	} finally {
+		Date.now = actualNow;
+	}
+});
+
 test("dashboard interactive search live-filters and selects items by title", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -3076,8 +3247,8 @@ test("dashboard browser failure names an issue accurately", async () => {
 	assert.match(browserCard, /Open this link in your browser/);
 	assert.ok(issueRows.length <= ctx.overlays[0].rows, "the warning card and focused issue fit the narrow dashboard");
 	const queueIndex = issueRows.findIndex((line) => /QUEUE/.test(line));
-	const traceIndex = issueRows.findIndex((line) => /TRACE/.test(line));
-	const visibleQueue = issueRows.slice(queueIndex + 1, traceIndex > queueIndex ? traceIndex : issueRows.length);
+	const inspectorIndex = issueRows.findIndex((line) => /INSPECTOR/.test(line));
+	const visibleQueue = issueRows.slice(queueIndex + 1, inspectorIndex > queueIndex ? inspectorIndex : issueRows.length);
 	assert.ok(visibleQueue.some((line) => /#43/.test(line)), "the issue stays visible under its browser recovery card");
 	assert.doesNotMatch(savedReviewNoticeText(pi), /Couldn’t open the pull request/);
 	assert.equal(ctx.pasted.length, 0, "issue browser failure does not alter draft text");
@@ -3321,7 +3492,7 @@ test("GitHub autoslay repairs returned pull requests before implementing issue w
 	assert.equal(batch.completedItems, 2);
 });
 
-test("host Alt-S uses issue autoslay and blocks without a submitted pull request", async () => {
+test("host Alt-S uses versioned issue admission and keeps missing exact worker results UNKNOWN", async () => {
 	const node = {
 		number: 77,
 		title: "repair existing behavior",
@@ -3350,12 +3521,16 @@ test("host Alt-S uses issue autoslay and blocks without a submitted pull request
 	pi.shortcuts.get("alt+s").handler(ctx);
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.match(pi.messages[0], /Implement projectbluefin\/review#77/);
-	ctx.asyncJobs.recent = [{ id: "issue", status: "completed", startTime: Date.now() + 1 }];
-	observeTask(pi, ctx, "issue");
+	ctx.asyncJobs.recent = [{ id: "issue", agentId: "IssueWorker", type: "task", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "issue", "call-issue", issueTaskInput("projectbluefin/review#77", "IssueWorker"));
+	await deliverTaskResults(pi, ctx, ["issue"]);
 	await pi.events.get("agent_end")({}, ctx);
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.equal(batch.state, "blocked");
-	assert.match(batch.error, /no pull request was submitted/);
+	assert.equal(batch.version, 2);
+	assert.match(batch.error, /UNKNOWN.*exact delivered worker-result\/PR attribution/i);
+	assert.equal(batch.issueWorkerReceipts?.["projectbluefin/review#77"], undefined);
+	assert.equal(new ResourceClaims(ISOLATED_ENV.LUNA_FACTORY_STATE_ROOT, ISOLATED_ENV.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
 
 
@@ -4795,25 +4970,25 @@ test("comment batches revalidate later heads and retain partial receipts", async
 });
 
 test("pinned OMP agent_end advances repository waves only after final settlement", async () => {
-	const items = {
-		"projectbluefin/a#1": { title: "a one", submittedPrs: [] },
-		"projectbluefin/a#2": { title: "a two", submittedPrs: [] },
-		"projectbluefin/b#3": { title: "b one", submittedPrs: [] },
-	};
+	const items = [1, 2].map((id) => queueItem({ id, repo: "projectbluefin/a", title: `a ${id}`, author: "maintainer", headSha: String(id).repeat(40), ciStatus: "success", reviewState: "approved" }))
+		.concat([queueItem({ id: 3, repo: "projectbluefin/b", title: "b one", author: "maintainer", headSha: "3".repeat(40), ciStatus: "success", reviewState: "approved" })]);
+	const effects = Object.fromEntries(items.map((item) => [item.id, { state: "OPEN", merged: false, headSha: item.headSha, autoMerge: false, reviewDecision: "APPROVED", reviews: [] }]));
+	const fetchImpl = recoveredPrSlayFetch(items, effects);
+	fetchImpl.reviewItems = items;
 	const pi = fakeHost();
-	pi.flagValues.set("issues", true);
+	pi.flagValues.set("issues", false);
 	const ctx = fakeCtx();
 	ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, {
 		org: "projectbluefin",
-		fetchImpl: issueBackedFetch(items),
+		fetchImpl,
 		env: ISOLATED_ENV,
 	});
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 	const dashboard = ctx.overlays[0];
 	dashboard.handleInput("A");
-	dashboard.handleInput("s");
+	dashboard.handleInput("f");
 	await new Promise((resolve) => setImmediate(resolve));
 
 	assert.equal(pi.messages.length, 1);
@@ -4834,7 +5009,7 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	await pi.events.get("turn_end")({}, ctx);
 	const captured = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
 	assert.deepEqual(captured.waveJobIds, ["worker-1", "worker-2"], "staggered workers are accumulated by exact wave identity");
-	assert.match(pi.messages[0], /Implement this repository wave for projectbluefin\/a, opening one review-ready pull request per issue/);
+	assert.match(pi.messages[0], /projectbluefin\/a/);
 	assert.match(pi.messages[0], /projectbluefin\/a/);
 	assert.doesNotMatch(pi.messages[0], /projectbluefin\/b/);
 
@@ -4861,8 +5036,8 @@ test("pinned OMP agent_end advances repository waves only after final settlement
 	assert.match(pi.messages[1], /projectbluefin\/b/);
 	assert.doesNotMatch(pi.messages[1], /projectbluefin\/a/);
 
-	ctx.asyncJobs.recent = [{ id: "issue-wave-2", status: "completed", startTime: Date.now() + 1 }];
-	observeTask(pi, ctx, "issue-wave-2");
+	ctx.asyncJobs.recent = [{ id: "pr-wave-2", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "pr-wave-2");
 	await pi.events.get("agent_end")({}, ctx);
 	const batches = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).map((entry) => entry.data);
 	assert.equal(batches.at(-1).state, "complete");
@@ -5171,7 +5346,7 @@ test("tool invocation without a job keeps the Review claims UNKNOWN", async () =
 
 test("a started job without terminal evidence remains an unaccounted UNKNOWN worker", async () => {
 	const fixture = await preToolFailureFixture();
-	fixture.pi.events.get("tool_call")({ toolCallId: "task-call", toolName: "task", input: { isolated: false } }, fixture.ctx);
+	fixture.pi.events.get("tool_call")({ toolCallId: "task-call", toolName: "task", input: issueTaskInput("projectbluefin/review#77", "Worker") }, fixture.ctx);
 	fixture.ctx.asyncJobs.running = [{ id: "job-1", agentId: "Worker", type: "task", status: "running", startTime: Date.now() }];
 	fixture.pi.events.get("tool_result")({ toolCallId: "task-call", details: {
 		async: { type: "task", state: "running", jobId: "job-1" },
@@ -5607,7 +5782,7 @@ test("restart uses persisted terminal evidence for one Factory retry", async () 
 });
 
 
-async function interruptedIssueSlay(states) {
+async function interruptedIssueSlay(states, { legacy = false } = {}) {
 	const env = { ...ISOLATED_ENV };
 	const pi = fakeHost();
 	pi.flagValues.set("issues", true);
@@ -5618,10 +5793,16 @@ async function interruptedIssueSlay(states) {
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	pi.events.get("tool_call")({ toolCallId: "issue-worker", toolName: "task", input: { isolated: false } }, ctx);
+	if (legacy) {
+		batch.version = 1;
+		for (const field of ["issueOutcome", "issuePrDeadlineAt", "issuePrRepairLimit", "issueDispatchPromptedKeys", "issueTaskAssignments", "issueWorkerReceipts", "issuePrReadiness"]) delete batch[field];
+		saveWave(env.LUNA_FACTORY_CLAIMS_ROOT, batch);
+	}
+	const taskInput = legacy ? { isolated: false } : issueTaskInput("projectbluefin/review#77", "IssueWorker");
+	pi.events.get("tool_call")({ toolCallId: "issue-worker", toolName: "task", input: taskInput }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["issue-worker"];
-	ctx.asyncJobs.recent = [{ id: "issue-worker", status: "completed", startTime: Date.now() + 1 }];
-	observeTask(pi, ctx, "issue-worker", "issue-worker");
+	ctx.asyncJobs.recent = [{ id: "issue-worker", agentId: "IssueWorker", type: "task", status: "completed", startTime: Date.now() + 1 }];
+	observeTask(pi, ctx, "issue-worker", "issue-worker", null);
 	await pi.events.get("turn_end")({}, ctx);
 	// Simulate abrupt process loss: no graceful shutdown lifecycle was delivered.
 	return { env, entries: pi.entries, batch };
@@ -5979,7 +6160,7 @@ for (const delivery of ["message_start", "tool_result"]) test(`issue Slay retain
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	pi.events.get("tool_call")({ toolCallId: "call-123", toolName: "task", input: { isolated: false } }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "call-123", toolName: "task", input: issueTaskInput("projectbluefin/review#77", "FixIssue") }, ctx);
 	ctx.asyncJobs.running = [{ id: "FixIssue", agentId: "FixIssue", type: "task", status: "running", startTime: Date.now() }];
 	await pi.events.get("tool_execution_end")({ toolCallId: "call-123", result: { details: {
 		async: { type: "task", state: "running", jobId: "FixIssue" },
@@ -5991,8 +6172,13 @@ for (const delivery of ["message_start", "tool_result"]) test(`issue Slay retain
 	ctx.asyncJobs.recent = [];
 	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
 	await pi.events.get("agent_end")({}, ctx);
-	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
-	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "blocked", "a linked PR without a delivered result cannot complete a versioned issue wave");
+	assert.equal(batch.issueTaskAssignments["projectbluefin/review#77"].toolCallId, "call-123");
+	assert.equal(batch.issueTaskAssignments["projectbluefin/review#77"].agentId, "FixIssue");
+	assert.equal(batch.issueTaskAssignments["projectbluefin/review#77"].jobId, "FixIssue");
+	assert.equal(batch.waveTaskWorkers["call-123"][0].jobId, "FixIssue", "the native worker/job identity survives consumed output");
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 	assert.equal(pi.messages.length, 1, "the worker is never replayed");
 });
 
@@ -6005,7 +6191,7 @@ test("OMP 18.4 primary async job id survives without a transient job snapshot", 
 	const ctx = fakeCtx(); ctx.ui.parent = ctx;
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-	pi.events.get("tool_call")({ toolCallId: "direct-call", toolName: "task", input: { isolated: false } }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "direct-call", toolName: "task", input: issueTaskInput("projectbluefin/review#77", "DirectWorker") }, ctx);
 	ctx.asyncJobs.running = [];
 	ctx.asyncJobs.recent = [];
 	await pi.events.get("tool_execution_end")({ toolCallId: "direct-call", result: { details: {
@@ -6020,7 +6206,11 @@ test("OMP 18.4 primary async job id survives without a transient job snapshot", 
 	assert.deepEqual(recorded.waveTerminalJobStatuses, { "DirectWorker-2": "completed" });
 	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
 	await pi.events.get("agent_end")({}, ctx);
-	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
+	const finished = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(finished.state, "blocked", "the primary async job id is not a structured issue result or PR-ready proof");
+	assert.equal(finished.issueTaskAssignments["projectbluefin/review#77"].jobId, "DirectWorker-2");
+	assert.equal(finished.issueWorkerReceipts?.["projectbluefin/review#77"], undefined);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
 
 test("Review recovers a consumed worker from host evidence without session entries", async () => {
@@ -6049,7 +6239,7 @@ test("Review recovers a consumed worker from host evidence without session entri
 	assert.equal(restarted.messages.length, 0);
 });
 
-for (const count of [1, 8]) test(`packaged OMP current pin delivers and evicts ${count} Slay workers without losing Review evidence`, { skip: !process.env.REVIEW_OMP_SOURCE }, async () => {
+for (const count of [1, 8]) test(`packaged OMP current pin delivers and evicts ${count} issue workers without fabricating PR-ready evidence`, { skip: !process.env.REVIEW_OMP_SOURCE }, async () => {
 	const Manager = await loadPackagedJobManager(process.env.REVIEW_OMP_SOURCE!);
 	const states = Object.fromEntries(Array.from({ length: count }, (_, index) => [`projectbluefin/review#${77 + index}`, { title: `real manager ${index}`, submittedPrs: [] }]));
 	const env = { ...ISOLATED_ENV };
@@ -6065,7 +6255,14 @@ for (const count of [1, 8]) test(`packaged OMP current pin delivers and evicts $
 		await manager.getJob(baselineId).promise;
 		const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 		await pi.events.get("session_start")({}, ctx); await review.whenStarted();
-		pi.events.get("tool_call")({ toolCallId: "real-call", toolName: "task", input: { isolated: false } }, ctx);
+		const admitted = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+		const issueItems = admitted.waves[admitted.currentWave].items;
+		assert.equal(issueItems.length, count);
+		const taskInput = { tasks: issueItems.map((item, index) => {
+			const issueKey = `${item.repo.toLowerCase()}#${item.id}`;
+			return { agent: "fixer", name: `RealWorker${index}`, task: `Implement ${issueKey} in its admitted checkout.`, schemaMode: "strict", outputSchema: issuePrReadyOutputSchema(issueKey) };
+		}) };
+		pi.events.get("tool_call")({ toolCallId: "real-call", toolName: "task", input: taskInput }, ctx);
 		const pending = Array.from({ length: count }, () => Promise.withResolvers<string>());
 		const progress = pending.map((_, index) => ({ id: `RealWorker${index}`, index, status: "running" }));
 		const jobIds = pending.map((done, index) => manager.register("task", progress[index].id, () => done.promise, { id: progress[index].id, agentId: progress[index].id }));
@@ -6086,8 +6283,18 @@ for (const count of [1, 8]) test(`packaged OMP current pin delivers and evicts $
 		assert.equal(manager.getRecentJobs(5).filter((job) => jobIds.includes(job.id)).length, 0, "the real manager evicts consumed results");
 		for (let index = 0; index < count; index++) states[`projectbluefin/review#${77 + index}`].submittedPrs = [`projectbluefin/review#${10 + index}`];
 		await pi.events.get("agent_end")({}, ctx);
-		assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
-		assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+		const settled = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+		assert.equal(settled.state, "blocked", "native job delivery and issue links do not replace structured per-issue PR-ready results");
+		assert.deepEqual(settled.waveJobIds, [...jobIds].sort(), "all evicted worker jobs remain attributed to this Review wave");
+		for (const [index, item] of issueItems.entries()) {
+			const assignment = settled.issueTaskAssignments[`${item.repo.toLowerCase()}#${item.id}`];
+			assert.equal(assignment.toolCallId, "real-call");
+			assert.equal(assignment.agentId, `RealWorker${index}`);
+			assert.equal(assignment.jobId, jobIds[index]);
+		}
+		assert.equal(settled.issueWorkerReceipts, undefined, "evicted worker results without caller-strict data cannot mint a receipt");
+		assert.match(settled.error, /UNKNOWN.*exact delivered worker-result\/PR attribution/i);
+		assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, count + 1);
 		assert.equal(pi.messages.length, 1);
 	} finally { await manager.dispose(); }
 });
@@ -6142,8 +6349,8 @@ test("one task fan-out retains every sibling job independently across consumptio
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
 	pi.events.get("tool_call")({ toolName: "task", toolCallId: "fan-out", input: { tasks: [
-		{ task: "first", isolated: false },
-		{ task: "second", isolated: false },
+		{ agent: "fixer", name: "First", task: "Implement projectbluefin/review#77 first.", schemaMode: "strict", outputSchema: issuePrReadyOutputSchema("projectbluefin/review#77") },
+		{ agent: "fixer", name: "Second", task: "Implement projectbluefin/review#78 second.", schemaMode: "strict", outputSchema: issuePrReadyOutputSchema("projectbluefin/review#78") },
 	] } }, ctx);
 	ctx.asyncJobs.running = ["First", "Second"].map((agentId) => ({ id: `${agentId}-2`, agentId, type: "task", status: "running", startTime: Date.now() }));
 	pi.events.get("tool_result")({ toolName: "task", toolCallId: "fan-out", details: {
@@ -6161,15 +6368,266 @@ test("one task fan-out retains every sibling job independently across consumptio
 	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
 	states["projectbluefin/review#78"].submittedPrs = ["projectbluefin/review#11"];
 	await pi.events.get("agent_end")({}, ctx);
-	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
-	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+	const settled = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(settled.state, "blocked", "fan-out settlement is not exact per-issue PR-ready evidence");
+	assert.deepEqual(settled.issueTaskAssignments, {
+		"projectbluefin/review#77": { issueKey: "projectbluefin/review#77", toolCallId: "fan-out", agentId: "First", assignmentDigest: settled.issueTaskAssignments["projectbluefin/review#77"].assignmentDigest, attempt: 0, jobId: "First-2" },
+		"projectbluefin/review#78": { issueKey: "projectbluefin/review#78", toolCallId: "fan-out", agentId: "Second", assignmentDigest: settled.issueTaskAssignments["projectbluefin/review#78"].assignmentDigest, attempt: 0, jobId: "Second-2" },
+	});
+	assert.deepEqual(settled.waveTaskWorkers, { "fan-out": [{ agentId: "First", jobId: "First-2" }, { agentId: "Second", jobId: "Second-2" }] });
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 3);
+});
+
+for (const kind of ["slay", "fix"]) test(`new issue ${kind} admission is versioned before PR-ready follow-through`, async () => {
+	const states = { "projectbluefin/review#77": { title: `new ${kind} issue`, submittedPrs: [] } };
+	const env = { ...ISOLATED_ENV };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	if (kind === "slay") await pi.commands.get("review").handler("slay", ctx);
+	else {
+		ctx.overlays[0].handleInput("A");
+		ctx.overlays[0].handleInput("f");
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+	}
+	const admitted = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(admitted?.version, 2, "new PR-ready work must carry its admitted outcome version");
+	assert.equal(admitted?.issueOutcome, "pr-ready");
+});
+
+for (const kind of ["slay", "fix"]) test(`new issue ${kind} does not adopt a linked PR without its exact delivered worker receipt`, async () => {
+	const states = { "projectbluefin/review#77": { title: `unattributed ${kind} PR`, submittedPrs: [] } };
+	const env = { ...ISOLATED_ENV };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	if (kind === "slay") await pi.commands.get("review").handler("slay", ctx);
+	else {
+		ctx.overlays[0].handleInput("A");
+		ctx.overlays[0].handleInput("f");
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+	}
+	const admitted = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(admitted?.version, 2);
+	const toolCallId = `issue-${kind}-worker-call`;
+	const jobId = `issue-${kind}-worker-job`;
+	await pi.events.get("tool_call")({
+		toolName: "task", toolCallId,
+		input: { tasks: [{ name: "IssueWorker77", agent: "fixer", task: "Implement projectbluefin/review#77", schemaMode: "strict", outputSchema: issuePrReadyOutputSchema("projectbluefin/review#77") }] },
+	}, ctx);
+	ctx.asyncJobs.recent = [{ id: jobId, agentId: "IssueWorker77", type: "task", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("tool_execution_end")({ toolCallId, isError: false, result: { details: {
+		async: { type: "task", state: "completed", jobId },
+		progress: [{ id: "IssueWorker77", index: 0, status: "completed" }],
+		results: [],
+	} } }, ctx);
+	await deliverTaskResults(pi, ctx, [jobId], [{
+		jobId, type: "task", agentId: "UnrelatedWorker", status: "completed",
+		schema: { source: "caller", mode: "strict", status: "valid", data: {
+			issueKey: "projectbluefin/review#77", outcome: "pr-ready",
+			pullRequest: { number: 99, url: "https://github.com/projectbluefin/review/pull/99", branch: "agent/issue-77", headSha: "9".repeat(40), baseRef: "main", baseSha: "b".repeat(40) },
+			checks: [{ command: "pytest", exitCode: 0 }],
+			acceptance: { summary: "Everything passed", criteria: [{ id: "behavior", evidence: "untrusted string" }] }, blocker: "",
+		} },
+	}]);
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#99"];
+	await pi.events.get("agent_end")({}, ctx);
+	const current = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
+	assert.notEqual(current?.state, "complete", "a new issue link without a delivered worker result cannot finish PR-ready work");
+	assert.equal(current?.completedItems, 0);
+	assert.equal(claims.list().length, 2, `ambiguous ownership keeps the original wave claims: ${JSON.stringify({ current, claims: claims.list() })}`);
+	assert.match(current?.error ?? "", /worker receipt|attribution/i);
+	assert.equal(current?.issueWorkerReceipts?.["projectbluefin/review#77"], undefined, "a different native agent id cannot lend its structured result to the assigned worker");
+});
+
+test("issue Slay and Fix workers receive the strict issue/PR/head and acceptance receipt schema", () => {
+	const item = queueItem({ type: "issue", repo: "projectbluefin/review", id: 77, title: "typed issue result", submittedPrs: [] });
+	for (const kind of ["slay", "fix"] as const) {
+		const prompt = actionPrompt({ kind, item }) ?? "";
+		assert.match(prompt, /schemaMode["` ]*[:=]["` ]*strict/i, `${kind} must request strict structured output`);
+		assert.match(prompt, /projectbluefin\/review#77/);
+		assert.match(prompt, /headSha/);
+		assert.match(prompt, /acceptance/);
+		assert.match(prompt, /exitCode/);
+	}
+});
+
+test("legacy v1 PR wave remains loadable after task progress and delivered results", async () => {
+	const item = queueItem({ id: 42, type: "pr", headSha: "4".repeat(40), ciStatus: "success" });
+	const env = { ...ISOLATED_ENV };
+	const pi = fakeHost(); const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: githubQueueFetch([item]), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	ctx.overlays[0].handleInput("f");
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+	const admitted = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(admitted.version, 1);
+	const toolCallId = "legacy-pr-fix-call"; const agentId = "LegacyFixer"; const jobId = "legacy-pr-fix-job";
+	await pi.events.get("tool_call")({ toolName: "task", toolCallId, input: { tasks: [{ name: agentId, agent: "fixer", task: "Fix the exact selected pull request." }] } }, ctx);
+	ctx.asyncJobs.running = [{ id: jobId, agentId, type: "task", status: "running", startTime: Date.now() + 1 }];
+	await pi.events.get("tool_execution_end")({ toolCallId, isError: false, result: { details: { async: { type: "task", state: "running", jobId }, progress: [{ id: agentId, index: 0, status: "running" }] } } }, ctx);
+	ctx.asyncJobs.running = [];
+	ctx.asyncJobs.recent = [{ id: jobId, agentId, type: "task", status: "completed", startTime: Date.now() + 2 }];
+	await pi.events.get("tool_execution_end")({ toolCallId, isError: false, result: { details: { async: { type: "task", state: "completed", jobId }, progress: [{ id: agentId, index: 0, status: "completed" }] } } }, ctx);
+	await deliverTaskResults(pi, ctx, [jobId]);
+	const current = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(current.version, 1);
+	assert.deepEqual(current.waveJobIds, [jobId]);
+	assert.deepEqual(current.waveTaskWorkers[toolCallId], [{ agentId, jobId, resultStatus: "completed" }]);
+	const loaded = loadWave(env.LUNA_FACTORY_CLAIMS_ROOT, `review:${current.waveIdentity}`);
+	assert.ok(loaded, "version-1 PR recovery record remains loadable after normal task callbacks");
+	assert.equal(loaded.version, 1);
+	assert.equal(Object.hasOwn(loaded, "issueTaskAssignments"), false);
+});
+
+test("issue repair assignment consumes repair-required admission before a duplicate task can arrive", async () => {
+	const issueKey = "projectbluefin/review#77";
+	const env = { ...ISOLATED_ENV };
+	const pi = fakeHost(); pi.flagValues.set("issues", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch({ [issueKey]: { title: "repair admission race", submittedPrs: [] } }), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("slay", ctx);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	const pullRequest = { repo: "projectbluefin/review", number: 99, url: "https://github.com/projectbluefin/review/pull/99", nodeId: "PR_node_99", branch: "agent/issue-77", headSha: "9".repeat(40), baseRef: "main", baseSha: "b".repeat(40) };
+	batch.issuePrRepairLimit = 2;
+	batch.issueTaskAssignments = { [issueKey]: { issueKey, toolCallId: "original-call", agentId: "OriginalFixer", assignmentDigest: "a".repeat(64), attempt: 0, jobId: "original-job" } };
+	batch.issuePrReadiness = { [issueKey]: { issueKey, state: "repair-required", pullRequest, admittedAt: batch.startedAt, deadlineAt: batch.issuePrDeadlineAt, observationCount: 1, repairCount: 0, repairPromptSentAt: Date.now(), failureKey: "c".repeat(64) } };
+	saveWave(env.LUNA_FACTORY_CLAIMS_ROOT, batch);
+	const repairTask = (name) => ({ agent: "fixer", name, task: `Repair ${issueKey} only in ${pullRequest.url} at ${pullRequest.headSha}.`, schemaMode: "strict", outputSchema: issuePrReadyOutputSchema(issueKey) });
+	const first = await pi.events.get("tool_call")({ toolName: "task", toolCallId: "repair-call-1", input: repairTask("RepairWorker1") }, ctx);
+	assert.equal(first, undefined);
+	let saved = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(saved.issuePrReadiness[issueKey].state, "repairing", "the first admitted task atomically consumes the repair-required state");
+	assert.equal(saved.issueTaskAssignments[issueKey].attempt, 1);
+	const duplicate = await pi.events.get("tool_call")({ toolName: "task", toolCallId: "repair-call-2", input: repairTask("RepairWorker2") }, ctx);
+	assert.equal(duplicate?.block, true, "a second concurrent same-issue repair is not admitted");
+	saved = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(saved.issueTaskAssignments[issueKey].toolCallId, "repair-call-1");
+	assert.equal(saved.issueTaskAssignments[issueKey].attempt, 1);
+});
+
+test("issue PR-ready observation budget stops at 100 and survives restart with claims retained", async () => {
+	const issueKey = "projectbluefin/review#77";
+	const states = { [issueKey]: { title: "bounded observations", submittedPrs: [] } };
+	const pullRequest = { repository: "projectbluefin/review", number: 99, url: "https://github.com/projectbluefin/review/pull/99", identity: "PR_node_99", databaseId: 99, branch: "agent/issue-77", headSha: "9".repeat(40), baseRef: "main", baseSha: "b".repeat(40) };
+	const env = { ...ISOLATED_ENV };
+	const pi = fakeHost(); pi.flagValues.set("issues", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issuePrHostedFetch(states, pullRequest, { status: "completed", conclusion: "success" }), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("slay", ctx);
+	await deliverIssuePrReadyWorker(pi, ctx, { issueKey, pullRequest, toolCallId: "budget-call", agentId: "BudgetWorker", jobId: "budget-job" });
+	states[issueKey].submittedPrs = ["projectbluefin/review#99"];
+	let batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	batch.issuePrReadiness = { ...batch.issuePrReadiness, [issueKey]: { ...batch.issuePrReadiness[issueKey], state: "waiting", observationCount: 100, nextObservationAt: 0 } };
+	saveWave(env.LUNA_FACTORY_CLAIMS_ROOT, batch);
+	await pi.events.get("agent_end")({}, ctx);
+	batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "blocked");
+	assert.equal(batch.issuePrReadiness[issueKey].state, "unknown");
+	assert.equal(batch.issuePrReadiness[issueKey].observationCount, 100);
+	assert.match(batch.issuePrReadiness[issueKey].reason, /observation budget.*100/i);
+	const owner = `review:${batch.id}:${batch.currentWave}`;
+	assert.equal(loadWave(env.LUNA_FACTORY_CLAIMS_ROOT, owner)?.issuePrReadiness[issueKey].observationCount, 100);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+
+	const restarted = fakeHost(); restarted.flagValues.set("issues", true);
+	const restartedCtx = fakeCtx(); restartedCtx.ui.parent = restartedCtx;
+	restartedCtx.sessionManager = { getBranch: () => pi.entries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) };
+	const restartedReview = createReviewExtension(restarted, { org: "projectbluefin", fetchImpl: issuePrHostedFetch(states, pullRequest, { status: "completed", conclusion: "success" }), env });
+	await restarted.events.get("session_start")({}, restartedCtx); await restartedReview.whenStarted();
+	const recovered = loadWave(env.LUNA_FACTORY_CLAIMS_ROOT, owner);
+	assert.equal(recovered?.state, "blocked");
+	assert.equal(recovered?.issuePrReadiness[issueKey].observationCount, 100);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
+});
+
+for (const kind of ["slay", "fix"] as const) for (const hostedStatus of ["pending", "passed"] as const) test(`new issue ${kind} does not treat ${hostedStatus} CI or worker acceptance strings as full PR-ready proof`, async () => {
+	const issueKey = "projectbluefin/review#77";
+	const states = { [issueKey]: { title: "exact worker receipt", submittedPrs: [] } };
+	const pullRequest = {
+		repository: "projectbluefin/review", number: 99, url: "https://github.com/projectbluefin/review/pull/99",
+		identity: "PR_node_99", databaseId: 99, branch: "agent/issue-77", headSha: "9".repeat(40), baseRef: "main", baseSha: "b".repeat(40),
+	};
+	const env = { ...ISOLATED_ENV };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const checkRun = hostedStatus === "pending" ? { status: "in_progress", conclusion: null } : { status: "completed", conclusion: "success" };
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issuePrHostedFetch(states, pullRequest, checkRun), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	if (kind === "slay") await pi.commands.get("review").handler("slay", ctx);
+	else {
+		ctx.overlays[0].handleInput("A");
+		ctx.overlays[0].handleInput("f");
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+	}
+	const toolCallId = "exact-issue-task-call";
+	const agentId = "IssueWorker77";
+	const jobId = "exact-issue-task-job";
+	const taskPrompt = `Implement ${issueKey} in its admitted target checkout.`;
+	const outputSchema = issuePrReadyOutputSchema(issueKey);
+	await pi.events.get("tool_call")({ toolName: "task", toolCallId, input: {
+		tasks: [{ agent: "fixer", name: agentId, task: taskPrompt, schemaMode: "strict", outputSchema }],
+	} }, ctx);
+	ctx.asyncJobs.recent = [{ id: jobId, agentId, type: "task", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("tool_execution_end")({ toolCallId, isError: false, result: { details: {
+		async: { type: "task", state: "completed", jobId },
+		progress: [{ id: agentId, index: 0, status: "completed" }],
+		results: [],
+	} } }, ctx);
+	const data = {
+		issueKey, outcome: "pr-ready",
+		pullRequest: { number: 99, url: "https://github.com/projectbluefin/review/pull/99", branch: "agent/issue-77", headSha: "9".repeat(40), baseRef: "main", baseSha: "b".repeat(40) },
+		checks: [{ command: "npm test", exitCode: 0 }],
+		acceptance: { summary: "All criteria met; tests verified", criteria: [{ id: "behavior", evidence: "The test passed." }] },
+		blocker: "",
+	};
+	await deliverTaskResults(pi, ctx, [jobId], [{
+		jobId, type: "task", agentId, status: "completed",
+		schema: { source: "caller", mode: "strict", status: "valid", data },
+	}]);
+	states[issueKey].submittedPrs = ["projectbluefin/review#99"];
+	await pi.events.get("agent_end")({}, ctx);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	const receipt = batch.issueWorkerReceipts?.[issueKey];
+	assert.equal(receipt?.toolCallId, toolCallId, `delivered structured worker receipt: ${JSON.stringify({ batch, claims: new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list() })}`);
+	assert.equal(receipt?.agentId, agentId);
+	assert.equal(receipt?.jobId, jobId);
+	assert.equal(receipt?.pullRequest.headSha, "9".repeat(40));
+	assert.match(receipt?.assignmentDigest ?? "", /^[a-f0-9]{64}$/);
+	assert.match(receipt?.resultDigest ?? "", /^[a-f0-9]{64}$/);
+	assert.notEqual(batch.state, "complete", "worker acceptance and PR link do not substitute for current hosted-check evidence");
+	if (hostedStatus === "pending") {
+		assert.equal(batch.issuePrReadiness?.[issueKey]?.state, "waiting");
+		assert.equal(batch.issuePrReadiness?.[issueKey]?.observation?.result, "pending");
+		assert.equal(pi.messages.length, 1, "pending CI must not create model polling turns");
+	} else {
+		assert.equal(batch.issuePrReadiness?.[issueKey]?.state, "review-required");
+		assert.equal(batch.issuePrReadiness?.[issueKey]?.observation?.result, "passed");
+		assert.ok(batch.issuePrReadiness?.[issueKey]?.reviewerPromptSentAt);
+		assert.equal(pi.messages.length, 2, "passing checks request one independent acceptance review");
+		assert.match(pi.messages[1], /trusted read-only reviewer/);
+		assert.match(pi.messages[1], /worker-reported commands\/results are hints, not proof/i);
+	}
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
 
 test("interrupted issue Slay reconciles the exact submitted PR after restart", async () => {
 	const states = {
 		"projectbluefin/review#77": { title: "recover issue", submittedPrs: [] },
 	};
-	const { env, entries, batch } = await interruptedIssueSlay(states);
+	const { env, entries, batch } = await interruptedIssueSlay(states, { legacy: true });
 	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#10"];
 
 	const pi = fakeHost();
@@ -6237,10 +6695,10 @@ test("blocked issue Slay can be revised and re-Slayed in the same Review session
 	ctx.overlays[0].handleInput("s");
 	await new Promise((resolve) => setImmediate(resolve));
 	const first = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	pi.events.get("tool_call")({ toolCallId: "failed-issue-worker", toolName: "task", input: { isolated: false } }, ctx);
+	pi.events.get("tool_call")({ toolCallId: "failed-issue-worker", toolName: "task", input: issueTaskInput("projectbluefin/review#77", "failed-issue-worker") }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["failed-issue-worker"];
 	ctx.asyncJobs.recent = [{ id: "failed-issue-worker", status: "failed", startTime: Date.now() + 1 }];
-	observeTask(pi, ctx, "failed-issue-worker", "failed-issue-worker");
+	observeTask(pi, ctx, "failed-issue-worker", "failed-issue-worker", null);
 	await pi.events.get("turn_end")({}, ctx);
 	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "running");
@@ -6262,7 +6720,7 @@ test("blocked issue Slay can be revised and re-Slayed in the same Review session
 });
 
 
-test("Review drain settles its current issue wave, then pauses later admission without cancellation", async () => {
+test("Review drain keeps an issue wave fenced when its settled worker lacks exact PR-ready evidence", async () => {
 	const states = {
 		"projectbluefin/review#77": { title: "drain issue", submittedPrs: [] },
 		"projectbluefin/other#78": { title: "later drain issue", submittedPrs: [] },
@@ -6276,10 +6734,13 @@ test("Review drain settles its current issue wave, then pauses later admission w
 	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
 	await pi.events.get("session_start")({}, ctx);
 	await review.whenStarted();
-	pi.events.get("tool_call")({ toolCallId: "drain-worker", toolName: "task", input: { isolated: false } }, ctx);
+	const admitted = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	const admittedIssue = admitted.waves[admitted.currentWave].items[0];
+	const admittedIssueKey = `${admittedIssue.repo.toLowerCase()}#${admittedIssue.id}`;
+	pi.events.get("tool_call")({ toolCallId: "drain-worker", toolName: "task", input: issueTaskInput(admittedIssueKey, "drain-worker") }, ctx);
 	ctx.asyncJobs.delivery.pendingJobIds = ["drain-worker"];
 	ctx.asyncJobs.running = [{ id: "drain-worker", status: "running", startTime: Date.now() + 1 }];
-	observeTask(pi, ctx, "drain-worker", "drain-worker");
+	observeTask(pi, ctx, "drain-worker", "drain-worker", null);
 	await pi.events.get("turn_end")({}, ctx);
 	await pi.commands.get("review").handler("drain", ctx);
 	const draining = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
@@ -6294,14 +6755,13 @@ test("Review drain settles its current issue wave, then pauses later admission w
 	await deliverTaskResults(pi, ctx, ["drain-worker"]);
 	await pi.events.get("agent_end")({}, ctx);
 	const paused = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
-	assert.equal(paused.state, "paused");
-	assert.equal(paused.currentWave, 1);
-	assert.equal(paused.completedItems, 1);
-	assert.match(ctx.notifications.at(-1)?.message ?? "", /drain.*paused/i);
-	assert.equal(pi.messages.length, 1, "drain pauses before admitting the second repository");
+	assert.equal(paused.state, "blocked", "a task completion and issue link do not settle PR-ready acceptance");
+	assert.equal(paused.currentWave, 0);
+	assert.equal(paused.completedItems, 0);
+	assert.match(paused.error, /UNKNOWN.*exact delivered worker-result\/PR attribution/i, JSON.stringify({ waveJobIds: paused.waveJobIds, waveToolCallIds: paused.waveToolCallIds, waveTaskWorkers: paused.waveTaskWorkers }));
+	assert.equal(pi.messages.length, 1, "drain does not admit the second repository without exact issue evidence");
 	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
-	assert.equal(claims.conflict(`repo:${firstIssue.repo}`, "review:other:0"), undefined, "settled first-wave claims are reconciled");
-	assert.notEqual(paused.waves[paused.currentWave].repo, firstIssue.repo);
+	assert.equal(claims.conflict(`repo:${firstIssue.repo}`, "review:other:0"), `repo:${firstIssue.repo} is owned by review:${paused.id}:0`);
 });
 
 test("slay prompts require unique target checkouts and live-rule landing", () => {
@@ -6683,46 +7143,120 @@ test("Factory selection keeps inherited OMP model access live after a model swit
 	}
 });
 
-for (const outcome of ["success", "error", "cancel"] as const) {
-	test(`Factory picker returns to Review after ${outcome}`, async () => {
-		const commands: string[] = [];
-		const unregister = registerFactoryController(async (command) => {
-			commands.push(command);
-			if (outcome === "error") throw new Error("Factory command failed");
-			return "Factory command completed";
-		});
-		const pi = fakeHost();
-		const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fakeFetch([]), env: ISOLATED_ENV });
-		const ctx = fakeCtx();
-		try {
-			await pi.events.get("session_start")({}, ctx);
-			await review.whenStarted();
-			ctx.overlays[0].handleInput("space");
-			ctx.selectResponses.push(outcome === "cancel" ? "Cancel" : "Inspect only");
-			ctx.overlays[0].handleInput("F");
-			for (let i = 0; i < 20; i++) await Promise.resolve();
-			assert.deepEqual(commands, outcome === "cancel" ? [] : ["start inspect"]);
-			assert.equal(ctx.editorCalls.length, 0, "Factory handoff never opens a command editor");
-			assert.equal(ctx.selectCalls.length, 1);
-			assert.match(ctx.selectCalls[0][0], /Send 1 selected item across 1 repository to Factory/);
-			assert.deepEqual(
-				ctx.selectCalls[0][1].map((option) => typeof option === "string" ? option : option.label),
-				["Implement locally", "Inspect only", "Implement and prepare PR", "Open Factory", "Cancel"],
-			);
-			if (outcome === "cancel") {
-				assert.equal(ctx.overlays.length, 1, "cancel returns to the existing Review workbench");
-			} else {
-				assert.equal(ctx.overlays.length, 2, "one workbench reopens after handoff settles");
-				ctx.overlays[1].handleInput("q");
-				for (let i = 0; i < 20; i++) await Promise.resolve();
-				assert.equal(ctx.overlays.length, 2, "explicit close stays closed");
-			}
-		} finally {
-			unregister();
-			await pi.events.get("session_shutdown")?.({}, ctx);
-		}
+test("trusted independent reviewer can finish a passed issue PR-ready lane at its exact head", async () => {
+	const issueKey = "projectbluefin/review#77";
+	const states = { [issueKey]: { title: "independent issue acceptance", submittedPrs: [] } };
+	const pullRequest = {
+		repository: "projectbluefin/review", number: 99, url: "https://github.com/projectbluefin/review/pull/99",
+		identity: "PR_node_99", databaseId: 99, branch: "agent/issue-77", headSha: "9".repeat(40), baseRef: "main", baseSha: "b".repeat(40),
+	};
+	const env = { ...ISOLATED_ENV };
+	const pi = fakeHost(); pi.flagValues.set("issues", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issuePrHostedFetch(states, pullRequest, { status: "completed", conclusion: "success" }), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("slay", ctx);
+	const key = "projectbluefin/review#77"; const toolCallId = "issue-review-worker-call";
+	const agentId = "IssueWorker77"; const jobId = "issue-review-worker-job";
+	await pi.events.get("tool_call")({ toolName: "task", toolCallId, input: { tasks: [{
+		agent: "fixer", name: agentId, task: "Implement " + key, schemaMode: "strict", outputSchema: issuePrReadyOutputSchema(key),
+	}] } }, ctx);
+	ctx.asyncJobs.recent = [{ id: jobId, agentId, type: "task", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("tool_execution_end")({ toolCallId, isError: false, result: { details: {
+		async: { type: "task", state: "completed", jobId }, progress: [{ id: agentId, index: 0, status: "completed" }], results: [],
+	} } }, ctx);
+	const workerData = {
+		issueKey: key, outcome: "pr-ready",
+		pullRequest: { number: 99, url: pullRequest.url, branch: pullRequest.branch, headSha: pullRequest.headSha, baseRef: pullRequest.baseRef, baseSha: pullRequest.baseSha },
+		checks: [{ command: "pytest", exitCode: 0 }],
+		acceptance: { summary: "All criteria met", criteria: [{ id: "behavior", evidence: "worker says it passed" }] }, blocker: "",
+	};
+	await deliverTaskResults(pi, ctx, [jobId], [{ jobId, type: "task", agentId, status: "completed", schema: { source: "caller", mode: "strict", status: "valid", data: workerData } }]);
+	states[key].submittedPrs = ["projectbluefin/review#99"];
+	await pi.events.get("agent_end")({}, ctx);
+	let batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.issuePrReadiness?.[key]?.state, "review-required", "green hosted checks and worker self-report are not issue acceptance proof");
+	assert.equal(pi.messages.length, 2);
+
+	const reviewer = "IndependentIssueReviewer";
+	const subject = { repository: "projectbluefin/review", number: 99, headSha: pullRequest.headSha };
+	const admission = await pi.events.get("tool_call")({ toolName: "task", toolCallId: "issue-reviewer-call", input: {
+		agent: "reviewer", name: reviewer, task: `Review ${key} and ${pullRequest.url} at ${pullRequest.headSha}.`, schemaMode: "strict", outputSchema: createReviewerOutputSchema(subject),
+	} }, ctx);
+	assert.equal(admission, undefined, "the existing trusted reviewer path accepts the linked exact-head PR subject");
+	const reviewerData = { ...subject, verdict: "clean", findings: [], summary: "Verified the issue criteria and current PR diff at the exact head." };
+	await pi.events.get("tool_execution_end")({ toolCallId: "issue-reviewer-call", isError: false, result: { details: {
+		progress: [{ id: reviewer, index: 0, agent: "reviewer", agentSource: "user", status: "completed" }],
+		results: [{ id: reviewer, agent: "reviewer", agentSource: "user", exitCode: 0, structuredOutput: { source: "caller", mode: "strict", status: "valid", data: reviewerData } }],
+	} } }, ctx);
+	await pi.events.get("agent_end")({}, ctx);
+	batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "complete");
+	assert.equal(batch.issuePrReadiness?.[key]?.state, "ready");
+	assert.equal(batch.completedItems, 1);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+});
+
+test("delivered reviewer findings authorize one same-PR repair and require fresh merge-subject checks and review", async () => {
+	const issueKey = "projectbluefin/review#77";
+	const states = { [issueKey]: { title: "review findings need repair", submittedPrs: [] } };
+	const pullRequest = {
+		repository: "projectbluefin/review", number: 99, url: "https://github.com/projectbluefin/review/pull/99",
+		identity: "PR_node_99", databaseId: 99, branch: "agent/issue-77", headSha: "9".repeat(40), baseRef: "main", baseSha: "b".repeat(40), mergeSha: "a".repeat(40),
+	};
+	const mergeCheck = { subject: "merge", status: "completed", conclusion: "success" };
+	const env = { ...ISOLATED_ENV };
+	const pi = fakeHost(); pi.flagValues.set("issues", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issuePrHostedFetch(states, pullRequest, mergeCheck), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("slay", ctx);
+	await deliverIssuePrReadyWorker(pi, ctx, { issueKey, pullRequest, toolCallId: "initial-issue-call", agentId: "IssueFixer", jobId: "initial-issue-job" });
+	states[issueKey].submittedPrs = ["projectbluefin/review#99"];
+	await pi.events.get("agent_end")({}, ctx);
+	let batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.issuePrReadiness[issueKey].state, "review-required", JSON.stringify({ readiness: batch.issuePrReadiness[issueKey], error: batch.error }));
+	assert.equal(batch.issuePrReadiness[issueKey].pullRequest.mergeSha, pullRequest.mergeSha, "the authentic synthetic merge identity is retained");
+	assert.deepEqual(batch.issuePrReadiness[issueKey].observation.eligibleSubject, { sha: pullRequest.mergeSha, subject: "merge" });
+
+	await deliverIssueReviewer(pi, ctx, {
+		issueKey, pullRequest, toolCallId: "review-findings-call", agentId: "IssueReviewer1", verdict: "findings",
+		findings: [{ title: "Missing regression coverage", body: "Exercise the changed failure branch before declaring acceptance.", file: "src/fix.ts", line: 42 }],
 	});
-}
+	await pi.events.get("agent_end")({}, ctx);
+	batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.issuePrReadiness[issueKey].state, "repair-required", "a delivered exact-head finding is actionable, unlike missing or unknown review evidence");
+	assert.match(pi.messages.at(-1), /Missing regression coverage/);
+
+	const nextHead = "8".repeat(40); const nextMerge = "c".repeat(40);
+	const repairTask = {
+		agent: "fixer", name: "IssueRepairer", task: `Repair ${issueKey} only in ${pullRequest.url} at ${pullRequest.headSha}; address Missing regression coverage.`,
+		schemaMode: "strict", outputSchema: issuePrReadyOutputSchema(issueKey),
+	};
+	const repairAdmission = await pi.events.get("tool_call")({ toolName: "task", toolCallId: "same-pr-repair-call", input: repairTask }, ctx);
+	assert.equal(repairAdmission, undefined);
+	batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.issuePrReadiness[issueKey].state, "repairing");
+	assert.equal(batch.issueTaskAssignments[issueKey].attempt, 1);
+	await deliverIssuePrReadyWorker(pi, ctx, { issueKey, pullRequest, toolCallId: "same-pr-repair-call", agentId: "IssueRepairer", jobId: "same-pr-repair-job", headSha: nextHead });
+	pullRequest.headSha = nextHead;
+	pullRequest.mergeSha = nextMerge;
+	await pi.events.get("agent_end")({}, ctx);
+	batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.issuePrReadiness[issueKey].state, "review-required", JSON.stringify({ readiness: batch.issuePrReadiness[issueKey], error: batch.error }));
+	assert.equal(batch.issuePrReadiness[issueKey].pullRequest.headSha, nextHead);
+	assert.equal(batch.issuePrReadiness[issueKey].pullRequest.mergeSha, nextMerge, "repair checks bind to the newly observed merge identity");
+	assert.deepEqual(batch.issuePrReadiness[issueKey].observation.eligibleSubject, { sha: nextMerge, subject: "merge" });
+	assert.ok(pullRequest.requestedCheckShas.includes(nextMerge), "the new synthetic merge SHA receives a fresh hosted-check read");
+
+	await deliverIssueReviewer(pi, ctx, { issueKey, pullRequest, toolCallId: "fresh-review-call", agentId: "IssueReviewer2", verdict: "clean" });
+	await pi.events.get("agent_end")({}, ctx);
+	batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data;
+	assert.equal(batch.state, "complete");
+	assert.equal(batch.issuePrReadiness[issueKey].state, "ready");
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+});
+
 test("Factory picker maps each operator outcome to the existing command path", async () => {
 	const choices = [
 		["Implement locally", "start patch"],
@@ -7572,6 +8106,7 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 
 	// 4. Traces toggle parity: expanding and collapsing trace spans on click
 	dashboard.handleInput("\x1b[<0;151;4M"); // focus trace pane
+	dashboard.handleInput("t"); // explicit SESSION TRACE view
 	const beforeFoldFrame = frame();
 	// Click a trace span row (e.g. row 5 in trace pane)
 	dashboard.handleClick(150, 5);
@@ -7649,9 +8184,9 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 
 	const tPos = keymapText.indexOf("t trace");
 	assert.ok(tPos > 0);
-	const paneBefore = dashboard.currentPane;
+	const traceViewBefore = dashboard.render(400).join("\n").includes("SESSION TRACE");
 	dashboard.handleClick(tPos + 1, keymapLineIdx);
-	assert.notEqual(dashboard.currentPane, paneBefore, "clicking t switches pane");
+	assert.notEqual(dashboard.render(400).join("\n").includes("SESSION TRACE"), traceViewBefore, "clicking t toggles Inspector/SESSION TRACE");
 
 	const tabPos = keymapText.indexOf("tab prs/issues");
 	assert.ok(tabPos > 0);

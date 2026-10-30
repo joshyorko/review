@@ -2,10 +2,10 @@
  * The dashboard: a focusable, full-width Dagger-style view of the review queue
  * and the pipeline behind the selected item.
  *
- * Left pane is the queue, right pane is the trace. The trace pane is the same
- * renderer that draws the rail, so a step looks the same everywhere. Keys follow
- * Dagger's TUI: `j/k` move, `h/l` collapse and expand, `/` filters, `?` explains,
- * and the action keys act on whatever the cursor is on.
+ * Left pane is the queue, right pane is the selected-item Inspector. The global
+ * session trace is an explicit view and uses the same renderer as the rail.
+ * Keys follow Dagger's TUI: `j/k` move, `h/l` collapse and expand, `/` filters,
+ * `?` explains, and action keys act on whatever the cursor is on.
  *
  * The component owns no policy: it resolves with a `DashboardAction` and lets the
  * extension decide what that means.
@@ -67,7 +67,7 @@ const HELP: readonly string[] = [
 	"  alt+b            select or clear the current repository group",
 	"  x / A            clear selections / select the filtered slice",
 	"  tab              toggle pull requests and issues",
-	"  t                switch between queue and trace panes",
+	"  t                toggle the Inspector and SESSION TRACE",
 	"  /review status|reconcile|drain|cancel|revise|slay  recover blocked waves safely",
 	"  /review policy owner/repo [solo|team]  inspect or select human review policy",
 	"  v                read the highlighted pull request or issue",
@@ -84,7 +84,7 @@ const HELP: readonly string[] = [
 	"  ?                close this help",
 	"  q, esc           close the workbench",
 	"",
-	"The trace projects OMP turn and tool execution.",
+	"SESSION TRACE shows session-wide OMP turn and tool execution; it is not attributed to the selected queue item.",
 	"GitHub supplies the queue and current evidence.",
 ];
 
@@ -157,6 +157,7 @@ export class ReviewDashboard {
 	focused = true;
 
 	private pane: Pane = "queue";
+	private rightContent: "inspector" | "session-trace" = "inspector";
 	private traceCursor = 0;
 	private queueScroll = 0;
 	private traceScroll = 0;
@@ -472,6 +473,10 @@ export class ReviewDashboard {
 
 	private handleTracePaneClick(_col: number, bodyRow: number, width: number, height: number): void {
 		this.pane = "trace";
+		if (this.rightContent !== "session-trace") {
+			this.tui.requestRender();
+			return;
+		}
 		if (bodyRow === 0) {
 			this.tui.requestRender();
 			return;
@@ -495,12 +500,7 @@ export class ReviewDashboard {
 		}
 
 		// Fallback when rendered map is not populated yet
-		const details = this.selectionContextRows(width);
-		if (traceOffset < details.length) {
-			this.tui.requestRender();
-			return;
-		}
-		const spanRowIndex = traceOffset - details.length;
+		const spanRowIndex = traceOffset;
 		const roots = this.traceRoots(Date.now());
 		const rendered = renderSpanTree(roots, {
 			painter: this.painter,
@@ -509,7 +509,7 @@ export class ReviewDashboard {
 			frame: this.frame,
 			expansion: this.expansion,
 			focusedId: undefined,
-			maxLogLines: Math.max(3, Math.floor((height - 1 - details.length) / 3)),
+			maxLogLines: Math.max(3, Math.floor((height - 1) / 3)),
 		});
 		const targetRow = rendered[this.traceScroll + spanRowIndex];
 		if (targetRow && targetRow.kind === "span") {
@@ -748,7 +748,8 @@ export class ReviewDashboard {
 				return;
 			}
 			case "t":
-				this.pane = this.pane === "queue" ? "trace" : "queue";
+				this.rightContent = this.rightContent === "inspector" ? "session-trace" : "inspector";
+				this.pane = this.rightContent === "session-trace" ? "trace" : "queue";
 				this.tui.requestRender();
 				return;
 			case "p": {
@@ -806,13 +807,13 @@ export class ReviewDashboard {
 				return;
 			case "h":
 			case "left":
-				if (this.pane === "trace") this.toggleSpan(false);
+				if (this.pane === "trace" && this.rightContent === "session-trace") this.toggleSpan(false);
 				else this.pane = "queue";
 				this.tui.requestRender();
 				return;
 			case "l":
 			case "right":
-				if (this.pane === "trace") this.toggleSpan(true);
+				if (this.pane === "trace" && this.rightContent === "session-trace") this.toggleSpan(true);
 				else this.pane = "trace";
 				this.tui.requestRender();
 				return;
@@ -1153,16 +1154,39 @@ export class ReviewDashboard {
 		return rows;
 	}
 
+	private inspectorRows(width: number, height: number, now: number): string[] {
+		this.traceRowSpans = [];
+		const item = this.mode.selected();
+		if (!item) return [this.painter.fg("dim", "  Select a queue item to inspect GitHub evidence.")];
+		const rows = [
+			truncateToWidth(this.painter.bold(this.painter.fg("text", `  ${item.type === "pr" ? "PULL REQUEST" : "ISSUE"} ${item.repo}#${item.id}`)), width),
+			truncateToWidth(this.painter.fg("text", `  ${sanitizeMarkdown(item.title)}`), width),
+			truncateToWidth(this.painter.fg("dim", `  Author: @${sanitizeMarkdown(item.author)}`), width),
+		];
+		if (item.type === "pr") {
+			rows.push(truncateToWidth(this.painter.fg("dim", `  Head: ${item.headSha ?? "unknown"}`), width));
+			rows.push(truncateToWidth(this.painter.fg("dim", `  Observed queue evidence: CI ${item.ciStatus ?? "unknown"} · review ${item.reviewState} · merge ${item.mergeState}`), width));
+		} else {
+			rows.push(truncateToWidth(this.painter.fg("dim", `  Labels: ${item.labels.join(", ") || "none"}`), width));
+			rows.push(truncateToWidth(this.painter.fg("dim", `  Linked PRs in this queue read: ${(item.submittedPrs ?? []).join(", ") || "none observed"}`), width));
+		}
+		rows.push(truncateToWidth(this.painter.fg("dim", "  Item-specific local verification/activity: not observed."), width));
+		rows.push(truncateToWidth(this.painter.fg("dim", this.mode.lastSuccessfulFetchedAt > 0
+			? `  Last successful queue observation: ${formatDuration(Math.max(0, now - this.mode.lastSuccessfulFetchedAt))} ago`
+			: "  Last successful queue observation: not observed in this session"), width));
+		if (this.mode.queueError) rows.push(truncateToWidth(this.painter.fg("warning", "  Latest refresh failed; queue evidence may be incomplete."), width));
+		else if (this.mode.queueTruncated) rows.push(truncateToWidth(this.painter.fg("warning", "  Latest queue read was truncated; completeness is unknown."), width));
+		else if (this.mode.loading) rows.push(truncateToWidth(this.painter.fg("warning", "  Refreshing queue; last successful observation age is unchanged."), width));
+		rows.push(...this.selectionContextRows(width));
+		return rows.slice(0, Math.max(1, height));
+	}
+
 	private traceRows(width: number, height: number, now: number): string[] {
 		this.traceRowSpans = [];
-		const details = this.selectionContextRows(width);
-		for (let i = 0; i < details.length; i++) {
-			this.traceRowSpans.push(undefined);
-		}
 		const roots = this.traceRoots(now);
 		if (roots.length === 0) {
 			this.traceRowSpans.push(undefined);
-			return [...details, this.painter.fg("dim", `  ${statusIcon("pending")} no OMP activity yet`)];
+			return [this.painter.fg("dim", `  ${statusIcon("pending")} no OMP activity in this session yet`)];
 		}
 		const ids = this.traceIds(now);
 		this.traceCursor = Math.min(this.traceCursor, Math.max(0, ids.length - 1));
@@ -1175,7 +1199,7 @@ export class ReviewDashboard {
 			frame: this.frame,
 			expansion: this.expansion,
 			focusedId,
-			maxLogLines: Math.max(3, Math.floor((height - details.length) / 3)),
+			maxLogLines: Math.max(3, Math.floor(height / 3)),
 		});
 
 		if (focusedId === undefined) {
@@ -1187,7 +1211,7 @@ export class ReviewDashboard {
 			const cursorRow = rendered.findIndex((row) => row.kind === "span" && row.spanId === focusedId);
 			this.traceScroll = clampScroll(Math.max(0, cursorRow), this.traceScroll, height);
 		}
-		const spanSlice = rendered.slice(this.traceScroll, this.traceScroll + Math.max(1, height - details.length));
+		const spanSlice = rendered.slice(this.traceScroll, this.traceScroll + Math.max(1, height));
 		for (const row of spanSlice) {
 			if (row.kind === "span") {
 				this.traceRowSpans.push(row.spanId);
@@ -1196,7 +1220,7 @@ export class ReviewDashboard {
 			}
 		}
 		const spans = spanSlice.map((row) => row.text);
-		return [...details, ...spans];
+		return spans;
 	}
 
 	private paneTitle(pane: Pane, text: string, width: number): string {
@@ -1297,7 +1321,9 @@ export class ReviewDashboard {
 			lines.push(keymapBar(this.painter, readerKeys, width));
 			return lines;
 		}
-		const traceTitle = item ? `TRACE ${item.repo}#${item.id}` : "TRACE";
+		const rightTitle = this.rightContent === "inspector"
+			? item ? `INSPECTOR ${item.repo}#${item.id}` : "INSPECTOR"
+			: "SESSION TRACE";
 
 		if (width >= SPLIT_MIN_WIDTH) {
 			const leftWidth = Math.floor((width - 3) / 2);
@@ -1306,7 +1332,10 @@ export class ReviewDashboard {
 				? `QUEUE ${this.mode.position()} (${this.mode.selectedKeys.size} selected)`
 				: `QUEUE ${this.mode.position()}`;
 			const left = [this.paneTitle("queue", queueTitle, leftWidth), ...this.queueRows(leftWidth, bodyHeight - 1)];
-			const right = [this.paneTitle("trace", traceTitle, rightWidth), ...this.traceRows(rightWidth, bodyHeight - 1, now)];
+			const rightContent = this.rightContent === "inspector"
+				? this.inspectorRows(rightWidth, bodyHeight - 1, now)
+				: this.traceRows(rightWidth, bodyHeight - 1, now);
+			const right = [this.paneTitle("trace", rightTitle, rightWidth), ...rightContent];
 			const separator = this.painter.fg("border", GLYPH.railBar.trim());
 
 			for (let i = 0; i < bodyHeight; i++) {
@@ -1327,8 +1356,10 @@ export class ReviewDashboard {
 				: `QUEUE ${this.mode.position()}`;
 			lines.push(this.paneTitle("queue", queueTitle, width));
 			lines.push(...this.queueRows(width, queueHeight));
-			lines.push(this.paneTitle("trace", traceTitle, width));
-			lines.push(...this.traceRows(width, bodyHeight - queueHeight - 2, now));
+			lines.push(this.paneTitle("trace", rightTitle, width));
+			lines.push(...(this.rightContent === "inspector"
+				? this.inspectorRows(width, bodyHeight - queueHeight - 2, now)
+				: this.traceRows(width, bodyHeight - queueHeight - 2, now)));
 		}
 		if (this.filtering) {
 			const searchPrompt = `${this.painter.fg("accent", "search")} ${this.painter.fg("text", this.filterDraft)}${this.painter.inverse(" ")}`;
