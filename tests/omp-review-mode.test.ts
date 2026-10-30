@@ -318,6 +318,64 @@ function landingGuardFetch(items) {
 	return fetchImpl;
 }
 
+function autoslayGitHubFetch(prItems, issueItems, onIssueSearch) {
+	const prNodes = prItems.map((item) => ({
+		number: item.id,
+		title: item.title,
+		url: `https://github.com/${item.repo}/pull/${item.id}`,
+		updatedAt: new Date(item.updatedAt).toISOString(),
+		isDraft: false,
+		mergeable: "MERGEABLE",
+		reviewDecision: item.reviewState === "changes_requested" ? "CHANGES_REQUESTED" : "REVIEW_REQUIRED",
+		headRefOid: item.headSha ?? String(item.id).padStart(40, "0"),
+		changedFiles: 1,
+		files: { pageInfo: { hasNextPage: false }, nodes: [{ path: "README.md" }] },
+		author: { login: item.author },
+		repository: { nameWithOwner: item.repo },
+		labels: { nodes: item.labels.map((name) => ({ name })) },
+		commits: { nodes: [{ commit: { statusCheckRollup: { state: item.ciStatus.toUpperCase() } } }] },
+		closingIssuesReferences: { nodes: [] },
+	}));
+	const issueNodes = issueItems.map((item) => ({
+		number: item.id,
+		title: item.title,
+		url: `https://github.com/${item.repo}/issues/${item.id}`,
+		updatedAt: new Date(item.updatedAt).toISOString(),
+		author: { login: item.author },
+		repository: { nameWithOwner: item.repo },
+		labels: { nodes: item.labels.map((name) => ({ name })) },
+		closedByPullRequestsReferences: { nodes: [] },
+	}));
+	let issueSearches = 0;
+	const fetchImpl = async (url, init) => {
+		const target = String(url);
+		if (target === "https://api.github.com/") {
+			return { ok: true, status: 200, statusText: "OK", headers: { get: () => "repo" }, json: async () => ({}) };
+		}
+		if (target.includes("/repos/")) return { ok: true, status: 200, statusText: "OK", json: async () => ({ permissions: { push: true } }) };
+		if (!target.includes("/graphql")) return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		if (body.variables?.search !== undefined) {
+			const isIssues = body.variables.search.includes("is:issue");
+			if (isIssues) {
+				issueSearches++;
+				const response = await onIssueSearch?.({ count: issueSearches, nodes: issueNodes, signal: init?.signal });
+				if (response) return response;
+			}
+			const nodes = isIssues ? issueNodes : prNodes;
+			return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: { viewer: { login: "reviewer" }, search: { pageInfo: { hasNextPage: false }, nodes } } }) };
+		}
+		const data = {};
+		const aliases = /(\w+): repository\(owner: "([^"]+)", name: "([^"]+)"\)\s*\{\s*issueOrPullRequest\(number: (\d+)\)/g;
+		for (const [, alias, owner, repo, number] of body.query.matchAll(aliases)) {
+			const node = [...prNodes, ...issueNodes].find((candidate) => candidate.number === Number(number) && candidate.repository.nameWithOwner === `${owner}/${repo}`);
+			data[alias] = { issueOrPullRequest: node ? { ...node, closed: false } : null };
+		}
+		return { ok: true, status: 200, statusText: "OK", json: async () => ({ data }) };
+	};
+	return { fetchImpl, issueSearchCount: () => issueSearches };
+}
+
 function createReviewExtension(pi, options) {
 	const observer = options.humanReviewObserver ?? (async (repository, number) => {
 		const item = options.fetchImpl?.reviewItems?.find((candidate) => candidate.repo.toLowerCase() === repository.toLowerCase() && candidate.id === number);
@@ -3043,6 +3101,142 @@ test("dashboard releases its open slot before a closed dialog finishes its actio
 	assert.equal(ctx.overlays.length, 2, "Alt+B can open a new dashboard while the previous action finishes");
 	finishInput(undefined);
 	ctx.overlays[1].handleInput("q");
+});
+
+test("autoslay keeps a mixed explicit selection in its chosen order and excludes unselected queue rows", async () => {
+	const repair = queueItem({ id: 41, author: "reviewer", reviewState: "changes_requested", ciStatus: "failure" });
+	const issues = [
+		queueItem({ id: 101, type: "issue", author: "reporter", reviewState: "unknown", ciStatus: undefined }),
+		queueItem({ id: 102, type: "issue", author: "reporter", reviewState: "unknown", ciStatus: undefined }),
+	];
+	const { fetchImpl } = autoslayGitHubFetch([repair], issues);
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	const dashboard = ctx.overlays[0];
+	const mode = dashboard.mode;
+	dashboard.handleInput("\t");
+	await new Promise((resolve) => setImmediate(resolve));
+	dashboard.handleInput("j");
+	dashboard.handleInput(" ");
+	dashboard.handleInput("\t");
+	await new Promise((resolve) => setImmediate(resolve));
+	dashboard.handleInput(" ");
+	const selected = ["projectbluefin/review#102", "projectbluefin/review#41"];
+	assert.deepEqual([...mode.selectedKeys], selected);
+
+	dashboard.handleInput("alt+s");
+	await new Promise((resolve) => setImmediate(resolve));
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(batch.totalItems, selected.length);
+	assert.deepEqual(batch.waves.flatMap((wave) => wave.items.map((item) => `${item.repo}#${item.id}`)), selected);
+	assert.equal(pi.messages.length, 1);
+	assert.match(pi.messages[0], /Implement projectbluefin\/review#102/);
+	assert.doesNotMatch(pi.messages[0], /projectbluefin\/review#101/);
+});
+
+test("autoslay limits unselected repair and issue fallback to one batch", async () => {
+	const repairs = Array.from({ length: 20 }, (_, index) => queueItem({ id: index + 1, author: "reviewer", reviewState: "changes_requested", ciStatus: "failure" }));
+	const issues = Array.from({ length: 20 }, (_, index) => queueItem({ id: index + 101, type: "issue", author: "reporter", reviewState: "unknown", ciStatus: undefined }));
+	const { fetchImpl } = autoslayGitHubFetch(repairs, issues);
+	const pi = fakeHost();
+	pi.flagValues.set("autoslay", true);
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	const admitted = batch.waves.flatMap((wave) => wave.items);
+	assert.equal(batch.totalItems, BATCH_LIMIT);
+	assert.equal(admitted.length, BATCH_LIMIT);
+	assert.deepEqual(
+		admitted.slice(0, repairs.length).map((item) => `${item.repo}#${item.id}`),
+		repairs.map((item) => `${item.repo}#${item.id}`).sort(),
+	);
+	assert.deepEqual(
+		admitted.slice(repairs.length).map((item) => `${item.repo}#${item.id}`),
+		issues.slice(0, BATCH_LIMIT - repairs.length).map((item) => `${item.repo}#${item.id}`),
+	);
+});
+
+test("failed cross-mode hydration keeps explicit selection and starts no work", async () => {
+	const repair = queueItem({ id: 41, author: "reviewer", reviewState: "changes_requested", ciStatus: "failure" });
+	const issues = [
+		queueItem({ id: 101, type: "issue", author: "reporter", reviewState: "unknown", ciStatus: undefined }),
+		queueItem({ id: 102, type: "issue", author: "reporter", reviewState: "unknown", ciStatus: undefined }),
+	];
+	const { fetchImpl } = autoslayGitHubFetch([repair], issues, ({ count }) => count === 2
+		? { ok: false, status: 503, statusText: "Service Unavailable", json: async () => ({}) }
+		: undefined);
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	const dashboard = ctx.overlays[0];
+	const mode = dashboard.mode;
+	dashboard.handleInput("\t");
+	await new Promise((resolve) => setImmediate(resolve));
+	dashboard.handleInput("j");
+	dashboard.handleInput(" ");
+	dashboard.handleInput("\t");
+	await new Promise((resolve) => setImmediate(resolve));
+	dashboard.handleInput(" ");
+	const selected = ["projectbluefin/review#102", "projectbluefin/review#41"];
+	dashboard.handleInput("alt+s");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.deepEqual([...mode.selectedKeys], selected);
+	assert.deepEqual(mode.toPersisted().selectedKeys, selected);
+	assert.equal(pi.messages.length, 0);
+	assert.match(savedReviewNoticeText(pi), /GitHub.*queue|queue.*503/i);
+});
+
+test("cancelled cross-mode hydration keeps explicit selection and starts no work", async () => {
+	const repair = queueItem({ id: 41, author: "reviewer", reviewState: "changes_requested", ciStatus: "failure" });
+	const issues = [
+		queueItem({ id: 101, type: "issue", author: "reporter", reviewState: "unknown", ciStatus: undefined }),
+		queueItem({ id: 102, type: "issue", author: "reporter", reviewState: "unknown", ciStatus: undefined }),
+	];
+	const issueRefreshStarted = Promise.withResolvers();
+	const { fetchImpl } = autoslayGitHubFetch([repair], issues, ({ count, signal, nodes }) => count === 2
+		? new Promise((resolve) => {
+			signal.addEventListener("abort", () => resolve({ ok: true, status: 200, statusText: "OK", json: async () => ({ data: { viewer: { login: "reviewer" }, search: { pageInfo: { hasNextPage: false }, nodes } } }) }), { once: true });
+			issueRefreshStarted.resolve();
+		})
+		: undefined);
+	const pi = fakeHost();
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl, env: ISOLATED_ENV });
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	const dashboard = ctx.overlays[0];
+	const mode = dashboard.mode;
+	dashboard.handleInput("\t");
+	await new Promise((resolve) => setImmediate(resolve));
+	dashboard.handleInput("j");
+	dashboard.handleInput(" ");
+	dashboard.handleInput("\t");
+	await new Promise((resolve) => setImmediate(resolve));
+	dashboard.handleInput(" ");
+	const selected = ["projectbluefin/review#102", "projectbluefin/review#41"];
+	dashboard.handleInput("alt+s");
+	await issueRefreshStarted.promise;
+	mode.setScope({ kind: "repo", value: "projectbluefin/review" });
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.deepEqual([...mode.selectedKeys], selected);
+	assert.deepEqual(mode.toPersisted().selectedKeys, selected);
+	assert.equal(pi.messages.length, 0);
 });
 
 test("GitHub autoslay repairs returned pull requests before implementing issue waves", async () => {

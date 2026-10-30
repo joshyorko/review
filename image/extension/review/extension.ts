@@ -10,7 +10,7 @@ import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import { createNativeToastWidget, createReviewNoticeComponent, wrapNoticeText } from "./notice.ts";
 import { safePreview } from "./safe-output.ts";
 import { loadWave, saveWave } from "./wave-store.ts";
-import type { CiEvidenceSource, QueueItem } from "./github.ts";
+import type { CiEvidenceSource, QueueItem, QueueResult } from "./github.ts";
 import { exactHeadVerified, fetchDiff, fetchIssueAdmission, fetchItemsByKey, fetchOAuthScopes, fetchPullRequestEffect, isForwardHead, orgScope, parseScope, resolveToken } from "./github.ts";
 import { isRepairRequested, type Priority } from "./priority.ts";
 import { BATCH_LIMIT, ReviewMode, type PersistedSelection } from "./mode.ts";
@@ -2867,14 +2867,64 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	};
 
 	const startAutoslay = async (ctx: CtxLike) => {
-		if (mode.queueMode === "issues") {
-			await startSlay(ctx, mode.visibleItems());
+		const hasSelection = mode.selectedKeys.size > 0;
+		const selected = mode.chosenItems();
+		const unresolved = [...mode.selectedKeys].filter((key) => !selected.some((item) => `${item.repo}#${item.id}` === key));
+		if (hasSelection && unresolved.length > 0) {
+			notifyUser(ctx, `Autoslay could not resolve explicit selection ${unresolved.join(", ")}. No work was admitted; refresh the GitHub queue and retry.`, "warning");
 			return;
 		}
-		const repairs = mode.repairRequestedItems();
+		const boundedSelection = selected.slice(0, BATCH_LIMIT);
+		const blockRefresh = (result: QueueResult): void => {
+			const detail = result.cancelled ? "GitHub refresh was cancelled" : `GitHub refresh failed: ${result.error ?? "unknown error"}`;
+			notifyUser(ctx, `Autoslay could not refresh the GitHub issue queue (${detail}). No work was admitted; your selection is preserved. Refresh and retry.`, "warning", "Use Alt+U to refresh, then retry Alt+S.");
+		};
+
+		if (hasSelection && mode.queueMode === "prs" && boundedSelection.some((item) => item.type === "issue")) {
+			mode.toggleMode();
+			const refresh = await mode.refreshQueue();
+			if (refresh.cancelled || refresh.error) {
+				blockRefresh(refresh);
+				return;
+			}
+			const liveIssues = new Map(mode.items.filter((item) => item.type === "issue").map((item) => [`${item.repo}#${item.id}`, item]));
+			const missing = boundedSelection.filter((item) => item.type === "issue" && !liveIssues.has(`${item.repo}#${item.id}`));
+			if (missing.length > 0) {
+				const named = await fetchItemsByKey(missing.map((item) => `${item.repo}#${item.id}`), "issues", mode.tokenOptions());
+				if (named.cancelled || named.error) {
+					blockRefresh(named);
+					return;
+				}
+				for (const item of named.items) if (item.type === "issue") liveIssues.set(`${item.repo}#${item.id}`, item);
+			}
+			const unavailable = missing.find((item) => !liveIssues.has(`${item.repo}#${item.id}`));
+			if (unavailable) {
+				notifyUser(ctx, `Cannot autoslay selected issue ${unavailable.repo}#${unavailable.id}: it is closed or unreadable. No work was admitted; your selection is preserved.`, "warning");
+				return;
+			}
+			const hydrated = boundedSelection.map((item) => item.type === "issue" ? liveIssues.get(`${item.repo}#${item.id}`)! : item);
+			await startSlay(ctx, hydrated);
+			return;
+		}
+
+		if (hasSelection) {
+			await startSlay(ctx, boundedSelection);
+			return;
+		}
+		if (mode.queueMode === "issues") {
+			await startSlay(ctx, mode.slayableItems(BATCH_LIMIT));
+			return;
+		}
+
+		const repairs = mode.repairRequestedItems().slice(0, BATCH_LIMIT);
 		mode.toggleMode();
-		await refreshQueue(ctx);
-		await startSlay(ctx, [...repairs, ...mode.visibleItems()]);
+		const refresh = await mode.refreshQueue();
+		if (refresh.cancelled || refresh.error) {
+			blockRefresh(refresh);
+			return;
+		}
+		const remaining = Math.max(0, BATCH_LIMIT - repairs.length);
+		await startSlay(ctx, [...repairs, ...mode.visibleItems().slice(0, remaining)]);
 	};
 
 	/**
