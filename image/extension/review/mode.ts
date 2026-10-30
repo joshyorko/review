@@ -86,6 +86,7 @@ export class ReviewMode {
 	queueError?: string;
 	queueTruncated = false;
 	fetchedAt = 0;
+	lastSuccessfulFetchedAt = 0;
 	loading = false;
 	selectedKeys = new Set<string>();
 	private selectedSnapshots = new Map<string, QueueItem>();
@@ -140,6 +141,7 @@ export class ReviewMode {
 		this.scope = scope;
 		this.cursor = 0;
 		this.items = [];
+		this.lastSuccessfulFetchedAt = 0;
 		this.ranked = { items: [], priorities: new Map(), source: "local" };
 		this.queueError = undefined;
 		this.queueTruncated = false;
@@ -300,6 +302,7 @@ export class ReviewMode {
 	toggleMode(): QueueMode {
 		this.queueMode = this.queueMode === "prs" ? "issues" : "prs";
 		this.items = [];
+		this.lastSuccessfulFetchedAt = 0;
 		this.cursor = 0;
 		return this.queueMode;
 	}
@@ -440,6 +443,7 @@ export class ReviewMode {
 			const result = { items: [], error: "GitHub scope is required; supply owner/repo or org:<name>", fetchedAt: Date.now() };
 			this.queueError = result.error;
 			this.items = [];
+			this.lastSuccessfulFetchedAt = 0;
 			this.loading = false;
 			return result;
 		}
@@ -471,6 +475,7 @@ export class ReviewMode {
 			this.queueError = result.error;
 			this.queueTruncated = result.truncated === true;
 			this.fetchedAt = result.fetchedAt;
+			if (!result.error && !result.truncated) this.lastSuccessfulFetchedAt = result.fetchedAt;
 			if (result.viewerLogin) this.currentUserLogin = result.viewerLogin;
 			const previousKey = this.selectedKey();
 			this.items = result.items;

@@ -2227,6 +2227,80 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	assert.ok(frame().some((row) => row.includes("comment")), "help lists supported actions");
 	assert.ok(frame().some((row) => row.includes("slay")), "help exposes mass autoreview");
 });
+
+test("dashboard defaults to a selected-item Inspector and labels global roots SESSION TRACE", (t) => {
+	const mode = new ReviewMode({ org: "projectbluefin", env: { ...ISOLATED_ENV } });
+	mode.items = [
+		queueItem({ id: 17, type: "issue", repo: "projectbluefin/review", title: "selected issue", url: "https://github.com/projectbluefin/review/issues/17" }),
+		queueItem({ id: 44, type: "pr", repo: "projectbluefin/other", title: "unrelated pull request", url: "https://github.com/projectbluefin/other/pull/44", headSha: "4".repeat(40), ciStatus: "success" }),
+	];
+	mode.session.startTurn(NOW);
+	mode.session.startTool("issue-trace", "bash", { command: "issue-17-local-check" }, NOW + 1);
+	mode.session.endTool("issue-trace", "failed", true, NOW + 2);
+	mode.session.endTurn(NOW + 3);
+	mode.session.startTurn(NOW + 100);
+	mode.session.startTool("pr-trace", "bash", { command: "unrelated-pr-44-check" }, NOW + 101);
+	mode.session.endTool("pr-trace", "failed", true, NOW + 102);
+	mode.session.endTurn(NOW + 103);
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+	t.after(() => dashboard.dispose());
+
+	const inspector = dashboard.render(160).join("\n");
+	assert.match(inspector, /INSPECTOR projectbluefin\/review#17/);
+	assert.match(inspector, /Item-specific local verification\/activity: not observed/i);
+	assert.doesNotMatch(inspector, /issue-17-local-check|unrelated-pr-44-check/, "session activity is not attributed to the selected issue");
+
+	dashboard.handleInput("t");
+	const sessionTrace = dashboard.render(160).join("\n");
+	assert.match(sessionTrace, /SESSION TRACE/);
+	assert.match(sessionTrace, /issue-17-local-check/);
+	assert.match(sessionTrace, /unrelated-pr-44-check/);
+	assert.doesNotMatch(sessionTrace, /SESSION TRACE projectbluefin\/review#17/);
+
+	dashboard.handleInput("t");
+	dashboard.handleInput("j");
+	const nextInspector = dashboard.render(160).join("\n");
+	assert.match(nextInspector, /INSPECTOR projectbluefin\/other#44/);
+	assert.doesNotMatch(nextInspector, /issue-17-local-check|unrelated-pr-44-check/);
+});
+
+test("Inspector keeps the last successful queue age when a refresh fails on head A", async (t) => {
+	const item = queueItem({ id: 42, type: "pr", repo: "projectbluefin/review", headSha: "a".repeat(40), ciStatus: "success" });
+	let failRefresh = false;
+	const successFetch = githubQueueFetch([item]);
+	const fetchImpl = async (url, init) => failRefresh
+		? { ok: false, status: 503, statusText: "Unavailable", json: async () => ({}) }
+		: successFetch(url, init);
+	const mode = new ReviewMode({ org: "projectbluefin", fetchImpl, env: { ...ISOLATED_ENV } });
+	mode.setToken("token");
+	const dashboard = new ReviewDashboard({ requestRender() {} }, PLAIN_PAINTER, mode, () => {}, () => {}, 24);
+	t.after(() => dashboard.dispose());
+	const actualNow = Date.now;
+	let now = NOW;
+	Date.now = () => now;
+	try {
+		const first = await mode.refreshQueue();
+		assert.equal(first.error, undefined);
+		const observedAt = mode.fetchedAt;
+		assert.equal(mode.lastSuccessfulFetchedAt, observedAt);
+		assert.equal(mode.items[0]?.headSha, "a".repeat(40));
+
+		now += 120_000;
+		failRefresh = true;
+		const failed = await mode.refreshQueue();
+		assert.match(failed.error ?? "", /503|Unavailable/);
+		assert.ok(mode.fetchedAt > observedAt, "the failed attempt retains its own attempt timestamp");
+		assert.equal(mode.lastSuccessfulFetchedAt, observedAt, "a failed refresh cannot advance successful-observation age");
+		assert.equal(mode.items[0]?.headSha, "a".repeat(40), "cached selected head A remains visible");
+		const inspector = dashboard.render(160).join("\n");
+		assert.match(inspector, /last successful queue observation: 2m0s ago/i);
+		assert.match(inspector, /latest refresh failed/i);
+		assert.match(inspector, new RegExp("Head: " + "a".repeat(40)));
+	} finally {
+		Date.now = actualNow;
+	}
+});
+
 test("dashboard interactive search live-filters and selects items by title", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -3173,8 +3247,8 @@ test("dashboard browser failure names an issue accurately", async () => {
 	assert.match(browserCard, /Open this link in your browser/);
 	assert.ok(issueRows.length <= ctx.overlays[0].rows, "the warning card and focused issue fit the narrow dashboard");
 	const queueIndex = issueRows.findIndex((line) => /QUEUE/.test(line));
-	const traceIndex = issueRows.findIndex((line) => /TRACE/.test(line));
-	const visibleQueue = issueRows.slice(queueIndex + 1, traceIndex > queueIndex ? traceIndex : issueRows.length);
+	const inspectorIndex = issueRows.findIndex((line) => /INSPECTOR/.test(line));
+	const visibleQueue = issueRows.slice(queueIndex + 1, inspectorIndex > queueIndex ? inspectorIndex : issueRows.length);
 	assert.ok(visibleQueue.some((line) => /#43/.test(line)), "the issue stays visible under its browser recovery card");
 	assert.doesNotMatch(savedReviewNoticeText(pi), /Couldn’t open the pull request/);
 	assert.equal(ctx.pasted.length, 0, "issue browser failure does not alter draft text");
@@ -8015,6 +8089,7 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 
 	// 4. Traces toggle parity: expanding and collapsing trace spans on click
 	dashboard.handleInput("\x1b[<0;151;4M"); // focus trace pane
+	dashboard.handleInput("t"); // explicit SESSION TRACE view
 	const beforeFoldFrame = frame();
 	// Click a trace span row (e.g. row 5 in trace pane)
 	dashboard.handleClick(150, 5);
@@ -8092,9 +8167,9 @@ test("OMP workbench mouse and click operability matches keyboard actions (#462)"
 
 	const tPos = keymapText.indexOf("t trace");
 	assert.ok(tPos > 0);
-	const paneBefore = dashboard.currentPane;
+	const traceViewBefore = dashboard.render(400).join("\n").includes("SESSION TRACE");
 	dashboard.handleClick(tPos + 1, keymapLineIdx);
-	assert.notEqual(dashboard.currentPane, paneBefore, "clicking t switches pane");
+	assert.notEqual(dashboard.render(400).join("\n").includes("SESSION TRACE"), traceViewBefore, "clicking t toggles Inspector/SESSION TRACE");
 
 	const tabPos = keymapText.indexOf("tab prs/issues");
 	assert.ok(tabPos > 0);
