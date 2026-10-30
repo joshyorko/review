@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -11,6 +12,9 @@ import (
 
 	"dagger/review-ci/internal/dagger"
 )
+
+//go:embed verify-source-identity.sh
+var sourceIdentityVerifier embed.FS
 
 type ReviewCi struct{}
 
@@ -34,15 +38,16 @@ func (m *ReviewCi) applianceImage(ctx context.Context, source *dagger.Directory,
 			return nil, "", "", fmt.Errorf("appliance source revision must be lowercase hexadecimal")
 		}
 	}
-	if err := m.verifySourceSubject(ctx, source, revision); err != nil {
+	committedSource, err := m.verifySourceSubject(ctx, source, revision)
+	if err != nil {
 		return nil, "", "", err
 	}
-	version, err := source.File("VERSION").Contents(ctx)
+	version, err := committedSource.File("VERSION").Contents(ctx)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("read Review VERSION: %w", err)
 	}
 	version = strings.TrimSpace(version)
-	containerfile, err := source.File("image/appliance/Containerfile").Contents(ctx)
+	containerfile, err := committedSource.File("image/appliance/Containerfile").Contents(ctx)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("read appliance Containerfile: %w", err)
 	}
@@ -50,8 +55,7 @@ func (m *ReviewCi) applianceImage(ctx context.Context, source *dagger.Directory,
 	if len(ompCommit) != 2 {
 		return nil, "", "", fmt.Errorf("appliance Containerfile does not declare one full OMP source commit")
 	}
-	buildContext := source.WithoutFile(".ci-history.bundle")
-	image := buildContext.DockerBuild(dagger.DirectoryDockerBuildOpts{
+	image := committedSource.DockerBuild(dagger.DirectoryDockerBuildOpts{
 		Dockerfile: "image/appliance/Containerfile",
 		BuildArgs: []dagger.BuildArg{
 			{Name: "REVIEW_VERSION", Value: version},
@@ -79,18 +83,23 @@ func (m *ReviewCi) applianceImage(ctx context.Context, source *dagger.Directory,
 	return image, version, imageID, nil
 }
 
-func (m *ReviewCi) verifySourceSubject(ctx context.Context, source *dagger.Directory, revision string) error {
-	_, err := dag.Container().
+func (m *ReviewCi) verifySourceSubject(ctx context.Context, source *dagger.Directory, revision string) (*dagger.Directory, error) {
+	verifier, err := sourceIdentityVerifier.ReadFile("verify-source-identity.sh")
+	if err != nil {
+		return nil, fmt.Errorf("read trusted source identity verifier: %w", err)
+	}
+	container := dag.Container().
 		From("python:3.13.9-slim-bookworm@sha256:b685a4fa58bb19d1814d78a1ec0f0208f351452724f78b20212c984d6e124a34").
 		WithExec([]string{"sh", "-c", "set -eu; apt-get update; apt-get install -y --no-install-recommends bash=5.2.15-2+b13 git=1:2.39.5-0+deb12u3 ca-certificates=20250419~deb12u2; rm -rf /var/lib/apt/lists/*"}).
+		WithNewFile("/usr/local/bin/verify-source-identity.sh", string(verifier), dagger.ContainerWithNewFileOpts{Permissions: 0755}).
 		WithDirectory("/src", source).
 		WithWorkdir("/src").
-		WithExec([]string{"bash", "scripts/ci/verify-source-identity.sh", revision}).
-		Stdout(ctx)
+		WithExec([]string{"/usr/local/bin/verify-source-identity.sh", revision, "/verified"})
+	committedSource, err := container.Directory("/verified").Sync(ctx)
 	if err != nil {
-		return fmt.Errorf("verify appliance source against its committed tree: %w", err)
+		return nil, fmt.Errorf("verify appliance source against its committed tree: %w", err)
 	}
-	return nil
+	return committedSource, nil
 }
 
 // Builds the exact-source appliance with Dagger Dockerfile compatibility and
@@ -161,7 +170,7 @@ var supportedSteps = map[string]string{
 	"ci-path-plan-contract":   "python3 tests/ci_path_plan_test.py",
 	"ci-registry-invocation-test": "python3 tests/ci_manifest_registry_test.py",
 	"release-dispatch-guard":      "python3 tests/release-dispatch-guard.py",
-	"ci-shellcheck":           "shellcheck --exclude=SC1090 --exclude=SC2034 bin/ci scripts/ci/native-appliance.sh scripts/ci/check-oci-digest.sh scripts/ci/verify-source-identity.sh scripts/validate-release-source.sh tests/ci-runner-contract.sh tests/release-publication-source.sh",
+	"ci-shellcheck":           "shellcheck --exclude=SC1090 --exclude=SC2034 bin/ci scripts/ci/native-appliance.sh scripts/ci/check-oci-digest.sh scripts/validate-release-source.sh tests/ci-runner-contract.sh tests/release-publication-source.sh",
 	"static-hygiene":          "SKIP=check-skill-frontmatter,generate-skills,omp-review-mode,appliance-contract pre-commit run --all-files --show-diff-on-failure",
 	"source-snapshot-contract": "python3 tests/ci_source_snapshot_test.py && python3 tests/ci_appliance_subject_test.py && python3 tests/ci_native_adapter_contract.py",
 	"skill-frontmatter":        "bash scripts/check-skill-frontmatter.sh",

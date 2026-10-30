@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERIFY = ROOT / "scripts/ci/verify-source-identity.sh"
+VERIFY = ROOT / ".dagger/verify-source-identity.sh"
 
 
 def git(root: Path, *args: str) -> str:
@@ -48,8 +48,9 @@ class ApplianceSubjectTest(unittest.TestCase):
         return snapshot
 
     def verify(self, snapshot: Path, revision: str | None = None) -> subprocess.CompletedProcess[str]:
+        verified_source = self.verified_source(snapshot)
         return subprocess.run(
-            ["bash", str(VERIFY), revision or self.revision],
+            ["bash", str(VERIFY), revision or self.revision, str(verified_source)],
             cwd=snapshot,
             check=False,
             text=True,
@@ -57,11 +58,19 @@ class ApplianceSubjectTest(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
 
+    @staticmethod
+    def verified_source(snapshot: Path) -> Path:
+        return snapshot.parent / f"{snapshot.name}-verified"
+
     def test_matching_history_bundle_and_tree_are_required(self) -> None:
         clean = self.make_snapshot("clean")
         result = self.verify(clean)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(self.revision, result.stdout)
+        verified_source = self.verified_source(clean)
+        self.assertEqual((verified_source / "VERSION").read_text(), "0.1.7\n")
+        self.assertTrue((verified_source / "image/appliance/Containerfile").is_file())
+        self.assertFalse((verified_source / ".ci-history.bundle").exists())
 
         wrong_revision = self.make_snapshot("wrong-revision")
         wrong = self.verify(wrong_revision, "f" * 40)
@@ -81,6 +90,14 @@ class ApplianceSubjectTest(unittest.TestCase):
         skill_result = self.verify(ignored_project_skill)
         self.assertEqual(skill_result.returncode, 3)
         self.assertIn("differs from its committed tree", skill_result.stderr)
+
+        decoy_verifier = self.make_snapshot("decoy-verifier")
+        decoy = decoy_verifier / "scripts/ci/verify-source-identity.sh"
+        decoy.parent.mkdir(parents=True)
+        decoy.write_text("#!/usr/bin/env bash\nexit 0\n")
+        replaced = self.verify(decoy_verifier)
+        self.assertEqual(replaced.returncode, 3)
+        self.assertIn("differs from its committed tree", replaced.stderr)
 
 
 if __name__ == "__main__":

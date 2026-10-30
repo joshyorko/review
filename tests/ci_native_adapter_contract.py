@@ -24,12 +24,19 @@ def test_cleanup_is_run_tag_scoped_and_load_failure_never_removes_an_image_id():
 
 def test_appliance_archive_is_checked_against_the_snapshot_commit_before_build():
     module = (ROOT / ".dagger/main.go").read_text()
-    verifier = (ROOT / "scripts/ci/verify-source-identity.sh").read_text()
+    verifier = (ROOT / ".dagger/verify-source-identity.sh").read_text()
+    assert "//go:embed verify-source-identity.sh" in module
+    assert "sourceIdentityVerifier.ReadFile(\"verify-source-identity.sh\")" in module
+    assert "WithNewFile(\"/usr/local/bin/verify-source-identity.sh\", string(verifier)" in module
     assert "m.verifySourceSubject(ctx, source, revision)" in module
+    assert 'WithExec([]string{"/usr/local/bin/verify-source-identity.sh", revision, "/verified"})' in module
+    assert "committedSource.DockerBuild" in module
+    assert "source.DockerBuild" not in module
     assert 'git bundle list-heads "$bundle"' in verifier
     assert '"$bundle_head" == "$revision"' in verifier
+    assert 'git add -f -A -- .' in verifier
     assert 'git diff --cached --quiet "$revision" --' in verifier
-    assert 'git add -f -- .agents/skills/review-ci' in verifier
+    assert 'git archive "$revision"' in verifier
 
 
 def test_interrupted_podman_import_never_removes_an_image_or_tag():
