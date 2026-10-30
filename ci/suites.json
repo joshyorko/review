@@ -10,6 +10,7 @@
       "ci-registry-invocation-test",
       "ci-shellcheck",
       "agent-cli-contract",
+      "precommit-acquisition-contract",
       "static-hygiene"
     ],
     "portable": [
@@ -25,6 +26,7 @@
       "source-snapshot-contract",
       "omp-review-mode",
       "agent-cli-contract",
+      "precommit-acquisition-contract",
       "just-onboarding",
       "appliance-contract",
       "package-review-contract",

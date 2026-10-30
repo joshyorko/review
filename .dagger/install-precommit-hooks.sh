@@ -23,7 +23,7 @@ temporary="$(mktemp -d "${TMPDIR:-/tmp}/review-precommit-hooks.XXXXXXXX")" || {
   exit 1
 }
 
-# shellcheck disable=SC2329 # Called indirectly by the EXIT trap.
+# shellcheck disable=SC2317,SC2329 # Called indirectly by the EXIT trap.
 cleanup() {
   local file
   for file in current.stdout current.stderr current.combined first.stdout first.stderr last.stdout last.stderr; do

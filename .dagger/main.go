@@ -16,6 +16,9 @@ import (
 //go:embed verify-source-identity.sh
 var sourceIdentityVerifier embed.FS
 
+//go:embed install-precommit-hooks.sh
+var preCommitHookInstaller embed.FS
+
 type ReviewCi struct{}
 
 // Runs fast, host-independent contracts against the supplied source snapshot.
@@ -173,7 +176,8 @@ var supportedSteps = map[string]string{
 	"release-request-plan":        "python3 tests/ci_release_request_plan_test.py",
 	"release-request-adapter":     "python3 tests/ci_release_request_test.py",
 	"agent-cli-contract":          "bash tests/ci_mcp_cli_fallback.sh",
-	"ci-shellcheck":           "shellcheck --exclude=SC1090 --exclude=SC2034 bin/ci scripts/ci/native-appliance.sh scripts/ci/check-oci-digest.sh scripts/validate-release-source.sh tests/ci-runner-contract.sh tests/release-publication-source.sh",
+	"precommit-acquisition-contract": "python3 tests/ci_precommit_acquire_test.py",
+	"ci-shellcheck":           "shellcheck --exclude=SC1090 --exclude=SC2034 bin/ci scripts/ci/native-appliance.sh scripts/ci/check-oci-digest.sh scripts/validate-release-source.sh .dagger/install-precommit-hooks.sh tests/ci-runner-contract.sh tests/release-publication-source.sh",
 	"static-hygiene":          "SKIP=check-skill-frontmatter,generate-skills,omp-review-mode,appliance-contract pre-commit run --all-files --show-diff-on-failure",
 	"source-snapshot-contract": "python3 tests/ci_source_snapshot_test.py && python3 tests/ci_appliance_subject_test.py && python3 tests/ci_native_adapter_contract.py",
 	"skill-frontmatter":        "bash scripts/check-skill-frontmatter.sh",
@@ -200,11 +204,15 @@ var supportedSteps = map[string]string{
 }
 
 var requiredProfiles = map[string][]string{
-	"contract": {"check-commit-message", "just-onboarding", "ci-runner-contract", "ci-path-plan-contract", "source-snapshot-contract", "ci-registry-invocation-test", "ci-shellcheck", "agent-cli-contract", "static-hygiene"},
-	"portable": {"static-hygiene", "skill-frontmatter", "generate-skills", "test-registry", "check-commit-message", "release-dispatch-guard", "release-request-plan", "release-request-adapter", "ci-path-plan-contract", "source-snapshot-contract", "omp-review-mode", "agent-cli-contract", "just-onboarding", "appliance-contract", "package-review-contract", "release-version", "review-changelog", "package-oci-contract", "appliance-sbom-contract", "version-derivation", "update-omp-pins", "qualify-omp-upgrade-tests", "update-derived-pins", "luna-factory", "luna-dogfood-contract", "sdk-types", "omp-source-regressions", "renovate-config"},
+	"contract": {"check-commit-message", "just-onboarding", "ci-runner-contract", "ci-path-plan-contract", "source-snapshot-contract", "ci-registry-invocation-test", "ci-shellcheck", "agent-cli-contract", "precommit-acquisition-contract", "static-hygiene"},
+	"portable": {"static-hygiene", "skill-frontmatter", "generate-skills", "test-registry", "check-commit-message", "release-dispatch-guard", "release-request-plan", "release-request-adapter", "ci-path-plan-contract", "source-snapshot-contract", "omp-review-mode", "agent-cli-contract", "precommit-acquisition-contract", "just-onboarding", "appliance-contract", "package-review-contract", "release-version", "review-changelog", "package-oci-contract", "appliance-sbom-contract", "version-derivation", "update-omp-pins", "qualify-omp-upgrade-tests", "update-derived-pins", "luna-factory", "luna-dogfood-contract", "sdk-types", "omp-source-regressions", "renovate-config"},
 }
 
 func run(ctx context.Context, source *dagger.Directory, commands []string) (string, error) {
+	preCommitInstaller, err := preCommitHookInstaller.ReadFile("install-precommit-hooks.sh")
+	if err != nil {
+		return "", fmt.Errorf("read trusted pre-commit hook installer: %w", err)
+	}
 	nodeImage := dag.Container().From("node:26.13.0-bookworm-slim@sha256:bc0a2afd3b74ce12222fc8bab99271e66257f021078f5f4a5d687a77d280c1d9")
 	container := dag.Container().
 		From("python:3.13.9-slim-bookworm@sha256:b685a4fa58bb19d1814d78a1ec0f0208f351452724f78b20212c984d6e124a34").
@@ -216,7 +224,8 @@ func run(ctx context.Context, source *dagger.Directory, commands []string) (stri
 		WithFile("/tooling/requirements-ci.lock", source.File("requirements-ci.lock")).
 		WithFile("/tooling/.pre-commit-config.yaml", source.File(".pre-commit-config.yaml")).
 		WithWorkdir("/tooling").
-		WithExec([]string{"bash", "-lc", "git init -q --initial-branch=main /tooling && python3 -m pip install --require-hashes --no-warn-script-location -r requirements-ci.lock && pre-commit install-hooks --config .pre-commit-config.yaml"}).
+		WithNewFile("/tooling/install-precommit-hooks.sh", string(preCommitInstaller), dagger.ContainerWithNewFileOpts{Permissions: 0755}).
+		WithExec([]string{"bash", "-lc", "git init -q --initial-branch=main /tooling && python3 -m pip install --require-hashes --no-warn-script-location -r requirements-ci.lock && bash /tooling/install-precommit-hooks.sh /tooling/.pre-commit-config.yaml"}).
 		WithExec([]string{"chown", "-R", "node:node", "/opt/review-pre-commit"}).
 		WithExec([]string{"mkdir", "-p", "/opt/review-sdk"}).
 		WithFile("/opt/review-sdk/package.json", source.File("ci/sdk-types/package.json")).
