@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "profiles": {
+    "contract": [
+      "check-commit-message",
+      "just-onboarding"
+    ],
+    "portable": [
+      "skill-frontmatter",
+      "generate-skills",
+      "test-registry",
+      "check-commit-message",
+      "omp-review-mode",
+      "just-onboarding",
+      "appliance-contract",
+      "package-review-contract",
+      "package-oci-contract",
+      "appliance-sbom-contract",
+      "version-derivation",
+      "update-omp-pins",
+      "update-derived-pins",
+      "luna-factory"
+    ]
+  }
+}

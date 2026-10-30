@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+profile="pre-push"
+while (($#)); do
+  case "$1" in
+    --profile) profile="${2:?missing value for --profile}"; shift 2 ;;
+    --base|--ref|--require-os) shift 2 ;;
+    --require-native) shift ;;
+    -h|--help)
+      cat <<'HELP'
+Usage: bin/ci [--profile pre-push|contract|portable]
+
+Runs the checked-in Review verification graph through Dagger. Native runtime
+and publication profiles are not yet available through this entrypoint.
+HELP
+      exit 0
+      ;;
+    *) echo "bin/ci: unsupported argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+case "$profile" in
+  pre-push|contract) dagger_profile=contract ;;
+  portable) dagger_profile=portable ;;
+  contract) dagger_profile=contract ;;
+  *) echo "bin/ci: profile '$profile' requires a native/authorized adapter not available in this checkpoint" >&2; exit 3 ;;
+esac
+
+command -v dagger >/dev/null || { echo "bin/ci: Dagger CLI 0.21.11 is required" >&2; exit 127; }
+version="$(dagger version)"
+[[ "$version" == "dagger v0.21.11 "* ]] || {
+  echo "bin/ci: expected Dagger v0.21.11, found: $version" >&2
+  exit 2
+}
+
+cd "$repo_root"
+snapshot="$(mktemp -d "${TMPDIR:-/tmp}/review-ci-source.XXXXXX")"
+trap 'rm -rf -- "$snapshot"' EXIT
+python3 scripts/ci/source-snapshot.py "$snapshot"
+env \
+  -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_COPILOT_TOKEN -u COPILOT_GITHUB_TOKEN \
+  -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u CONTEXT7_API_KEY \
+  -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+  DAGGER_NO_NAG=1 dagger call check --source="$snapshot" --profile="$dagger_profile"

@@ -29,6 +29,10 @@
 # This checkout exposes Review and Luna Factory; optional integrations are
 # selected explicitly by the operator.
 
+# Run the local-first verification profile used by CI.
+ci:
+    bin/ci --profile pre-push
+
 # Shared bash, 'eval''d at the top of recipes that need it:
 # GitHub authentication, host preflight, and runtime selection. Keeping
 # this in one place avoids duplicate launch policy without creating a

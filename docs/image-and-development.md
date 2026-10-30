@@ -55,6 +55,11 @@ leave `publish` disabled to test an unpublished committed ref.
 
 ## Validation
 
+Run `just ci` (equivalent to `bin/ci --profile pre-push`) before each push,
+workflow dispatch/rerun, or release action. It uses the repository's Dagger
+module and the selected profile. Native proof remains profile-specific; an
+unavailable required host capability is blocked rather than counted as pass.
+
 ```bash
 pre-commit run --all-files
 bash tests/check-commit-message.sh

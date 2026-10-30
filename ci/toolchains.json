@@ -1,0 +1,14 @@
+{
+  "dagger": {
+    "version": "0.21.11",
+    "githubAction": "dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77"
+  },
+  "verification": {
+    "nodeImage": "node:26.13.0-bookworm-slim",
+    "just": {
+      "version": "1.52.0",
+      "linuxAmd64Sha256": "e0a712614574d45625332529c864754e26782422b7c7db931466180a618f092d",
+      "linuxArm64Sha256": "41af45372c49c404ca7b9a318ae9de5564636e39c6520cc4d42bf678f3bfb1bc"
+    }
+  }
+}
