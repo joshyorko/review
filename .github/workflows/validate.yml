@@ -29,13 +29,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           EVENT_REF: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REPOSITORY" = joshyorko/review
-          test "$EXPECTED_SHA" = "$(git rev-parse HEAD)"
-          pull="$(gh api "repos/$GITHUB_REPOSITORY/pulls?head=$GITHUB_REPOSITORY:$EVENT_REF&state=open" \
-            --jq '[.[] | select(.head.sha == env.EXPECTED_SHA and .head.ref == env.EVENT_REF)] | length')"
-          test "$pull" = 1
+        run: bash scripts/validate-release-dispatch.sh
+
+      - name: Explicit release dispatch guard contract
+        run: python3 tests/release-dispatch-guard.py
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
