@@ -36,6 +36,7 @@ import {
 	HANDOFF_ENTRY,
 	GENERIC_WORKBENCH_POLICY,
 	actionPrompt,
+	issuePrReadyOutputSchema,
 	createReviewExtension as createReviewExtensionImpl,
 	NOTICE_ENTRY,
 	taskSchemaSupportsStructuredOutput,
@@ -6163,6 +6164,129 @@ test("one task fan-out retains every sibling job independently across consumptio
 	await pi.events.get("agent_end")({}, ctx);
 	assert.equal(pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1).data.state, "complete");
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+});
+
+for (const kind of ["slay", "fix"]) test(`new issue ${kind} admission is versioned before PR-ready follow-through`, async () => {
+	const states = { "projectbluefin/review#77": { title: `new ${kind} issue`, submittedPrs: [] } };
+	const env = { ...ISOLATED_ENV };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	if (kind === "slay") await pi.commands.get("review").handler("slay", ctx);
+	else {
+		ctx.overlays[0].handleInput("A");
+		ctx.overlays[0].handleInput("f");
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+	}
+	const admitted = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(admitted?.version, 2, "new PR-ready work must carry its admitted outcome version");
+	assert.equal(admitted?.issueOutcome, "pr-ready");
+});
+
+for (const kind of ["slay", "fix"]) test(`new issue ${kind} does not adopt a linked PR without its exact delivered worker receipt`, async () => {
+	const states = { "projectbluefin/review#77": { title: `unattributed ${kind} PR`, submittedPrs: [] } };
+	const env = { ...ISOLATED_ENV };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	if (kind === "slay") await pi.commands.get("review").handler("slay", ctx);
+	else {
+		ctx.overlays[0].handleInput("A");
+		ctx.overlays[0].handleInput("f");
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+	}
+	const admitted = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(admitted?.version, 2);
+	const toolCallId = `issue-${kind}-worker-call`;
+	const jobId = `issue-${kind}-worker-job`;
+	await pi.events.get("tool_call")({
+		toolName: "task", toolCallId,
+		input: { tasks: [{ name: "IssueWorker77", agent: "fixer", task: "Implement projectbluefin/review#77", schemaMode: "strict", outputSchema: issuePrReadyOutputSchema("projectbluefin/review#77") }] },
+	}, ctx);
+	ctx.asyncJobs.recent = [{ id: jobId, agentId: "IssueWorker77", type: "task", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("tool_execution_end")({ toolCallId, isError: false, result: { details: {
+		async: { type: "task", state: "completed", jobId },
+		progress: [{ id: "IssueWorker77", index: 0, status: "completed" }],
+		results: [],
+	} } }, ctx);
+	await deliverTaskResults(pi, ctx, [jobId]);
+	states["projectbluefin/review#77"].submittedPrs = ["projectbluefin/review#99"];
+	await pi.events.get("agent_end")({}, ctx);
+	const current = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	const claims = new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT);
+	assert.notEqual(current?.state, "complete", "a new issue link without a delivered worker result cannot finish PR-ready work");
+	assert.equal(current?.completedItems, 0);
+	assert.equal(claims.list().length, 2, "ambiguous ownership keeps the original wave claims");
+	assert.match(current?.error ?? "", /worker receipt|attribution/i);
+});
+
+test("issue Slay and Fix workers receive the strict issue/PR/head and acceptance receipt schema", () => {
+	const item = queueItem({ type: "issue", repo: "projectbluefin/review", id: 77, title: "typed issue result", submittedPrs: [] });
+	for (const kind of ["slay", "fix"] as const) {
+		const prompt = actionPrompt({ kind, item }) ?? "";
+		assert.match(prompt, /schemaMode["` ]*[:=]["` ]*strict/i, `${kind} must request strict structured output`);
+		assert.match(prompt, /projectbluefin\/review#77/);
+		assert.match(prompt, /headSha/);
+		assert.match(prompt, /acceptance/);
+		assert.match(prompt, /exitCode/);
+	}
+});
+
+test("new issue Slay records the exact delivered structured worker receipt and keeps claims while checks are unobserved", async () => {
+	const issueKey = "projectbluefin/review#77";
+	const states = { [issueKey]: { title: "exact worker receipt", submittedPrs: [] } };
+	const env = { ...ISOLATED_ENV };
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx(); ctx.ui.parent = ctx;
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: issueBackedFetch(states), env });
+	await pi.events.get("session_start")({}, ctx); await review.whenStarted();
+	await pi.commands.get("review").handler("slay", ctx);
+	const toolCallId = "exact-issue-task-call";
+	const agentId = "IssueWorker77";
+	const jobId = "exact-issue-task-job";
+	const taskPrompt = `Implement ${issueKey} in its admitted target checkout.`;
+	const outputSchema = issuePrReadyOutputSchema(issueKey);
+	await pi.events.get("tool_call")({ toolName: "task", toolCallId, input: {
+		tasks: [{ agent: "fixer", name: agentId, task: taskPrompt, schemaMode: "strict", outputSchema }],
+	} }, ctx);
+	ctx.asyncJobs.recent = [{ id: jobId, agentId, type: "task", status: "completed", startTime: Date.now() + 1 }];
+	await pi.events.get("tool_execution_end")({ toolCallId, isError: false, result: { details: {
+		async: { type: "task", state: "completed", jobId },
+		progress: [{ id: agentId, index: 0, status: "completed" }],
+		results: [],
+	} } }, ctx);
+	const data = {
+		issueKey, outcome: "pr-ready",
+		pullRequest: { number: 99, url: "https://github.com/projectbluefin/review/pull/99", headSha: "9".repeat(40) },
+		checks: [{ command: "npm test", exitCode: 0 }],
+		acceptance: { summary: "Declared criteria verified", criteria: [{ id: "behavior", evidence: "tests/test_behavior.py" }] },
+		blocker: "",
+	};
+	await deliverTaskResults(pi, ctx, [jobId], [{
+		jobId, type: "task", agentId, status: "completed",
+		schema: { source: "caller", mode: "strict", status: "valid", data },
+	}]);
+	states[issueKey].submittedPrs = ["projectbluefin/review#99"];
+	await pi.events.get("agent_end")({}, ctx);
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	const receipt = batch.issueWorkerReceipts?.[issueKey];
+	assert.equal(receipt?.toolCallId, toolCallId);
+	assert.equal(receipt?.agentId, agentId);
+	assert.equal(receipt?.jobId, jobId);
+	assert.equal(receipt?.pullRequest.headSha, "9".repeat(40));
+	assert.match(receipt?.assignmentDigest ?? "", /^[a-f0-9]{64}$/);
+	assert.match(receipt?.resultDigest ?? "", /^[a-f0-9]{64}$/);
+	assert.notEqual(batch.state, "complete", "worker acceptance and PR link do not substitute for current hosted-check evidence");
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 2);
 });
 
 test("interrupted issue Slay reconciles the exact submitted PR after restart", async () => {
