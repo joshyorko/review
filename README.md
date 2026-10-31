@@ -10,6 +10,10 @@ Review brings pull requests and issues into a terminal workbench for inspection,
 
 A launch begins on your Linux host. Review chooses a supported runtime, brings up the packaged workbench in the foreground, and keeps its session state in an appliance-owned home. From there, choose whether to inspect GitHub work in Review or admit a bounded batch to Luna Factory.
 
+[![Review runtime map: the launcher selects Podman with krun and KVM or isolated Apptainer before starting the appliance](docs/images/runtime-map.svg)](docs/workbenches/runtime.html)
+
+*Conceptual runtime map. [Open the interactive explorer](docs/workbenches/runtime.html) from a checkout or downloaded file; GitHub displays its source rather than executing it.*
+
 ```mermaid
 flowchart TD
     Host["Linux host · Review launcher"] --> Choose{"Runtime selection"}
@@ -29,7 +33,7 @@ flowchart TD
 | Apptainer | Automatic fallback when available, or select explicitly. Requires Apptainer, squashfuse and accessible FUSE. | Isolated Apptainer SIF/OCI path; not a krun VM. |
 | Source | `bin/review-source` uses a locally installed OMP. | Runs outside the packaged appliance; it is a different execution boundary. |
 
-With Factory enabled, the selected packaged runtime must pass its verifier preflight and a sandbox test before OMP opens. Failure blocks that startup. See [appliance setup](docs/appliance.md) for prerequisites and the full boundary.
+A selected SIF uses Apptainer directly. Explicit krun does not fall back. With Factory enabled, the selected packaged runtime must pass its verifier preflight and a sandbox test before OMP opens. Failure blocks that startup. See [appliance setup](docs/appliance.md) for prerequisites and the full boundary.
 
 ## Quick start
 
@@ -67,6 +71,10 @@ Review projects a GitHub repository or organization into a queue and trace. Navi
 **[Explore the Review workbench →](docs/workbenches/review.md)**
 
 ### Luna Factory · Admit, execute, and verify bounded work
+
+![Luna Factory checkpoint showing an unknown effect that needs reconciliation](docs/factory/dashboard-checkpoint/unknown-wide.png)
+
+*Historical packaged-runtime checkpoint using deterministic GitHub and model fixtures. The UNKNOWN effect is not proof of completion. [Capture context and limits](docs/factory/dashboard-checkpoint.md).*
 
 Factory is co-loaded with Review, but loading it starts no work. Enable execution explicitly with `LUNA_FACTORY_ENABLED=1`. Factory owns admission, attempts, claims, evidence, and reconciliation; seeing an item in Review does not admit it. Factory completion does not confer landing or deployment authority.
 
