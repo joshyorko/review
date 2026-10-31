@@ -1,0 +1,771 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Review · Runtime explorer</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+      --bg: #0b1116;
+      --panel: #111b22;
+      --panel-raised: #18252d;
+      --line: #40525b;
+      --line-strong: #687b84;
+      --text: #edf3f4;
+      --muted: #afbec3;
+      --quiet: #8c9ba1;
+      --cyan: #5dd5e8;
+      --cyan-ink: #092329;
+      --cyan-soft: #173740;
+      --amber: #f1c36c;
+      --amber-soft: #392f1d;
+      --green: #92dcae;
+      --shadow: #02070a;
+      --body-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono-font: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      font-family: var(--body-font);
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+    }
+
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #f2f6f5;
+      --panel: #ffffff;
+      --panel-raised: #e7efee;
+      --line: #c5d0d1;
+      --line-strong: #899da1;
+      --text: #13272d;
+      --muted: #405b62;
+      --quiet: #536b70;
+      --cyan: #006d80;
+      --cyan-ink: #ffffff;
+      --cyan-soft: #dceff0;
+      --amber: #805300;
+      --amber-soft: #f5ebd5;
+      --green: #17673b;
+      --shadow: #20363a;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme]) {
+        color-scheme: light;
+        --bg: #f2f6f5;
+        --panel: #ffffff;
+        --panel-raised: #e7efee;
+        --line: #c5d0d1;
+        --line-strong: #899da1;
+        --text: #13272d;
+        --muted: #405b62;
+        --quiet: #536b70;
+        --cyan: #006d80;
+        --cyan-ink: #ffffff;
+        --cyan-soft: #dceff0;
+        --amber: #805300;
+        --amber-soft: #f5ebd5;
+        --green: #17673b;
+        --shadow: #20363a;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      min-width: 320px;
+      margin: 0;
+      background:
+        radial-gradient(ellipse at 54% -16%, color-mix(in srgb, var(--cyan) 12%, transparent), transparent 48%),
+        var(--bg);
+      color: var(--text);
+      font: 16px/1.55 var(--body-font);
+    }
+    a { color: var(--cyan); text-underline-offset: .22em; }
+    a:hover { text-decoration-thickness: 2px; }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    :focus-visible { outline: 3px solid var(--amber); outline-offset: 3px; }
+    .page { width: min(1180px, calc(100% - 40px)); margin-inline: auto; }
+
+    .topbar {
+      min-height: 66px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .brand-mark {
+      width: 12px;
+      height: 12px;
+      border: 2px solid var(--cyan);
+      transform: rotate(45deg);
+      box-shadow: 0 0 14px color-mix(in srgb, var(--cyan) 34%, transparent);
+    }
+    .topnav { display: flex; align-items: center; gap: clamp(12px, 2vw, 26px); }
+    .topnav a { color: var(--muted); font-size: 13px; text-decoration: none; }
+    .topnav a:hover { color: var(--text); }
+    .theme-button, .replay-button, .copy-button {
+      min-height: 42px;
+      border: 1px solid var(--line-strong);
+      border-radius: 3px;
+      background: transparent;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .theme-button:hover, .replay-button:hover, .copy-button:hover { border-color: var(--cyan); }
+    button:disabled { opacity: .66; cursor: not-allowed; }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(250px, .85fr);
+      align-items: end;
+      gap: 32px;
+      padding: 28px 0 21px;
+    }
+    .eyebrow, .chapter, .node-index, .meta-label {
+      color: var(--cyan);
+      font: 12px/1.4 var(--mono-font);
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 {
+      max-width: 760px;
+      margin: 7px 0 9px;
+      font-size: clamp(2rem, 4.4vw, 3.35rem);
+      line-height: 1.02;
+      letter-spacing: -.055em;
+    }
+    .hero-copy { max-width: 650px; margin: 0; color: var(--muted); font-size: 16px; }
+    .hero-note {
+      margin: 0 0 2px;
+      border-left: 2px solid var(--cyan);
+      padding: 2px 0 2px 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .hero-note strong { color: var(--text); }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 20px;
+      border-top: 1px solid var(--line);
+      padding: 15px 0 12px;
+    }
+    .section-head h2 { margin: 3px 0 0; font-size: clamp(1.2rem, 2vw, 1.55rem); letter-spacing: -.03em; }
+    .section-summary { max-width: 560px; margin: 0; color: var(--muted); font-size: 13px; }
+
+    .controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(250px, .78fr) auto;
+      gap: 18px;
+      align-items: center;
+      margin: 12px 0 14px;
+    }
+    fieldset { min-width: 0; margin: 0; border: 0; padding: 0; }
+    legend { margin-bottom: 7px; color: var(--quiet); font: 12px/1.4 var(--mono-font); letter-spacing: .08em; text-transform: uppercase; }
+    .runtime-choices { display: flex; flex-wrap: wrap; gap: 7px; }
+    .runtime-choices button {
+      min-height: 44px;
+      border: 1px solid var(--line-strong);
+      border-radius: 3px;
+      background: var(--panel);
+      padding: 7px 11px;
+      cursor: pointer;
+      text-align: left;
+      font-size: 13px;
+      transition: border-color .18s ease, background .18s ease;
+    }
+    .runtime-choices button[aria-pressed="true"] {
+      border-color: var(--cyan);
+      background: var(--cyan-soft);
+      box-shadow: inset 3px 0 0 var(--cyan);
+    }
+    .factory-control {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      border-left: 2px solid var(--amber);
+      padding-left: 13px;
+    }
+    .factory-control input { width: 18px; height: 18px; flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--amber); }
+    .factory-control label { cursor: pointer; }
+    .factory-control strong { display: block; font-size: 13px; }
+    .factory-control span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .replay-button { align-self: end; white-space: nowrap; }
+    .replay-button::before { content: "↻"; margin-right: 7px; color: var(--cyan); font-size: 17px; vertical-align: -1px; }
+
+    .map-shell {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(90deg, color-mix(in srgb, var(--cyan) 5%, transparent) 1px, transparent 1px),
+        linear-gradient(color-mix(in srgb, var(--cyan) 5%, transparent) 1px, transparent 1px),
+        var(--panel);
+      background-size: 34px 34px;
+      padding: clamp(16px, 2.6vw, 28px);
+      perspective: 1400px;
+      isolation: isolate;
+    }
+    .map-shell::before {
+      position: absolute;
+      z-index: -1;
+      inset: 0;
+      background: radial-gradient(ellipse at 50% 13%, color-mix(in srgb, var(--cyan) 10%, transparent), transparent 60%);
+      content: "";
+      pointer-events: none;
+    }
+    .map-meta { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 14px; color: var(--quiet); font: 12px/1.4 var(--mono-font); letter-spacing: .08em; text-transform: uppercase; }
+    .concept-note { color: var(--amber); }
+    .route-diagram {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-rows: auto 24px 18px auto 24px auto 12px auto;
+      grid-template-areas: "host host" "split split" "branch-label branch-label" "krun apptainer" "merge merge" "gate gate" "omp-gap omp-gap" "omp omp";
+      align-items: stretch;
+      gap: 0 20px;
+      position: relative;
+      transform: rotateX(3deg) rotateY(-1deg);
+      transform-style: preserve-3d;
+    }
+    .host-node { grid-area: host; justify-self: center; width: min(100%, 520px); }
+    .krun-node { grid-area: krun; }
+    .apptainer-node { grid-area: apptainer; }
+    .branch-label { grid-area: branch-label; align-self: end; color: var(--quiet); text-align: center; font: 12px/1.4 var(--mono-font); letter-spacing: .07em; text-transform: uppercase; }
+    .mobile-or { display: none; }
+    .omp-gap { grid-area: omp-gap; }
+    .omp-node { grid-area: omp; justify-self: center; width: min(100%, 680px); border-right: 3px solid var(--cyan) !important; text-align: center; }
+    .gate-rail { grid-area: gate; width: min(100%, 780px); justify-self: center; margin: 0; }
+    .route-link { width: 100%; height: 100%; overflow: visible; }
+    .route-link.split { grid-area: split; }
+    .route-link.merge { grid-area: merge; }
+    .route-link path { fill: none; stroke: var(--line-strong); stroke-width: 2; vector-effect: non-scaling-stroke; }
+    .route-link .krun-wire { stroke: var(--cyan); }
+    .route-link .apptainer-wire { stroke: var(--amber); stroke-dasharray: 7 6; }
+    .route-diagram[data-runtime="krun"] .apptainer-wire,
+    .route-diagram[data-runtime="apptainer"] .krun-wire { opacity: .4; }
+    .route-diagram[data-runtime="krun"] .krun-wire,
+    .route-diagram[data-runtime="apptainer"] .apptainer-wire { stroke-width: 3; }
+    .route-diagram[data-runtime="auto"] .krun-wire { stroke-width: 3; }
+    .route-diagram[data-runtime="auto"] .apptainer-wire { opacity: .62; stroke-dasharray: 4 8; }
+    .node {
+      min-width: 0;
+      min-height: 88px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      position: relative;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: color-mix(in srgb, var(--panel-raised) 94%, transparent);
+      box-shadow: 0 7px 0 color-mix(in srgb, var(--shadow) 45%, transparent), 0 16px 28px color-mix(in srgb, var(--shadow) 24%, transparent);
+      padding: 12px 15px;
+      transform: translateZ(10px);
+      transition: border-color .18s ease, background .18s ease, box-shadow .18s ease, opacity .18s ease;
+    }
+    .node-index { display: block; margin-bottom: 4px; color: var(--quiet); }
+    .node strong { display: block; font-size: 15px; line-height: 1.3; }
+    .node small { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .node .route-state { display: inline-flex; align-self: flex-start; max-width: 100%; margin-top: 7px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; color: var(--muted); font: 12px/1.4 var(--mono-font); overflow-wrap: anywhere; }
+    .node[data-state="primary"] { border-color: var(--cyan); background: var(--cyan-soft); box-shadow: 0 7px 0 color-mix(in srgb, var(--shadow) 45%, transparent), 0 0 23px color-mix(in srgb, var(--cyan) 16%, transparent); }
+    .node[data-state="primary"] .route-state { border-color: var(--cyan); color: var(--cyan); }
+    .node[data-state="secondary"], .node[data-state="inactive"] { border-style: dashed; box-shadow: none; }
+    .route-diagram[data-runtime="apptainer"] .apptainer-node { border-color: var(--amber); background: var(--amber-soft); }
+    .route-diagram[data-runtime="apptainer"] .apptainer-node .route-state { border-color: var(--amber); color: var(--amber); }
+    .gate-rail[data-enabled="true"] { border-style: solid; background: var(--amber-soft); }
+    .gate-rail {
+      display: grid;
+      grid-template-columns: minmax(180px, .85fr) minmax(0, 1.5fr);
+      align-items: center;
+      gap: 16px;
+      border: 1px dashed color-mix(in srgb, var(--amber) 68%, var(--line));
+      border-left: 3px solid var(--amber);
+      background: color-mix(in srgb, var(--amber-soft) 56%, transparent);
+      padding: 11px 13px;
+      transition: background .18s ease, opacity .18s ease;
+    }
+    .gate-rail[data-enabled="false"] { opacity: .9; }
+    .gate-rail strong { display: block; color: var(--amber); font-size: 13px; }
+    .gate-rail small { display: block; margin-top: 3px; color: var(--muted); font: 12px/1.45 var(--mono-font); }
+    .gate-rail p { margin: 0; color: var(--muted); font-size: 13px; }
+    .source-boundary { margin: 12px 0 0; color: var(--quiet); font-size: 13px; }
+    .source-boundary strong { color: var(--text); }
+    .route-readout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(300px, .95fr);
+      gap: 25px;
+      align-items: start;
+      border-bottom: 1px solid var(--line);
+      padding: 17px 0 22px;
+    }
+    .route-readout h3 { margin: 4px 0 6px; font-size: 19px; letter-spacing: -.025em; }
+    .route-readout p { margin: 0; color: var(--muted); }
+    .route-command { min-width: 0; border: 1px solid var(--line-strong); border-left: 3px solid var(--cyan); background: var(--panel); padding: 11px 12px; }
+    .command-label { display: block; margin-bottom: 7px; color: var(--quiet); font: 12px/1.4 var(--mono-font); letter-spacing: .08em; text-transform: uppercase; }
+    .command-row { display: flex; align-items: flex-start; gap: 10px; }
+    .command-row code { flex: 1 1 auto; min-width: 0; color: var(--green); font: 13px/1.5 var(--mono-font); overflow-wrap: anywhere; }
+    .copy-button { flex: 0 0 auto; min-height: 36px; padding: 6px 9px; font-size: 12px; }
+    .copy-state { min-height: 18px; margin: 5px 0 0; color: var(--quiet); font-size: 12px; }
+
+    .workbenches, .boundaries { padding: 26px 0 36px; }
+    .evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 26px; padding-top: 17px; }
+    figure { min-width: 0; margin: 0; }
+    figure img { display: block; width: 100%; height: auto; border: 1px solid var(--line-strong); background: #050809; }
+    figcaption { margin-top: 8px; color: var(--quiet); font-size: 13px; line-height: 1.45; }
+    figcaption strong { color: var(--text); }
+    .evidence-copy h3 { margin: 8px 0 5px; font-size: 18px; letter-spacing: -.02em; }
+    .evidence-copy p { margin-bottom: 8px; color: var(--muted); font-size: 14px; }
+    .evidence-copy .chapter { margin: 0; }
+    .boundaries-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; padding-top: 15px; }
+    .boundaries-grid article { min-width: 0; border-top: 2px solid var(--line-strong); padding-top: 11px; }
+    .boundaries-grid h3 { margin: 0 0 6px; font-size: 15px; }
+    .boundaries-grid p { margin: 0; color: var(--muted); font-size: 13px; }
+    .sources { display: flex; flex-wrap: wrap; gap: 12px 20px; padding: 12px 0 28px; border-top: 1px solid var(--line); }
+    .sources a { color: var(--muted); font-size: 13px; }
+    .noscript-note { margin: 10px 0; border-left: 2px solid var(--amber); padding-left: 12px; color: var(--muted); font-size: 13px; }
+    .replay-status { min-height: 18px; margin: 8px 0 0; color: var(--quiet); font-size: 12px; }
+
+    @keyframes route-enter {
+      from { opacity: .35; transform: translateY(9px) translateZ(-18px); }
+      to { opacity: 1; transform: translateY(0) translateZ(10px); }
+    }
+    @keyframes route-draw { from { stroke-dashoffset: 56; } to { stroke-dashoffset: 0; } }
+    .route-diagram.is-replaying .sequence-node { animation: route-enter .36s ease both; animation-iteration-count: 1; animation-delay: var(--sequence-delay, 0ms); }
+    .route-diagram.is-replaying .sequence-wire { stroke-dasharray: 56; animation: route-draw .36s ease both; animation-iteration-count: 1; animation-delay: var(--sequence-delay, 0ms); }
+
+    @media (max-width: 920px) {
+      .hero { grid-template-columns: minmax(0, 1.1fr) minmax(210px, .9fr); gap: 20px; }
+      .controls { grid-template-columns: minmax(0, 1fr) minmax(220px, .8fr); }
+      .replay-button { grid-column: 1 / -1; justify-self: end; }
+      .route-readout { grid-template-columns: minmax(0, 1fr) minmax(275px, .9fr); gap: 18px; }
+      .boundaries-grid { gap: 16px; }
+    }
+    @media (max-width: 680px) {
+      .page { width: min(100% - 28px, 560px); }
+      .topbar { min-height: 60px; }
+      .topnav a { display: none; }
+      .theme-button { min-height: 40px; padding: 6px 9px; }
+      .hero { grid-template-columns: 1fr; gap: 12px; padding: 22px 0 17px; }
+      h1 { max-width: 520px; font-size: clamp(2rem, 9vw, 2.7rem); }
+      .hero-note { max-width: 560px; }
+      .section-head { align-items: flex-start; flex-direction: column; gap: 6px; }
+      .controls { grid-template-columns: 1fr; gap: 13px; }
+      .runtime-choices { display: grid; grid-template-columns: 1fr; }
+      .runtime-choices button { width: 100%; }
+      .factory-control { border-left: 0; border-top: 2px solid var(--amber); padding: 10px 0 0; }
+      .replay-button { grid-column: auto; justify-self: start; }
+      .map-shell { padding: 14px 12px; background-size: 28px 28px; }
+      .map-meta { flex-direction: column; gap: 4px; }
+      .route-diagram {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto 18px 18px auto 22px auto 18px auto 10px auto;
+        grid-template-areas: "host" "split" "branch-label" "krun" "choice" "apptainer" "merge" "gate" "omp-gap" "omp";
+        gap: 0;
+        transform: none;
+      }
+      .branch-label { font-size: 12px; }
+      .mobile-or { display: block; grid-area: choice; align-self: center; color: var(--quiet); text-align: center; font: 12px/1.4 var(--mono-font); letter-spacing: .08em; text-transform: uppercase; }
+      .route-link.split path.apptainer-wire { display: none; }
+      .route-link.split path.krun-wire { d: path("M500 0 L500 64"); }
+      .route-link.merge path.krun-wire { d: path("M500 0 L500 64"); }
+      .route-link.merge path.apptainer-wire { d: path("M500 0 L500 64"); }
+      .node { min-height: 82px; padding: 10px 12px; }
+      .omp-node { width: 100%; }
+      .gate-rail { grid-template-columns: 1fr; gap: 6px; }
+      .route-readout { grid-template-columns: 1fr; gap: 14px; padding: 15px 0 19px; }
+      .evidence-grid { grid-template-columns: 1fr; gap: 22px; }
+      .evidence-copy { order: -1; }
+      .boundaries-grid { grid-template-columns: 1fr; gap: 14px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        scroll-behavior: auto !important;
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+      }
+      .route-diagram { transform: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="page topbar">
+    <a class="brand" href="#top" aria-label="Review runtime explorer, top of page"><span class="brand-mark" aria-hidden="true"></span><span>Review</span></a>
+    <nav class="topnav" aria-label="Page sections">
+      <a href="#route">Launch path</a>
+      <a href="#workbenches">Workbenches</a>
+      <a href="#boundaries">Boundaries</a>
+      <button class="theme-button" id="theme-button" type="button" disabled aria-label="Cycle color theme">Theme · System</button>
+    </nav>
+  </header>
+
+  <main id="top" class="page">
+    <section class="hero" aria-labelledby="page-title">
+      <div>
+        <div class="eyebrow">Review · Runtime explorer</div>
+        <h1 id="page-title">One appliance. Two runtime paths.</h1>
+        <p class="hero-copy">The Linux launcher chooses how the packaged OMP workbench starts. Review and Luna Factory share the appliance, with separate responsibilities.</p>
+      </div>
+      <p class="hero-note"><strong>Map, not telemetry.</strong> The diagram explains launcher rules. It does not inspect this host, launch a container, or report a probe result.</p>
+    </section>
+
+    <section id="route" aria-labelledby="route-title">
+      <div class="section-head">
+        <div><div class="chapter">01 / Launch path</div><h2 id="route-title">Follow the selected route</h2></div>
+        <p class="section-summary">Automatic, explicit krun, and explicit Apptainer are the runtime modes. Factory enablement is an independent preflight gate.</p>
+      </div>
+
+      <noscript><p class="noscript-note">JavaScript is off. The static diagram shows the default Auto route and the command below. Theme follows your system preference; selectors, copy, and Replay need JavaScript.</p></noscript>
+
+      <div class="controls">
+        <fieldset>
+          <legend>Runtime mode</legend>
+          <div class="runtime-choices" role="group" aria-label="Select a runtime mode">
+            <button type="button" data-runtime-choice="auto" aria-pressed="true" disabled>Automatic <span aria-hidden="true">· default</span></button>
+            <button type="button" data-runtime-choice="krun" aria-pressed="false" disabled>Podman + krun</button>
+            <button type="button" data-runtime-choice="apptainer" aria-pressed="false" disabled>Apptainer</button>
+          </div>
+        </fieldset>
+        <div class="factory-control">
+          <input id="factory-enabled" type="checkbox" disabled>
+          <label for="factory-enabled"><strong>Enable Factory verifier gate</strong><span>Independent of the runtime mode. This does not admit a batch.</span></label>
+        </div>
+        <button id="replay-button" class="replay-button" type="button" disabled aria-label="Replay the launch route animation once">Replay route</button>
+      </div>
+
+      <div class="map-shell">
+        <div class="map-meta"><span>Linux host → alternate runtime routes → shared appliance</span><span class="concept-note">Conceptual · no host probe</span></div>
+        <div class="route-diagram" id="route-diagram" data-runtime="auto">
+          <article class="node host-node" data-route-node="host">
+            <span class="node-index">01 · Linux host / launcher</span>
+            <strong>Resolve the image and runtime request</strong>
+            <small>The launcher checks prerequisites on this host before OMP opens.</small>
+          </article>
+          <svg class="route-link split" viewBox="0 0 1000 64" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+            <path class="krun-wire" d="M500 0 C500 28 250 28 250 64"></path>
+            <path class="apptainer-wire" d="M500 0 C500 28 750 28 750 64"></path>
+          </svg>
+          <div class="branch-label">Alternative runtime paths · choose one eligible route</div>
+          <article class="node krun-node" data-route-node="krun" data-state="primary">
+            <span class="node-index">02A · krun route</span>
+            <strong>Podman + krun + KVM</strong>
+            <small>OCI image · local Podman engine · accessible KVM</small>
+            <span class="route-state" id="krun-state">Auto · OCI preference</span>
+          </article>
+          <article class="node apptainer-node" data-route-node="apptainer" data-state="secondary">
+            <span class="node-index">02B · Apptainer route</span>
+            <strong>Contained Apptainer</strong>
+            <small>SIF / OCI · squashfuse_ll or squashfuse · accessible FUSE</small>
+            <span class="route-state" id="apptainer-state">OCI fallback · direct for SIF</span>
+          </article>
+          <svg class="route-link merge" viewBox="0 0 1000 64" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+            <path class="krun-wire" d="M250 0 C250 34 500 34 500 64"></path>
+            <path class="apptainer-wire" d="M750 0 C750 34 500 34 500 64"></path>
+          </svg>
+          <div class="mobile-or">OR · alternative runtime path</div>
+          <div class="omp-gap" aria-hidden="true"></div>
+          <div class="gate-rail" id="gate-rail" data-enabled="false">
+            <div><strong>Optional Factory verifier checkpoint</strong><small id="gate-state">OFF · skipped for this launch</small></div>
+            <p id="gate-copy">When disabled, the selected runtime can open OMP without the Factory verifier preflight. Set <code>LUNA_FACTORY_ENABLED=1</code> to qualify the selected runtime before OMP opens. This setting does not dispatch work.</p>
+          </div>
+          <article class="node omp-node" data-route-node="omp">
+            <span class="node-index">03 · Shared OMP appliance</span>
+            <strong>Review workbench + Luna Factory extension</strong>
+            <small>One appliance; Review and Factory keep separate authority and state.</small>
+          </article>
+        </div>
+
+        <p class="source-boundary"><strong>Outside this map:</strong> <code>bin/review-source</code> runs with locally installed OMP. It is a separate source entry point, not a runtime route or appliance fallback.</p>
+      </div>
+
+      <div class="route-readout" aria-live="polite">
+        <div>
+          <div class="eyebrow" id="route-eyebrow">AUTO · DEFAULT</div>
+          <h3 id="route-heading">Auto follows the image type and host prerequisites</h3>
+          <p id="route-description">For an OCI image, Auto prefers Podman + krun + KVM when those checks pass; if they do not, it reports the missing prerequisite and attempts Apptainer when its own requirements pass. A SIF uses Apptainer directly. If no path qualifies, launch stops.</p>
+          <p class="replay-status" id="replay-status" role="status" aria-live="polite">Static route view. Replay runs once when requested.</p>
+        </div>
+        <div class="route-command">
+          <span class="command-label">Example command · scope shown for illustration</span>
+          <div class="command-row"><code id="command-value">review acme/widgets</code><button id="copy-button" class="copy-button" type="button" disabled>Copy</button></div>
+          <p class="copy-state" id="copy-state" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </section>
+
+    <section id="workbenches" class="workbenches" aria-labelledby="workbenches-title">
+      <div class="section-head">
+        <div><div class="chapter">02 / Workbenches</div><h2 id="workbenches-title">One package, different jobs</h2></div>
+        <p class="section-summary">These are real historical terminal captures with fixture data. They are documentation evidence, not current product telemetry.</p>
+      </div>
+      <div class="evidence-grid">
+        <figure>
+          <img loading="lazy" src="https://raw.githubusercontent.com/joshyorko/review/f926a00b7cf752e5c97bfe27327fe3879bc6555c/docs/evidence/review-workbench/2026-10-29/cloud-ansi/browser-100x32/screenshots/03-pr-queue.png" alt="Historical Review terminal capture: a fixture pull request in the queue and a session-wide trace showing no OMP activity yet.">
+          <figcaption><strong>Review · source-runtime capture.</strong> Deterministic GitHub fixture. The right pane is the session-wide trace, not the selected-item Inspector. <a href="https://github.com/joshyorko/review/blob/f926a00b7cf752e5c97bfe27327fe3879bc6555c/docs/evidence/review-workbench/2026-10-29/cloud-ansi/browser-100x32/screenshots/03-pr-queue.png">Screenshot source</a>.</figcaption>
+        </figure>
+        <div class="evidence-copy">
+          <div class="chapter">Review · inspect and decide</div>
+          <h3>A GitHub queue with bounded evidence</h3>
+          <p>Review presents pull requests and issues, supports bounded diff or discussion inspection, and requires confirmed actions with current GitHub revalidation. Read-only specialist recommendations do not authorize a mutation.</p>
+          <p>The screenshot is historical source-runtime evidence. GitHub and model responses used deterministic fixtures; it does not prove live access, appliance qualification, or completed agent work.</p>
+          <p><a href="https://github.com/joshyorko/review/blob/main/docs/skills/review-dashboard.md">Review dashboard controls and recovery</a></p>
+        </div>
+        <div class="evidence-copy">
+          <div class="chapter">Luna Factory · admit and reconcile</div>
+          <h3>Execution has its own record</h3>
+          <p>Factory owns explicit admission, claims, attempts, worker receipts, reconciliation, and durable task state. A returned worker or empty queue is not proof that required work converged.</p>
+          <p><strong>UNKNOWN</strong> means an external effect is uncertain. Reconcile the recorded effect before considering a retry. Completion does not approve, merge, publish, or deploy.</p>
+          <p><a href="https://github.com/joshyorko/review/blob/main/docs/factory/agentic-model.md">Factory operating model</a></p>
+        </div>
+        <figure>
+          <img loading="lazy" src="https://raw.githubusercontent.com/joshyorko/review/f926a00b7cf752e5c97bfe27327fe3879bc6555c/docs/factory/dashboard-checkpoint/unknown-wide.png" alt="Historical Luna Factory dashboard checkpoint: one UNKNOWN GitHub effect requiring reconciliation before retry.">
+          <figcaption><strong>Luna Factory · packaged checkpoint.</strong> Deterministic GitHub and model fixtures. UNKNOWN is a reconciliation case, not proof of completion. <a href="https://github.com/joshyorko/review/blob/f926a00b7cf752e5c97bfe27327fe3879bc6555c/docs/factory/dashboard-checkpoint/unknown-wide.png">Screenshot source</a>.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="boundaries" class="boundaries" aria-labelledby="boundaries-title">
+      <div class="section-head">
+        <div><div class="chapter">03 / Boundaries</div><h2 id="boundaries-title">Read the gate correctly</h2></div>
+        <p class="section-summary">Runtime selection, verifier qualification, work admission, and GitHub authority are separate checks.</p>
+      </div>
+      <div class="boundaries-grid">
+        <article><h3>Missing runtime prerequisites</h3><p>For OCI, Auto prefers krun and attempts Apptainer only when krun prerequisites are missing and Apptainer's own requirements pass. A SIF uses Apptainer directly. Explicit krun never falls back.</p></article>
+        <article><h3>Failed Factory verifier</h3><p>When Factory is enabled, a failed bubblewrap or harmless sandbox check blocks Factory-enabled startup before OMP opens. This is separate from runtime fallback.</p></article>
+        <article><h3>Permissions and admission</h3><p>GitHub remains authoritative for repository access and rules. Factory enablement is not batch admission, and neither workbench grants merge or deployment authority.</p></article>
+      </div>
+    </section>
+
+    <nav class="page sources" aria-label="Source documentation">
+      <a href="https://github.com/joshyorko/review/blob/main/docs/appliance.md">Appliance setup and runtime prerequisites</a>
+      <a href="https://github.com/joshyorko/review/blob/main/docs/skills/launcher.md">Launcher contract</a>
+      <a href="https://github.com/joshyorko/review/blob/main/docs/factory/dashboard-checkpoint.md">Factory checkpoint evidence</a>
+      <a href="https://github.com/joshyorko/review/blob/main/docs/factory/agentic-model.md">Factory authority and recovery</a>
+    </nav>
+  </main>
+
+  <script>
+    (() => {
+      const root = document.documentElement;
+      const runtimeButtons = [...document.querySelectorAll("[data-runtime-choice]")];
+      const diagram = document.getElementById("route-diagram");
+      const factoryToggle = document.getElementById("factory-enabled");
+      const themeButton = document.getElementById("theme-button");
+      const replayButton = document.getElementById("replay-button");
+      const commandValue = document.getElementById("command-value");
+      const copyButton = document.getElementById("copy-button");
+      const copyState = document.getElementById("copy-state");
+      const replayStatus = document.getElementById("replay-status");
+      let replayTimer = 0;
+      const modes = {
+        auto: {
+          eyebrow: "AUTO · DEFAULT",
+          heading: "Auto follows the image type and host prerequisites",
+          description: "For an OCI image, Auto prefers Podman + krun + KVM when those checks pass; if they do not, it reports the missing prerequisite and attempts Apptainer when its own requirements pass. A SIF uses Apptainer directly. If no path qualifies, launch stops.",
+          command: "review acme/widgets",
+          krunState: "Auto · OCI preference",
+          apptainerState: "OCI fallback · direct for SIF",
+          krunNode: "primary",
+          apptainerNode: "secondary"
+        },
+        krun: {
+          eyebrow: "KRUN · EXPLICIT",
+          heading: "Require the OCI and KVM path",
+          description: "Explicit krun requires a local Podman engine, the krun OCI runtime, accessible KVM, and an OCI image. It does not fall back to Apptainer; a missing prerequisite or SIF selection stops launch.",
+          command: "review --runtime krun acme/widgets",
+          krunState: "Explicitly selected · OCI only",
+          apptainerState: "Not selected · no downgrade",
+          krunNode: "primary",
+          apptainerNode: "inactive"
+        },
+        apptainer: {
+          eyebrow: "APPTAINER · EXPLICIT",
+          heading: "Choose Apptainer directly",
+          description: "Explicit Apptainer selects its contained SIF or OCI path. It requires Apptainer, squashfuse_ll or squashfuse, and accessible FUSE. This is not a krun/KVM microVM.",
+          command: "review --runtime apptainer acme/widgets",
+          krunState: "Not selected",
+          apptainerState: "Explicitly selected · SIF / OCI",
+          krunNode: "inactive",
+          apptainerNode: "primary"
+        }
+      };
+
+      function selectedMode() { return diagram.dataset.runtime || "auto"; }
+
+      function clearSequence() {
+        window.clearTimeout(replayTimer);
+        replayTimer = 0;
+        diagram.classList.remove("is-replaying");
+        diagram.querySelectorAll(".sequence-node, .sequence-wire").forEach(element => {
+          element.classList.remove("sequence-node", "sequence-wire");
+          element.style.removeProperty("--sequence-delay");
+        });
+      }
+
+      function sequenceItem(selector, className, delay) {
+        const element = diagram.querySelector(selector);
+        if (!element) return;
+        element.classList.add(className);
+        element.style.setProperty("--sequence-delay", `${delay}ms`);
+      }
+
+      function replayRoute() {
+        clearSequence();
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          replayStatus.textContent = "Reduced motion is active; the route remains static.";
+          return;
+        }
+
+        const mode = selectedMode();
+        const auto = mode === "auto";
+        const selectedWire = mode === "apptainer" ? "apptainer-wire" : "krun-wire";
+        sequenceItem(".host-node", "sequence-node", 0);
+        if (auto) {
+          sequenceItem(".route-link.split .krun-wire", "sequence-wire", 160);
+          sequenceItem(".krun-node", "sequence-node", 360);
+          sequenceItem(".route-link.merge .krun-wire", "sequence-wire", 580);
+          sequenceItem(".route-link.split .apptainer-wire", "sequence-wire", 740);
+          sequenceItem(".apptainer-node", "sequence-node", 920);
+          sequenceItem(".route-link.merge .apptainer-wire", "sequence-wire", 1120);
+        } else {
+          sequenceItem(`.route-link.split .${selectedWire}`, "sequence-wire", 180);
+          sequenceItem(mode === "krun" ? ".krun-node" : ".apptainer-node", "sequence-node", 440);
+          sequenceItem(`.route-link.merge .${selectedWire}`, "sequence-wire", 680);
+        }
+
+        const gateEnabled = factoryToggle.checked;
+        const gateDelay = auto ? 1320 : 930;
+        if (gateEnabled) sequenceItem(".gate-rail", "sequence-node", gateDelay);
+        const ompDelay = gateEnabled ? gateDelay + 400 : (auto ? 1320 : 1100);
+        sequenceItem(".omp-node", "sequence-node", ompDelay);
+
+        diagram.classList.add("is-replaying");
+        replayStatus.textContent = auto
+          ? "Auto rules in order: krun is preferred for OCI; Apptainer is conditional for OCI and direct for SIF. No probe or launch occurs."
+          : `${mode === "krun" ? "Explicit krun" : "Explicit Apptainer"} rule shown. The other runtime stays as context; no probe or launch occurs.`;
+        replayTimer = window.setTimeout(() => {
+          clearSequence();
+          replayStatus.textContent = "Rule sequence shown once. No host prerequisites were probed and no runtime was launched.";
+        }, ompDelay + 430);
+      }
+
+      function updateFactory() {
+        const enabled = factoryToggle.checked;
+        const prefix = enabled ? "LUNA_FACTORY_ENABLED=1 " : "";
+        const mode = modes[selectedMode()];
+        commandValue.textContent = prefix + mode.command;
+        document.getElementById("gate-rail").dataset.enabled = String(enabled);
+        document.getElementById("gate-state").textContent = enabled
+          ? "ON · verifier preflight + sandbox test requested"
+          : "OFF · skipped for this launch";
+        document.getElementById("gate-copy").textContent = enabled
+          ? "The selected runtime must pass the bubblewrap verifier preflight and harmless sandbox test before OMP opens. A failed probe blocks Factory-enabled startup. This setting does not admit or dispatch a batch."
+          : "The selected runtime proceeds to OMP without the Factory verifier preflight. Set LUNA_FACTORY_ENABLED=1 to request the bubblewrap verifier and harmless sandbox test before OMP opens. This setting does not admit or dispatch work.";
+      }
+
+      function selectRuntime(key) {
+        clearSequence();
+        const mode = modes[key];
+        diagram.dataset.runtime = key;
+        document.getElementById("route-eyebrow").textContent = mode.eyebrow;
+        document.getElementById("route-heading").textContent = mode.heading;
+        document.getElementById("route-description").textContent = mode.description;
+        document.getElementById("krun-state").textContent = mode.krunState;
+        document.getElementById("apptainer-state").textContent = mode.apptainerState;
+        document.querySelector('[data-route-node="krun"]').dataset.state = mode.krunNode;
+        document.querySelector('[data-route-node="apptainer"]').dataset.state = mode.apptainerNode;
+        runtimeButtons.forEach(button => {
+          button.setAttribute("aria-pressed", String(button.dataset.runtimeChoice === key));
+        });
+        updateFactory();
+        replayStatus.textContent = "Static route view. Replay runs once when requested.";
+      }
+
+      function currentTheme() { return root.dataset.theme || "system"; }
+      function applyTheme(theme, persist) {
+        if (theme === "system") delete root.dataset.theme;
+        else root.dataset.theme = theme;
+        themeButton.textContent = `Theme · ${theme[0].toUpperCase()}${theme.slice(1)}`;
+        themeButton.setAttribute("aria-label", `Color theme ${theme}. Activate to cycle to the next theme.`);
+        if (persist) {
+          try { localStorage.setItem("review-runtime-theme", theme); } catch (_) {}
+        }
+      }
+
+      try {
+        const saved = localStorage.getItem("review-runtime-theme");
+        applyTheme(["system", "light", "dark"].includes(saved) ? saved : "system", false);
+      } catch (_) { applyTheme("system", false); }
+      themeButton.disabled = false;
+      themeButton.addEventListener("click", () => {
+        const themes = ["system", "light", "dark"];
+        applyTheme(themes[(themes.indexOf(currentTheme()) + 1) % themes.length], true);
+      });
+
+      runtimeButtons.forEach(button => {
+        button.disabled = false;
+        button.addEventListener("click", () => selectRuntime(button.dataset.runtimeChoice));
+      });
+      factoryToggle.disabled = false;
+      factoryToggle.addEventListener("change", () => {
+        clearSequence();
+        updateFactory();
+        replayStatus.textContent = "Factory gate setting updated. No verifier probe or batch was run.";
+      });
+
+      replayButton.disabled = false;
+      replayButton.addEventListener("click", replayRoute);
+
+      copyButton.disabled = false;
+      copyButton.addEventListener("click", async () => {
+        const command = commandValue.textContent;
+        let copied = false;
+        try {
+          if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(command);
+            copied = true;
+          }
+        } catch (_) {}
+        if (!copied) {
+          const field = document.createElement("textarea");
+          field.value = command;
+          field.setAttribute("readonly", "");
+          field.style.position = "fixed";
+          field.style.opacity = "0";
+          document.body.appendChild(field);
+          field.select();
+          try { copied = document.execCommand("copy"); } catch (_) { copied = false; }
+          field.remove();
+          copyButton.focus();
+        }
+        copyState.textContent = copied ? "Command copied." : "Copy unavailable here; select the command text.";
+      });
+
+      factoryToggle.checked = false;
+      selectRuntime("auto");
+    })();
+  </script>
+</body>
+</html>

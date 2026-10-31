@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="590" viewBox="0 0 1200 590" role="img" aria-labelledby="title desc">
+<title id="title">Review appliance runtime paths</title>
+<desc id="desc">In auto mode, an OCI appliance prefers Podman with krun and KVM and can fall back to isolated Apptainer; a selected SIF uses Apptainer. Explicit krun never silently falls back. Both launch Oh My Pi and Review. Factory is packaged; its execution is opt-in and enabling it does not admit work. A Factory verifier and sandbox test run before OMP opens and failure blocks startup.</desc>
+<defs>
+  <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0b1728"/><stop offset="1" stop-color="#142b3d"/></linearGradient>
+  <linearGradient id="box" x2="1" y2="1"><stop stop-color="#21384e"/><stop offset="1" stop-color="#17283b"/></linearGradient>
+  <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#8bc8dc" stroke-width="1.5"/></marker>
+</defs>
+<rect width="1200" height="590" rx="24" fill="url(#bg)"/>
+<g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif">
+<text x="48" y="58" font-size="15" letter-spacing="3" font-weight="700" fill="#82d5ee">REVIEW / RUNTIME MAP</text>
+<text x="48" y="105" font-size="33" font-weight="700" fill="#f2f8ff">One appliance. Two runtime paths.</text>
+<text x="48" y="137" font-size="17" fill="#c2d1df">Auto prefers krun for OCI when available; Apptainer supplies the isolated alternative.</text>
+<path d="M309 286 H357 V224 H410 M357 286 V365 H410" fill="none" stroke="#8bc8dc" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M742 224 H788 V287 H832 M742 365 H788 V287" fill="none" stroke="#8bc8dc" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="48" y="232" width="261" height="112" rx="14" fill="url(#box)" stroke="#64849a"/>
+<text x="70" y="265" font-size="14" letter-spacing="1.5" fill="#8fcfe0">01 · HOST</text>
+<text x="70" y="296" font-size="22" font-weight="700" fill="#f2f8ff">Review launcher</text>
+<text x="70" y="322" font-size="15" fill="#c2d1df">Scope · credentials · runtime</text>
+<rect x="410" y="175" width="332" height="98" rx="14" fill="url(#box)" stroke="#6caabd"/>
+<text x="432" y="208" font-size="14" letter-spacing="1.5" fill="#8fcfe0">02A · OCI</text>
+<text x="432" y="239" font-size="21" font-weight="700" fill="#f2f8ff">Podman + krun + KVM</text>
+<rect x="410" y="318" width="332" height="98" rx="14" fill="url(#box)" stroke="#6caabd"/>
+<text x="432" y="351" font-size="14" letter-spacing="1.5" fill="#8fcfe0">02B · SIF / OCI</text>
+<text x="432" y="382" font-size="21" font-weight="700" fill="#f2f8ff">Isolated Apptainer</text>
+<rect x="832" y="217" width="319" height="144" rx="14" fill="#173747" stroke="#74c5d2"/>
+<text x="854" y="251" font-size="14" letter-spacing="1.5" fill="#8fe5e0">03 · APPLIANCE</text>
+<text x="854" y="283" font-size="22" font-weight="700" fill="#f2f8ff">Oh My Pi + Review</text>
+<text x="854" y="313" font-size="16" fill="#c2d1df">Factory packaged</text>
+<text x="854" y="337" font-size="14" fill="#c2d1df">Execution opt-in</text>
+<path d="M48 468 H1152" stroke="#496479"/>
+<text x="48" y="505" font-size="16" fill="#d1e4f1">Auto can fall back on missing runtime prerequisites.</text>
+<text x="48" y="532" font-size="16" fill="#d1e4f1">Factory verifier + sandbox test run before OMP; failure blocks startup.</text>
+<text x="48" y="562" font-size="13" fill="#a8bdcd">Conceptual map · open the runtime explorer for the full paths and controls</text>
+</g></svg>
