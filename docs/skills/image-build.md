@@ -34,6 +34,22 @@ The product ships one OMP appliance from `image/appliance/Containerfile`. It car
 
 ## Publication
 
+Before a push, workflow dispatch/rerun, or release action, run the declared
+`bin/ci` profile for the exact proposed subject. Native profile requirements
+must be reported as blocked when the required host boundary is unavailable;
+portable/container evidence does not stand in for native KVM, AppArmor, or
+architecture-specific package proof.
+The local appliance-artifact adapter requires a clean committed source. It
+exports one Dagger OCI archive and verifies that same artifact through Podman
+and Apptainer/SIF; the Dagger function checks the snapshot tree against its
+bundled commit before building, then builds from a fresh `git archive` of that
+commit. Release candidates use that same Dagger-built
+archive for package/SIF assembly; only the main-bound publish job receives
+write credentials, and Skopeo must preserve the verified architecture manifest
+digest. A local pre-push archive is never a publication input.
+`just ci` runs only the bootstrap contract smoke and is not a release or
+publication gate; use the changed-path pre-push profile before release work.
+
 `release.yml` automatically builds matching native OCI/SIF candidates at the exact successful `validate` commit on `main` when its `VERSION` is unpublished. Bump `VERSION` with a change to request a release; already published versions are skipped. The tools tap polls new stable releases hourly and updates its Dagger-verified formula automatically to use the original Review release assets. Review owns the only package release. Validate the candidate with the tools tap's Dagger and Homebrew checks before publishing a stable release. The tools tap owns the formula; no development tap is updated by this repository.
 
 ## Verification

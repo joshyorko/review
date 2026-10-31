@@ -1,7 +1,7 @@
 /** Behavioral contracts for the finite, no-publish Factory dogfood path. */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { join } from "node:path";
@@ -290,6 +290,9 @@ test("capability probe records the independently classified host boundaries", ()
     '"krun"',
     '"sif"',
   ]);
+  assert.match(probe, /podman info --runtime=krun --format '\{\{\.Host\.OCIRuntime\.Path\}\}'/);
+  assert.match(probe, /command -v squashfuse_ll/);
+  assert.doesNotMatch(probe, /krun --version|squashfuse_ll --version/);
   assert.doesNotMatch(probe, /python3 .*<<['"]PY/);
 });
 
@@ -305,6 +308,94 @@ test("runtime report exposes pure capability computation and GitHub outputs", ()
   assert.match(boundaryOutputLines(result), /oci=blocked/);
   assert.match(boundaryOutputLines(result), /sif=blocked/);
   assert.match(boundaryOutputLines(result), /appArmor=blocked/);
+});
+
+test("runtime boundaries follow executable capability probes instead of optional diagnostic commands", () => {
+  const available = [
+    "userns.unshare", "krun.version", "apptainer.version", "apptainer.buildcfg", "fuse.device",
+    "podman.version", "podman.info", "squashfuse-ll.available", "squashfs-tools.mksquashfs", "fuse2fs.version",
+  ].map((name) => ({ name, exitCode: 0, ok: true, command: name, stdout: "available", stderr: "" }));
+  const result = reportCapabilities(available, "head", {}, "2026-01-01T00:00:00.000Z");
+  assert.equal(result.boundaries.userNamespace.status, "available");
+  assert.equal(result.boundaries.krun.status, "available");
+  assert.equal(result.boundaries.sif.status, "available");
+  assert.equal(result.boundaries.appArmor.status, "blocked");
+});
+
+test("Podman-configured libkrun is available without a krun command on PATH", () => {
+  const temporary = mkdtempSync(join(tmpdir(), "review-krun-probe-"));
+  const bin = join(temporary, "bin");
+  mkdirSync(bin);
+  const runtime = join(bin, "crun-krun");
+  writeFileSync(runtime, "#!/bin/sh\nprintf '%s\\n' 'crun version 1.0 +LIBKRUN'\n");
+  chmodSync(runtime, 0o755);
+  writeFileSync(join(bin, "podman"), [
+    "#!/bin/sh",
+    'case "$*" in',
+    '  "--version") echo "podman version test" ;;',
+    '  *"--runtime=krun --format {{.Host.OCIRuntime.Path}}"*) echo "' + runtime + '" ;;',
+    '  *"--format {{.Host.OCIRuntime.Name}}"*) echo "crun" ;;',
+    '  *"--format {{json .Host.OCIRuntimes}}"*) echo "{}" ;;',
+    '  *"--format json"*) echo "{}" ;;',
+    '  *) exit 0 ;;',
+    "esac",
+    "",
+  ].join("\n"));
+  chmodSync(join(bin, "podman"), 0o755);
+  try {
+    const output = join(temporary, "report");
+    const result = spawnSync("bash", [join(root, "tests/appliance-runtime-probe.sh"), output, "32072d768dd28a96e62ed510f73424cf7d8dbe4e"], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, GITHUB_OUTPUT: undefined },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const report = JSON.parse(readFileSync(join(output, "capabilities.json"), "utf8"));
+    assert.equal(report.boundaries.krun.status, "available");
+    assert.match(report.probes.find((probe: { name: string }) => probe.name === "krun.version").stdout, /LIBKRUN/);
+
+    rmSync(runtime);
+    const missingOutput = join(temporary, "missing-runtime-report");
+    const missing = spawnSync("bash", [join(root, "tests/appliance-runtime-probe.sh"), missingOutput, "32072d768dd28a96e62ed510f73424cf7d8dbe4e"], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, GITHUB_OUTPUT: undefined },
+      encoding: "utf8",
+    });
+    assert.equal(missing.status, 0, missing.stderr || missing.stdout);
+    const blocked = JSON.parse(readFileSync(join(missingOutput, "capabilities.json"), "utf8"));
+    assert.equal(blocked.boundaries.krun.status, "blocked");
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("runtime report keeps generic OCI separate from krun, KVM, userns, and SIF prerequisites", () => {
+  const names = [
+    "userns.unshare", "krun.version", "kvm.device", "apptainer.version", "apptainer.buildcfg", "fuse.device",
+    "podman.version", "podman.info", "squashfuse-ll.available", "squashfs-tools.mksquashfs", "fuse2fs.version",
+  ];
+  const report = (missing: string) => reportCapabilities(
+    names.filter((name) => name !== missing).map((name) => ({ name, exitCode: 0, ok: true, command: name, stdout: "available", stderr: "" })),
+    "head",
+    {},
+    "2026-01-01T00:00:00.000Z",
+  );
+
+  const missingRuntime = report("krun.version");
+  assert.equal(missingRuntime.boundaries.krun.status, "blocked");
+  assert.equal(missingRuntime.boundaries.oci.status, "available");
+
+  const missingKvm = report("kvm.device");
+  assert.equal(missingKvm.boundaries.kvm.status, "blocked");
+  assert.equal(missingKvm.boundaries.oci.status, "available");
+  assert.equal(missingKvm.boundaries.sif.status, "available");
+
+  const missingUserns = report("userns.unshare");
+  assert.equal(missingUserns.boundaries.userNamespace.status, "blocked");
+  assert.equal(missingUserns.boundaries.sif.status, "blocked");
+  assert.equal(missingUserns.boundaries.oci.status, "available");
+
+  const missingSquashfuse = report("squashfuse-ll.available");
+  assert.equal(missingSquashfuse.boundaries.sif.status, "blocked");
+  assert.equal(missingSquashfuse.boundaries.oci.status, "available");
 });
 
 test("the TypeScript contract is the only Factory dogfood contract", () => {

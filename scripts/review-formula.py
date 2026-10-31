@@ -46,6 +46,9 @@ def prepare(bundles: Path, output: Path, changelog=None):
     if len(arches) == 1:
         lines.append('  depends_on arch: :' + ('x86_64' if arches[0] == 'x86_64' else 'arm64'))
     for r in records:
+        for key in ('oci_archive_digest', 'oci_arch_digest'):
+            if not re.fullmatch(r'sha256:[0-9a-f]{64}', r.get(key, '')):
+                raise ValueError(f'{key} must be a verified SHA-256 digest')
         name = f"review-{r['arch']}.tar.gz"
         expected_oci_arch = f'{oci_image}-{r["arch"]}'
         if r.get('oci_arch_image', expected_oci_arch) != expected_oci_arch:

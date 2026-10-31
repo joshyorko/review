@@ -7,7 +7,8 @@ This repository ships a GitHub-generic Review workbench and Luna Factory for Oh 
 1. This file.
 2. [`docs/factory/agentic-model.md`](docs/factory/agentic-model.md).
 3. [`docs/SKILL.md`](docs/SKILL.md).
-4. The one task-specific guide in `docs/skills/`.
+4. [`docs/dagger-agent-tooling.md`](docs/dagger-agent-tooling.md) for repository CI and agent tooling.
+5. The one task-specific guide in `docs/skills/`.
 
 ## Product boundary
 
@@ -30,3 +31,5 @@ This repository ships a GitHub-generic Review workbench and Luna Factory for Oh 
 - Match validation to changed behavior. Core contracts include `bash tests/omp-review-mode.sh`, `bash tests/appliance-contract.sh`, `bash tests/just-onboarding.sh`, `bash tests/test-registry.sh`, and `node --test tests/luna_factory.test.ts`. The appliance/package path also has `tests/review-factory-coload-smoke.sh` and `python3 tests/package_review_contract.py`.
 - When skill frontmatter changes, regenerate `docs/skills/index.json` with `bash scripts/check-skill-frontmatter.sh --write`; never edit that generated index by hand.
 - Update code, tests, launcher, and user-facing docs together. Do not leave a deleted product referenced from a workflow, generated manifest, or package contract.
+- Before each push, workflow dispatch/rerun, or release action, run the declared `bin/ci` profile for the exact proposed subject. Hosted Actions must not be the first test environment. If required native proof is unavailable, report the exact blocked profile; do not label the result fully verified. Docs-only changes use their declared light profile.
+- Repository CI and release planning use `bin/ci`; `release-plan` is read-only unless `--apply` is explicit. Dagger's generic experimental MCP is not configured for this project.

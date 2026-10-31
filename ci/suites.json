@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "profiles": {
+    "contract": [
+      "check-commit-message",
+      "just-onboarding",
+      "ci-runner-contract",
+      "ci-path-plan-contract",
+      "source-snapshot-contract",
+      "ci-registry-invocation-test",
+      "ci-shellcheck",
+      "agent-cli-contract",
+      "precommit-acquisition-contract",
+      "static-hygiene"
+    ],
+    "portable": [
+      "static-hygiene",
+      "skill-frontmatter",
+      "generate-skills",
+      "test-registry",
+      "check-commit-message",
+      "release-dispatch-guard",
+      "release-request-plan",
+      "release-request-adapter",
+      "ci-path-plan-contract",
+      "source-snapshot-contract",
+      "omp-review-mode",
+      "agent-cli-contract",
+      "precommit-acquisition-contract",
+      "just-onboarding",
+      "appliance-contract",
+      "package-review-contract",
+      "release-version",
+      "review-changelog",
+      "package-oci-contract",
+      "appliance-sbom-contract",
+      "version-derivation",
+      "update-omp-pins",
+      "qualify-omp-upgrade-tests",
+      "update-derived-pins",
+      "luna-factory",
+      "luna-dogfood-contract",
+      "sdk-types",
+      "omp-source-regressions",
+      "renovate-config"
+    ]
+  }
+}
