@@ -3042,11 +3042,11 @@ test("opt-in writable isolation blocks Slay before OMP prompt dispatch or mutati
 
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
 	assert.equal(batch?.state, "blocked");
-	assert.match(batch?.error ?? "", /credentialless executor.*not integrated and qualified/i);
+	assert.match(batch?.error ?? "", /image-baked root-owned runtime qualification artifact/i);
 	assert.equal(batch?.waveIdentity, undefined, "no task wave is admitted");
 	assert.equal(pi.messages.length, 0, "no coordinator prompt or native task dispatch is sent");
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0, "no mutation claims are created");
-	assert.match(savedReviewNoticeText(pi), /credentialless executor/i);
+	assert.match(savedReviewNoticeText(pi), /runtime qualification/i);
 	assert.match(savedReviewNoticeText(pi), /"runtime": "krun"/);
 	assert.match(savedReviewNoticeText(pi), /"taskExecutionTools": "blocked"/);
 });
@@ -3088,7 +3088,7 @@ test("opt-in writable isolation blocks dashboard Fix before OMP prompt dispatch 
 	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
 	assert.equal(batch?.kind, "fix");
 	assert.equal(batch?.state, "blocked");
-	assert.match(batch?.error ?? "", /credentialless executor.*not integrated and qualified/i);
+	assert.match(batch?.error ?? "", /image-baked root-owned runtime qualification artifact/i);
 	assert.equal(batch?.waveIdentity, undefined, "no task wave is admitted");
 	assert.equal(pi.messages.length, 0, "no coordinator prompt or native task dispatch is sent");
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0, "no mutation claims are created");

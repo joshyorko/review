@@ -68,7 +68,7 @@ FROM ${RUNTIME_BUILDER_IMAGE} AS build
 
 RUN microdnf --assumeyes --setopt=install_weak_deps=0 --nodocs install \
       bash coreutils git-core curl diffutils findutils gawk grep gzip less glibc-common \
-      sed tar xz python3 python3-libs bubblewrap ShellCheck yq jq just \
+      sed tar xz python3 python3-libs bubblewrap util-linux-core ShellCheck yq jq just \
       openssl ca-certificates tzdata ncurses-term patch gcc-c++ make && \
     microdnf clean all
 
@@ -283,6 +283,7 @@ RUN /usr/local/libexec/stage-runtime /out \
     /usr/bin/jq \
     /usr/bin/just \
     /usr/bin/openssl \
+    /usr/bin/prlimit \
     /usr/local/bin/node \
     /usr/local/bin/bun
 COPY --from=audio /audio-out/ /out/
