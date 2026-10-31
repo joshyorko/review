@@ -6,7 +6,7 @@
 
 ![Review workbench with a fixture pull request queue and trace](../evidence/review-workbench/2026-10-29/cloud-ansi/browser-100x32/screenshots/03-pr-queue.png)
 
-*Source-runtime capture with a deterministic fixture. The queue is on the left; the selected item's OMP trace is on the right. This is not a live GitHub session or evidence of completed work. [Capture notes](../evidence/review-workbench/2026-10-29/cloud-ansi/README.md).*
+*Source-runtime capture with a deterministic fixture. The queue is on the left; the historical session trace is on the right. In the current workbench the selected-item Inspector and the session-wide trace are distinct views. This is not a live GitHub session or evidence of completed work. [Capture notes](../evidence/review-workbench/2026-10-29/cloud-ansi/README.md).*
 
 ## Start and navigate
 
