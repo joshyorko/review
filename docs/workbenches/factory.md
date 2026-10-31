@@ -30,7 +30,7 @@ flowchart TD
     Reconcile -->|"Admitted retry"| Worker
 ```
 
-A returned worker is not proof of success. Factory checks the receipt against the current task, attempt and subject. Changed subjects can invalidate earlier proof. Missing or contradictory evidence stays blocked or unknown. Claims coordinate single-writer resources; cancellation or stop does not imply that external effects were rolled back.
+A returned worker is not proof of success. Factory checks the receipt against the current task, attempt, generation and subject. Changed subjects can invalidate earlier proof. Missing or contradictory evidence stays blocked or unknown. Claims coordinate single-writer resources; cancellation or stop does not imply that external effects were rolled back.
 
 `CONVERGED` means all mandatory acceptance criteria have current valid proof. `QUIESCENT` means no authorized autonomous progress remains; it may still be unconverged. A visible Review row does not admit work, and Factory completion grants no approval, merge, publication or deployment authority.
 
