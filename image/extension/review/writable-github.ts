@@ -1,6 +1,6 @@
 /** Trusted GitHub preparation and draft-candidate publication for Review. */
 
-import { closeSync, constants, lstatSync, mkdirSync, openSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -14,6 +14,7 @@ import {
 	type WritableCheckResult,
 	type WritableRuntimeProfile,
 } from "./writable-executor.ts";
+import { deriveWritableCheckPlan, writableCheckPlanBlocker } from "./writable-check-plan.ts";
 
 const API = "https://api.github.com";
 const MAX_JSON_BYTES = 16 * 1024 * 1024;
@@ -27,6 +28,25 @@ export type WritableBaseFile = {
 	readonly mode: "100644" | "100755";
 	readonly bytes: number;
 	readonly content: Buffer;
+};
+
+export type WritableWorkspaceEvidence = {
+	readonly version: 1;
+	readonly workspaceId: string;
+	readonly repository: string;
+	readonly issueNumber: number;
+	readonly baseRef: string;
+	readonly baseSha: string;
+	readonly baseTreeSha: string;
+	readonly files: readonly { readonly path: string; readonly mode: "100644" | "100755"; readonly bytes: number; readonly sha256: string }[];
+};
+
+export type InspectedWritableWorkspace = {
+	readonly evidence: WritableWorkspaceEvidence;
+	readonly workspaceRoot: string;
+	readonly candidatePaths: readonly string[];
+	readonly candidate: CandidateSnapshot;
+	readonly matchesExpectedDigest?: boolean;
 };
 
 export type WritableIssueSource = {
@@ -200,9 +220,10 @@ function ensurePrivateParents(root: string, relativePath: string): string {
 	return join(root, ...parts);
 }
 
-export function materializeWritableWorkspace(source: WritableIssueSource, privateStateRoot: string): { readonly root: string; readonly candidatePaths: readonly string[] } {
+export function materializeWritableWorkspace(source: WritableIssueSource, privateStateRoot: string): { readonly root: string; readonly candidatePaths: readonly string[]; readonly workspaceId: string } {
 	const stateRoot = privateDirectory(privateStateRoot);
-	const root = join(stateRoot, `issue-${source.issueNumber}-${randomUUID()}`);
+	const workspaceId = randomUUID();
+	const root = join(stateRoot, `workspace-${workspaceId}`);
 	mkdirSync(root, { mode: 0o700 });
 	for (const file of source.files.values()) {
 		const path = validateRepositoryPath(file.path);
@@ -211,7 +232,98 @@ export function materializeWritableWorkspace(source: WritableIssueSource, privat
 		try { writeFileSync(fd, file.content); }
 		finally { closeSync(fd); }
 	}
-	return { root: realpathSync(root), candidatePaths: [...source.files.keys()].sort() };
+	const evidence: WritableWorkspaceEvidence = {
+		version: 1, workspaceId, repository: source.repository, issueNumber: source.issueNumber,
+		baseRef: source.defaultBranch, baseSha: source.baseSha, baseTreeSha: source.baseTreeSha,
+		files: [...source.files.values()].map((file) => ({
+			path: file.path, mode: file.mode, bytes: file.bytes,
+			sha256: createHash("sha256").update(file.content).digest("hex"),
+		})).sort((a, b) => a.path.localeCompare(b.path)),
+	};
+	const evidencePath = join(stateRoot, `workspace-${workspaceId}.json`);
+	const temporary = `${evidencePath}.${randomUUID()}.tmp`;
+	const evidenceFd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+	try { writeFileSync(evidenceFd, JSON.stringify(evidence)); fsyncSync(evidenceFd); }
+	catch (error) { try { unlinkSync(temporary); } catch { /* preserve original failure */ } throw error; }
+	finally { closeSync(evidenceFd); }
+	renameSync(temporary, evidencePath);
+	const directoryFd = openSync(stateRoot, "r");
+	try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
+	return { root: realpathSync(root), candidatePaths: [...source.files.keys()].sort(), workspaceId };
+}
+
+function workspaceEvidenceIsValid(value: unknown, workspaceId: string): value is WritableWorkspaceEvidence {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	if (!(record.version === 1 && record.workspaceId === workspaceId
+		&& typeof record.repository === "string" && validRepository(record.repository)
+		&& Number.isSafeInteger(record.issueNumber) && Number(record.issueNumber) > 0
+		&& typeof record.baseRef === "string" && !!record.baseRef && record.baseRef.length <= 255
+		&& typeof record.baseSha === "string" && /^[a-f0-9]{40}$/.test(record.baseSha)
+		&& typeof record.baseTreeSha === "string" && /^[a-f0-9]{40}$/.test(record.baseTreeSha)
+		&& Array.isArray(record.files) && record.files.length <= MAX_TREE_FILES)) return false;
+	const seen = new Set<string>();
+	let totalBytes = 0;
+	for (const raw of record.files) {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+		const file = raw as Record<string, unknown>;
+		if (typeof file.path !== "string" || typeof file.mode !== "string" || !(file.mode === "100644" || file.mode === "100755")
+			|| !Number.isSafeInteger(file.bytes) || Number(file.bytes) < 0 || Number(file.bytes) > MAX_BLOB_BYTES
+			|| typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)) return false;
+		try { if (validateRepositoryPath(file.path) !== file.path) return false; } catch { return false; }
+		if (seen.has(file.path)) return false;
+		seen.add(file.path);
+		totalBytes += Number(file.bytes);
+		if (totalBytes > MAX_TREE_BYTES) return false;
+	}
+	return true;
+}
+
+/** Reconstruct a private candidate after restart for inspection; it never resumes or authorizes execution. */
+export function inspectWritableWorkspace(privateStateRoot: string, workspaceId: string, expectedDigest?: string): InspectedWritableWorkspace {
+	if (!/^[a-f0-9-]{36}$/i.test(workspaceId)) throw new Error("workspace evidence locator is invalid");
+	const stateRoot = privateDirectory(privateStateRoot);
+	const evidencePath = join(stateRoot, `workspace-${workspaceId}.json`);
+	const evidenceStat = lstatSync(evidencePath);
+	if (!evidenceStat.isFile() || evidenceStat.isSymbolicLink() || evidenceStat.nlink !== 1 || evidenceStat.size > MAX_TREE_BYTES || (evidenceStat.mode & 0o077) !== 0) throw new Error("workspace evidence sidecar is not a bounded private regular file");
+	const evidenceFd = openSync(evidencePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+	let evidence: unknown;
+	try {
+		const opened = fstatSync(evidenceFd);
+		if (!opened.isFile() || opened.dev !== evidenceStat.dev || opened.ino !== evidenceStat.ino || opened.size !== evidenceStat.size) throw new Error("workspace evidence changed during inspection");
+		evidence = JSON.parse(readFileSync(evidenceFd, "utf8")) as unknown;
+		const after = fstatSync(evidenceFd);
+		if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs) throw new Error("workspace evidence changed during inspection");
+	} finally { closeSync(evidenceFd); }
+	if (!workspaceEvidenceIsValid(evidence, workspaceId)) throw new Error("workspace evidence is malformed");
+	const workspacePath = join(stateRoot, `workspace-${workspaceId}`);
+	const rootStat = lstatSync(workspacePath);
+	if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || (rootStat.mode & 0o077) !== 0) throw new Error("workspace candidate root is not a private directory");
+	const workspaceRoot = realpathSync(workspacePath);
+	if (workspaceRoot !== workspacePath) throw new Error("workspace candidate root is not canonical");
+	const candidatePaths = new Set(evidence.files.map((file) => file.path));
+	let fileCount = 0;
+	const scan = (directory: string, prefix = "") => {
+		for (const entry of readdirSync(directory, { withFileTypes: true })) {
+			const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+			const absolute = join(directory, entry.name);
+			const stat = lstatSync(absolute);
+			if (stat.isSymbolicLink()) throw new Error("workspace candidate contains a symlink or hardlink");
+			if (stat.isDirectory()) {
+				if ((stat.mode & 0o077) !== 0) throw new Error("workspace candidate contains a non-private directory");
+				scan(absolute, relative);
+			} else if (stat.isFile()) {
+				if (stat.nlink !== 1) throw new Error("workspace candidate contains a symlink or hardlink");
+				candidatePaths.add(validateRepositoryPath(relative));
+				fileCount++;
+				if (fileCount > MAX_TREE_FILES) throw new Error("workspace candidate file count exceeds its bound");
+			} else throw new Error("workspace candidate contains a non-regular entry");
+		}
+	};
+	scan(workspaceRoot);
+	const paths = [...candidatePaths].sort();
+	const candidate = snapshotCandidate(workspaceRoot, paths);
+	return { evidence, workspaceRoot, candidatePaths: paths, candidate, ...(expectedDigest ? { matchesExpectedDigest: candidate.digest === expectedDigest } : {}) };
 }
 
 export async function loadWritableIssueSource(
@@ -264,6 +376,7 @@ export type DraftCandidateInput = {
 	readonly candidate: CandidateSnapshot;
 	readonly proof: CandidateCheckProof;
 	readonly commands: readonly string[];
+	readonly planDigest: string;
 	readonly runtimeProfile: WritableRuntimeProfile;
 	readonly summary: string;
 	readonly options: WritableGitHubOptions;
@@ -305,13 +418,19 @@ function parsePullRows(value: unknown): Array<Record<string, unknown>> | undefin
 
 export async function publishDraftCandidate(input: DraftCandidateInput): Promise<DraftCandidateResult> {
 	const { source, options } = input;
+	let checkPlan;
+	try { checkPlan = deriveWritableCheckPlan(source); }
+	catch (error) { return { status: "blocked", reason: error instanceof Error ? error.message : "mandatory check plan could not be derived" }; }
+	if (input.planDigest !== checkPlan.digest || JSON.stringify(input.commands) !== JSON.stringify(checkPlan.commands)) return { status: "blocked", reason: "candidate does not carry the controller-derived mandatory check plan" };
 	if (!verifyCandidateCheckProof({
 		proof: input.proof, candidate: input.candidate, repository: source.repository, issueNumber: source.issueNumber,
-		baseRef: source.defaultBranch, baseSha: source.baseSha, commands: input.commands, runtimeProfile: input.runtimeProfile,
+		baseRef: source.defaultBranch, baseSha: source.baseSha, commands: input.commands, planDigest: checkPlan.digest, runtimeProfile: input.runtimeProfile,
 	})) return { status: "blocked", reason: "candidate check proof does not match the selected issue, source head, candidate, check plan, or runtime" };
 	if (input.summary.trim().length === 0 || Buffer.byteLength(input.summary) > 8_192) return { status: "blocked", reason: "candidate summary is empty or exceeds its bound" };
 	const snapshot = snapshotCandidate(input.workspaceRoot, input.candidatePaths);
 	if (snapshot.digest !== input.candidate.digest) return { status: "blocked", reason: "candidate changed after its last successful check" };
+	const checkPlanBlocker = writableCheckPlanBlocker({ source, workspaceRoot: input.workspaceRoot, candidatePaths: input.candidatePaths, plan: checkPlan });
+	if (checkPlanBlocker) return { status: "blocked", reason: checkPlanBlocker };
 	const changes = candidateChanges(source, snapshot);
 	if (changes.length === 0) return { status: "blocked", reason: "candidate contains no source changes" };
 	if (changes.some((change) => workflowPath(change.path))) return { status: "blocked", reason: "draft publication is blocked for workflow-file changes" };
@@ -430,8 +549,10 @@ export function proofStillMatches(input: {
 }): boolean {
 	try {
 		const candidate = snapshotCandidate(input.workspaceRoot, input.candidatePaths);
+		const plan = deriveWritableCheckPlan(input.source);
+		if (JSON.stringify(input.commands) !== JSON.stringify(plan.commands)) return false;
 		return verifyCandidateCheckProof({ proof: input.proof, candidate, repository: input.source.repository, issueNumber: input.source.issueNumber,
-			baseRef: input.source.defaultBranch, baseSha: input.source.baseSha, commands: input.commands, runtimeProfile: input.runtimeProfile });
+			baseRef: input.source.defaultBranch, baseSha: input.source.baseSha, commands: input.commands, planDigest: plan.digest, runtimeProfile: input.runtimeProfile });
 	} catch { return false; }
 }
 
@@ -449,6 +570,7 @@ export function createWritableProof(input: {
 		baseSha: input.source.baseSha,
 		runtimeProfile: input.runtimeProfile,
 		commands: input.commands,
+		planDigest: deriveWritableCheckPlan(input.source).digest,
 		results: input.results,
 		candidate: input.candidate,
 	});

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { type ChildProcess } from "node:child_process";
-import { linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,13 +20,15 @@ import {
 } from "../image/extension/review/writable-executor.ts";
 import {
 	loadWritableIssueSource,
+	inspectWritableWorkspace,
 	materializeWritableWorkspace,
 	proofStillMatches,
 	publishDraftCandidate,
 	type WritableIssueSource,
 } from "../image/extension/review/writable-github.ts";
-import { runWritableIssueWorkflow } from "../image/extension/review/writable-worker.ts";
+import { runWritableIssueWorker, runWritableIssueWorkflow } from "../image/extension/review/writable-worker.ts";
 import { loadWave, saveWave } from "../image/extension/review/wave-store.ts";
+import { deriveWritableCheckPlan, writableCheckPlanBlocker } from "../image/extension/review/writable-check-plan.ts";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const baseSha = "a".repeat(40);
@@ -40,6 +42,8 @@ function tempRoot(): string {
 
 function source(content = "base\n"): WritableIssueSource {
 	const buffer = Buffer.from(content);
+	const manifest = Buffer.from('{"scripts":{"test":"node --test tests/smoke.test.mjs"}}\n');
+	const smoke = Buffer.from("import test from 'node:test';\ntest('smoke', () => {});\n");
 	return {
 		repository: "example/repo",
 		issueNumber: 42,
@@ -49,7 +53,11 @@ function source(content = "base\n"): WritableIssueSource {
 		defaultBranch: "main",
 		baseSha,
 		baseTreeSha: treeSha,
-		files: new Map([["src/file.txt", { path: "src/file.txt", sha: blobSha, mode: "100644", bytes: buffer.byteLength, content: buffer }]]),
+		files: new Map([
+			["src/file.txt", { path: "src/file.txt", sha: blobSha, mode: "100644", bytes: buffer.byteLength, content: buffer }],
+			["package.json", { path: "package.json", sha: "e".repeat(40), mode: "100644", bytes: manifest.byteLength, content: manifest }],
+			["tests/smoke.test.mjs", { path: "tests/smoke.test.mjs", sha: "f".repeat(40), mode: "100644", bytes: smoke.byteLength, content: smoke }],
+		]),
 	};
 }
 
@@ -57,22 +65,46 @@ function changedWorkspace() {
 	const root = tempRoot();
 	mkdirSync(join(root, "src"));
 	writeFileSync(join(root, "src/file.txt"), "candidate\n");
+	mkdirSync(join(root, "tests"));
+	writeFileSync(join(root, "package.json"), '{"scripts":{"test":"node --test tests/smoke.test.mjs"}}\n');
+	writeFileSync(join(root, "tests/smoke.test.mjs"), "import test from 'node:test';\ntest('smoke', () => {});\n");
 	return root;
 }
 
+async function runWorkerToolActions(root: string, src: WritableIssueSource, actions: (tools: Map<string, { execute(id: string, args: Record<string, unknown>): Promise<unknown> }>, workspaceRoot: string) => Promise<void>) {
+	const workspace = materializeWritableWorkspace(src, join(root, "state"));
+	const sdk = {
+		Settings: { isolated: (settings: Record<string, unknown>) => settings },
+		SessionManager: { create: (cwd: string, sessionPath: string) => ({ cwd, sessionPath }) },
+		async createAgentSession(options: Record<string, unknown>) {
+			const tools = options.customTools as Array<{ name: string; execute(id: string, args: Record<string, unknown>): Promise<unknown> }>;
+			const byName = new Map(tools.map((tool) => [tool.name, tool]));
+			return { session: { async prompt() { await actions(byName, workspace.root); }, async abort() {}, async dispose() {} } };
+		},
+	};
+	const schema = { object: (shape: Record<string, unknown>) => shape, string: () => "string", number: () => "number", array: (item: unknown) => [item] };
+	const worker = await runWritableIssueWorker({
+		sdk, schema, context: { model: { provider: "fixture", id: "fixed" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } },
+		source: src, workspaceRoot: workspace.root, candidatePaths: workspace.candidatePaths, sessionRoot: join(root, "sessions"),
+		runtimeProfile: "krun", signal: new AbortController().signal,
+	});
+	return { workspace, worker };
+}
+
 function makeProof(root: string) {
-	const paths = ["src/file.txt"];
+	const paths = [...source().files.keys()];
 	const candidate = snapshotCandidate(root, paths);
-	const commands = ["node --test"];
+	const plan = deriveWritableCheckPlan(source());
+	const commands = [...plan.commands];
 	const results: WritableCheckResult[] = [{
 		command: commands[0]!, status: "passed", exitCode: 0, stdout: "ok\n", stderr: "",
 		outputDigest: sha("output"), candidateDigestBefore: candidate.digest, candidateDigestAfter: candidate.digest,
 	}];
 	const proof = createCandidateCheckProof({
 		repository: "example/repo", issueNumber: 42, baseRef: "main", baseSha,
-		runtimeProfile: "krun", commands, results, candidate,
+		runtimeProfile: "krun", commands, planDigest: plan.digest, results, candidate,
 	});
-	return { paths, candidate, commands, results, proof };
+	return { paths, candidate, commands, planDigest: plan.digest, results, proof };
 }
 
 function response(data: unknown, status = 200): Response {
@@ -112,16 +144,84 @@ test("candidate snapshots are content-bound and reject symlink and hardlink esca
 test("candidate proof binds exact issue, base, candidate, commands, profile, and unchanged files", () => {
 	const root = changedWorkspace();
 	try {
-		const { paths, candidate, commands, proof } = makeProof(root);
-		const valid = { proof, candidate, repository: "example/repo", issueNumber: 42, baseRef: "main", baseSha, commands, runtimeProfile: "krun" as const };
+		const { paths, candidate, commands, planDigest, proof } = makeProof(root);
+		const valid = { proof, candidate, repository: "example/repo", issueNumber: 42, baseRef: "main", baseSha, commands, planDigest, runtimeProfile: "krun" as const };
 		assert.equal(verifyCandidateCheckProof(valid), true);
 		assert.equal(verifyCandidateCheckProof({ ...valid, issueNumber: 43 }), false);
 		assert.equal(verifyCandidateCheckProof({ ...valid, baseSha: "f".repeat(40) }), false);
-		assert.equal(verifyCandidateCheckProof({ ...valid, commands: ["npm test"] }), false);
+		assert.equal(verifyCandidateCheckProof({ ...valid, commands: ["true"] }), false);
+		assert.equal(verifyCandidateCheckProof({ ...valid, planDigest: "0".repeat(64) }), false);
 		assert.equal(verifyCandidateCheckProof({ ...valid, runtimeProfile: "apptainer" }), false);
 	assert.equal(verifyCandidateCheckProof({ ...valid, proof: { ...proof, checks: proof.checks.map((check) => ({ ...check, outputDigest: "f".repeat(64) })) } }), false);
 		writeFileSync(join(root, "src/file.txt"), "edited after check\n");
 		assert.equal(proofStillMatches({ source: source(), workspaceRoot: root, candidatePaths: paths, proof, commands, runtimeProfile: "krun" }), false);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mandatory check plan is controller-derived, rejects no-op tests, and blocks changed definitions or deleted inputs", () => {
+	const root = tempRoot();
+	try {
+		const src = source();
+		const workspace = materializeWritableWorkspace(src, root);
+		const plan = deriveWritableCheckPlan(src);
+		assert.deepEqual(plan.commands, ["npm test"]);
+		assert.equal(plan.definitionFiles.includes("package.json"), true);
+		assert.equal(writableCheckPlanBlocker({ source: src, workspaceRoot: workspace.root, candidatePaths: workspace.candidatePaths, plan }), undefined);
+		writeFileSync(join(workspace.root, "package.json"), '{"scripts":{"test":"true"}}\n');
+		assert.match(writableCheckPlanBlocker({ source: src, workspaceRoot: workspace.root, candidatePaths: workspace.candidatePaths, plan }) ?? "", /definition changed/);
+		assert.throws(() => deriveWritableCheckPlan({ ...src, files: new Map([["package.json", { ...src.files.get("package.json")!, content: Buffer.from('{"scripts":{"test":"true"}}'), bytes: 33 }]]) }), /no-op/);
+		writeFileSync(join(workspace.root, "package.json"), src.files.get("package.json")!.content);
+		unlinkSync(join(workspace.root, "tests/smoke.test.mjs"));
+		assert.match(writableCheckPlanBlocker({ source: src, workspaceRoot: workspace.root, candidatePaths: workspace.candidatePaths, plan }) ?? "", /test input was deleted/);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("worker write quota bounds aggregate bytes, allows accounted overwrites, and leaves no quota charge after refusal", async () => {
+	const root = tempRoot();
+	const src = source();
+	const fileBytes = Buffer.alloc(128 * 1024, 0x61).toString("utf8");
+	try {
+		const { workspace, worker } = await runWorkerToolActions(root, src, async (tools, workspaceRoot) => {
+			const write = tools.get("review_writable_write")!;
+			const outside = join(root, "outside.txt");
+			writeFileSync(outside, "canary");
+			symlinkSync(outside, join(workspaceRoot, "src/failed-write"));
+			await assert.rejects(write.execute("fail", { path: "src/failed-write", content: fileBytes }), /private regular file/);
+			unlinkSync(join(workspaceRoot, "src/failed-write"));
+			for (let index = 0; index < 511; index++) {
+				await write.execute(`write-${index}`, { path: `many/${String(index).padStart(4, "0")}.bin`, content: fileBytes });
+			}
+			await assert.rejects(write.execute("overflow", { path: "many/0511.bin", content: fileBytes }), /candidate byte size exceeds/);
+			await write.execute("overwrite", { path: "many/0000.bin", content: "x" });
+			await write.execute("available-after-overwrite", { path: "many/0511.bin", content: fileBytes });
+		});
+		assert.equal(worker.status, "blocked", "the fixture intentionally ends without a report or checks");
+		assert.equal(worker.candidatePaths.includes("src/failed-write"), false, "a refused symlink write is not recorded as a candidate path");
+		assert.equal(worker.candidatePaths.includes("many/0511.bin"), true);
+		const recovered = inspectWritableWorkspace(join(root, "state"), workspace.workspaceId);
+		assert.ok(recovered.candidate.totalBytes <= WRITABLE_EXECUTION_LIMITS.workspaceBytes);
+		assert.equal(readFileSync(join(workspace.root, "many/0000.bin"), "utf8"), "x");
+		assert.equal(readFileSync(join(workspace.root, "many/0511.bin"), "utf8"), fileBytes);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("worker path quota bounds many writes and is not replenished by deletions", async () => {
+	const root = tempRoot();
+	try {
+		const { worker } = await runWorkerToolActions(root, source(), async (tools) => {
+			const write = tools.get("review_writable_write")!;
+			const remove = tools.get("review_writable_delete")!;
+			for (let index = 0; index < WRITABLE_EXECUTION_LIMITS.workspaceFiles - 3; index++) {
+				await write.execute(`write-${index}`, { path: `paths/${index}.txt`, content: "x" });
+			}
+			await assert.rejects(write.execute("too-many", { path: "paths/extra.txt", content: "x" }), /candidate file count exceeds/);
+			await write.execute("overwrite-at-limit", { path: "paths/0.txt", content: "updated" });
+			await remove.execute("delete-at-limit", { path: "paths/0.txt" });
+			await assert.rejects(write.execute("still-too-many", { path: "paths/extra.txt", content: "x" }), /candidate file count exceeds/);
+		});
+		assert.equal(worker.status, "blocked", "the fixture intentionally ends without a report or checks");
+		assert.equal(worker.candidatePaths.length, WRITABLE_EXECUTION_LIMITS.workspaceFiles);
+		assert.equal(worker.candidatePaths.includes("paths/extra.txt"), false);
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -198,6 +298,7 @@ test("candidate checks bind stdout/stderr and fail if a tracked source file chan
 		});
 		assert.equal(tampered[0]?.status, "failed");
 		assert.notEqual(tampered[0]?.candidateDigestBefore, tampered[0]?.candidateDigestAfter);
+		assert.equal(tampered[0]?.outputDigest, sha(`${tampered[0]?.stdout}\0${tampered[0]?.stderr}\0failed\0${125}`));
 		assert.throws(() => checkPlanDigest([]), /required/);
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -229,6 +330,25 @@ test("GitHub source acquisition materializes only complete regular blobs without
 		const workspace = materializeWritableWorkspace(loaded.data, root);
 		assert.equal(readFileSync(join(workspace.root, "src/file.txt"), "utf8"), "base\n");
 		assert.equal(lstatSync(workspace.root).mode & 0o077, 0);
+		const inspected = inspectWritableWorkspace(root, workspace.workspaceId);
+		assert.equal(inspected.evidence.baseSha, baseSha);
+		assert.deepEqual(inspected.candidatePaths, ["src/file.txt"]);
+		writeFileSync(join(workspace.root, "new.txt"), "unsubmitted candidate bytes");
+		unlinkSync(join(workspace.root, "src/file.txt"));
+		const expected = snapshotCandidate(workspace.root, ["new.txt", "src/file.txt"]);
+		const afterRestart = inspectWritableWorkspace(root, workspace.workspaceId, expected.digest);
+		assert.equal(afterRestart.matchesExpectedDigest, true);
+		assert.equal(afterRestart.candidatePaths.includes("new.txt"), true);
+		const workspacePath = join(root, `workspace-${workspace.workspaceId}`);
+		const parkedWorkspace = join(root, `parked-${workspace.workspaceId}`);
+		const outside = join(root, "outside-workspace");
+		mkdirSync(outside, { mode: 0o700 });
+		writeFileSync(join(outside, "outside.txt"), "not the candidate");
+		renameSync(workspacePath, parkedWorkspace);
+		symlinkSync(outside, workspacePath);
+		assert.throws(() => inspectWritableWorkspace(root, workspace.workspaceId), /private directory/);
+		unlinkSync(workspacePath);
+		renameSync(parkedWorkspace, workspacePath);
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -307,23 +427,24 @@ function publishFake(fetchLog: Array<{ method: string; path: string; body?: Reco
 	}) as typeof fetch;
 }
 
-async function publishFixture(options: { staleBase?: boolean; unauthorized?: boolean; branchMismatch?: boolean; ambiguousPost?: boolean; workflowChange?: boolean; revalidatedUpdatedAt?: string } = {}) {
+async function publishFixture(options: { staleBase?: boolean; unauthorized?: boolean; branchMismatch?: boolean; ambiguousPost?: boolean; workflowChange?: boolean; revalidatedUpdatedAt?: string; commands?: readonly string[] } = {}) {
 	const root = changedWorkspace();
 	const fetchLog: Array<{ method: string; path: string; body?: Record<string, unknown> }> = [];
 	const src = source();
-	const paths = ["src/file.txt"];
+	const paths = [...src.files.keys()];
 	if (options.workflowChange) {
 		mkdirSync(join(root, ".github/workflows"), { recursive: true });
 		writeFileSync(join(root, ".github/workflows/ci.yml"), "name: unsafe\n");
 		paths.push(".github/workflows/ci.yml");
 	}
 	const candidate = snapshotCandidate(root, paths);
-	const commands = ["node --test"];
+	const plan = deriveWritableCheckPlan(src);
+	const commands = [...(options.commands ?? plan.commands)];
 	const results: WritableCheckResult[] = [{ command: commands[0]!, status: "passed", exitCode: 0, stdout: "ok", stderr: "", outputDigest: sha("output"), candidateDigestBefore: candidate.digest, candidateDigestAfter: candidate.digest }];
-	const proof = createCandidateCheckProof({ repository: src.repository, issueNumber: src.issueNumber, baseRef: src.defaultBranch, baseSha: src.baseSha, runtimeProfile: "krun", commands, results, candidate });
+	const proof = createCandidateCheckProof({ repository: src.repository, issueNumber: src.issueNumber, baseRef: src.defaultBranch, baseSha: src.baseSha, runtimeProfile: "krun", commands, planDigest: plan.digest, results, candidate });
 	const fetchImpl = publishFake(fetchLog, options);
 	const call = () => publishDraftCandidate({
-		source: src, workspaceRoot: root, candidatePaths: paths, candidate, proof, commands, runtimeProfile: "krun", summary: "Applied the source correction.",
+		source: src, workspaceRoot: root, candidatePaths: paths, candidate, proof, commands, planDigest: plan.digest, runtimeProfile: "krun", summary: "Applied the source correction.",
 		options: { token: "synthetic-canary", fetchImpl },
 		revalidateIssue: async () => ({ issueOpen: true, issueUpdatedAt: options.revalidatedUpdatedAt ?? src.issueUpdatedAt, existingSubmittedPullRequests: [], authorizedWrite: true }),
 	});
@@ -349,6 +470,16 @@ test("controller publisher creates only a deterministic draft on the exact verif
 		assert.equal(createPr?.body?.head, result.branch);
 		assert.equal(String(createPr?.body?.body).includes("Closes"), false);
 		assert.equal(JSON.stringify(fixture.fetchLog).includes("synthetic-canary"), false);
+	} finally { rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("controller publisher refuses a model-chosen no-op command even when its proof is internally consistent", async () => {
+	const fixture = await publishFixture({ commands: ["true"] });
+	try {
+		const result = await fixture.call();
+		assert.equal(result.status, "blocked");
+		assert.match(result.reason ?? "", /controller-derived mandatory check plan/);
+		assert.equal(fixture.fetchLog.length, 0, "the forged proof is refused before any GitHub observation or mutation");
 	} finally { rmSync(fixture.root, { recursive: true, force: true }); }
 });
 
@@ -384,15 +515,19 @@ test("publisher reconciles an ambiguous PR create by exact observation and never
 test("wave persistence validates isolated execution evidence separately from workflowz receipts", () => {
 	const root = tempRoot();
 	const now = Date.now();
+	const output = "retained output";
+	const persistedCheck = { command: "npm test", status: "failed", exitCode: 1, outputDigest: sha(`${output}\0\0failed\0${1}`), stdout: output, stderr: "" };
 	const batch = {
 		version: 2 as const, issueOutcome: "pr-ready" as const, issuePrDeadlineAt: now + 60_000, issuePrRepairLimit: 1,
 		id: "batch-writable-test", kind: "fix" as const, waves: [{ repo: "example/repo", items: [{ repo: "example/repo", id: 42, type: "issue" as const }] }],
 		currentWave: 0, completedItems: 0, totalItems: 1, state: "running" as const, startedAt: now, waveStartedAt: now,
-		waveIdentity: "batch-writable-test:0", writableExecution: { version: 1 as const, status: "running" as const, issueKey: "example/repo#42", runtimeProfile: "krun" as const, startedAt: now },
+		waveIdentity: "batch-writable-test:0", writableExecution: { version: 1 as const, status: "running" as const, issueKey: "example/repo#42", runtimeProfile: "krun" as const, startedAt: now,
+			workspaceId: "01234567-89ab-cdef-0123-456789abcdef", commands: ["npm test"], checks: [persistedCheck] },
 	};
 	try {
 		saveWave(root, batch as never);
 		assert.deepEqual(loadWave(root, "review:batch-writable-test:0")?.writableExecution, batch.writableExecution);
+		assert.equal(loadWave(root, "review:batch-writable-test:0")?.writableExecution?.checks?.[0]?.stdout, output);
 		saveWave(root, { ...batch, writableExecution: { ...batch.writableExecution, issueKey: "example/repo#43" } } as never);
 		assert.equal(loadWave(root, "review:batch-writable-test:0"), undefined);
 	} finally { rmSync(root, { recursive: true, force: true }); }
@@ -403,6 +538,10 @@ test("restricted native issue worker uses only Review read/write/check tools bef
 	const requests: Array<{ method: string; path: string; body?: Record<string, unknown> }> = [];
 	let baseRefCreated = false;
 	let capturedOptions: Record<string, unknown> | undefined;
+	let createdWorkspaceId: string | undefined;
+	let completedChecks: { readonly commands: readonly string[]; readonly stdout?: string } | undefined;
+	const packageContent = Buffer.from('{"scripts":{"test":"node --test tests/smoke.test.mjs"}}\n');
+	const smokeContent = Buffer.from("import test from 'node:test';\ntest('smoke', () => {});\n");
 	const fetchImpl = (async (url: URL | RequestInfo, init?: RequestInit) => {
 		const target = new URL(String(url));
 		const method = init?.method ?? "GET";
@@ -413,8 +552,14 @@ test("restricted native issue worker uses only Review read/write/check tools bef
 		if (path.endsWith("/git/ref/heads/main")) return response({ object: { sha: baseSha, type: "commit" } });
 		if (path.includes(`/git/commits/${baseSha}`)) return response({ tree: { sha: treeSha } });
 		if (path.endsWith("/issues/42")) return response({ state: "open", title: "Repair", body: "Fix the sample source.", updated_at: "2026-10-31T12:00:00Z" });
-		if (path.includes(`/git/trees/${treeSha}`) && method === "GET") return response({ truncated: false, tree: [{ path: "src/file.txt", mode: "100644", type: "blob", sha: blobSha, size: 5 }] });
+		if (path.includes(`/git/trees/${treeSha}`) && method === "GET") return response({ truncated: false, tree: [
+			{ path: "src/file.txt", mode: "100644", type: "blob", sha: blobSha, size: 5 },
+			{ path: "package.json", mode: "100644", type: "blob", sha: "e".repeat(40), size: packageContent.byteLength },
+			{ path: "tests/smoke.test.mjs", mode: "100644", type: "blob", sha: "f".repeat(40), size: smokeContent.byteLength },
+		] });
 		if (path.includes(`/git/blobs/${blobSha}`) && method === "GET") return response({ encoding: "base64", content: Buffer.from("base\n").toString("base64") });
+		if (path.includes(`/git/blobs/${"e".repeat(40)}`) && method === "GET") return response({ encoding: "base64", content: packageContent.toString("base64") });
+		if (path.includes(`/git/blobs/${"f".repeat(40)}`) && method === "GET") return response({ encoding: "base64", content: smokeContent.toString("base64") });
 		if (path.endsWith("/git/blobs") && method === "POST") return response({ sha: "f".repeat(40) });
 		if (path.endsWith("/git/trees") && method === "POST") return response({ sha: "9".repeat(40) });
 		if (path.endsWith("/git/commits") && method === "POST") return response({ sha: commitSha });
@@ -426,8 +571,10 @@ test("restricted native issue worker uses only Review read/write/check tools bef
 		throw new Error(`unexpected fake GitHub request ${method} ${path}`);
 	}) as typeof fetch;
 	const customRunner = async (input: Parameters<typeof runCandidateChecks>[0]): Promise<readonly WritableCheckResult[]> => {
+		assert.deepEqual(input.commands, ["npm test"], "the controller supplies the captured mandatory plan");
 		const candidate = snapshotCandidate(input.workspace, input.paths);
-		return input.commands.map((command) => ({ command, status: "passed", exitCode: 0, stdout: "fixture check passed", stderr: "", outputDigest: sha("fixture output"), candidateDigestBefore: candidate.digest, candidateDigestAfter: candidate.digest }));
+		const stdout = "fixture check passed";
+		return input.commands.map((command) => ({ command, status: "passed", exitCode: 0, stdout, stderr: "", outputDigest: sha(`${stdout}\0\0passed\0${0}`), candidateDigestBefore: candidate.digest, candidateDigestAfter: candidate.digest }));
 	};
 	const sdk = {
 		Settings: { isolated: (settings: Record<string, unknown>) => settings },
@@ -444,7 +591,8 @@ test("restricted native issue worker uses only Review read/write/check tools bef
 					const read = await byName.get("review_writable_read")!.execute("2", { path: "src/file.txt", offset: 0, limit: 100 });
 					assert.match(read.content[0]!.text, /base/);
 					await byName.get("review_writable_write")!.execute("3", { path: "src/file.txt", content: "candidate\n" });
-					await byName.get("review_writable_check")!.execute("4", { commands: ["node --test"] });
+					await assert.rejects(byName.get("review_writable_check")!.execute("3a", { commands: ["true"] }), /takes no worker arguments/);
+					await byName.get("review_writable_check")!.execute("4", {});
 					await byName.get("review_writable_report")!.execute("5", { summary: "Updated the sample implementation." });
 				},
 				async abort() {},
@@ -457,12 +605,18 @@ test("restricted native issue worker uses only Review read/write/check tools bef
 		const workflow = await runWritableIssueWorkflow({
 			repository: "example/repo", issueNumber: 42, privateStateRoot: join(root, "state"), sessionRoot: join(root, "sessions"),
 			token: "synthetic-canary", runtimeProfile: "krun", sdk, schema, context: { model: { provider: "fixture", id: "fixed" }, modelRegistry: { authStorage: {}, hasConfiguredAuth: () => true } },
-			signal: new AbortController().signal, fetchImpl, checkRunner: customRunner,
+			signal: new AbortController().signal, fetchImpl, checkRunner: customRunner, onWorkspaceCreated: (id) => { createdWorkspaceId = id; },
+			onChecksCompleted: (commands, checks) => { completedChecks = { commands, stdout: checks[0]?.stdout }; },
 			revalidateIssue: async () => ({ issueOpen: true, issueUpdatedAt: "2026-10-31T12:00:00Z", existingSubmittedPullRequests: [], authorizedWrite: true }),
 		});
 		assert.equal(workflow.status, "submitted");
 		assert.equal(workflow.publication?.status, "submitted");
 		assert.equal(workflow.publication?.status === "submitted" && workflow.publication.observed, false);
+		assert.equal(workflow.workspaceId, createdWorkspaceId);
+		assert.match(workflow.workspaceId ?? "", /^[a-f0-9-]{36}$/i);
+		assert.deepEqual(completedChecks?.commands, ["npm test"]);
+		assert.equal(completedChecks?.stdout, "fixture check passed");
+		assert.equal(inspectWritableWorkspace(join(root, "state"), workflow.workspaceId!, workflow.candidate?.digest).matchesExpectedDigest, true);
 		assert.equal(capturedOptions?.disableExtensionDiscovery, true);
 		assert.equal(capturedOptions?.enableMCP, false);
 		assert.equal(capturedOptions?.restrictToolNames, true);

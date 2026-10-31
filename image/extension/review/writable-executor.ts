@@ -45,6 +45,7 @@ export type CandidateCheckProof = {
 	readonly baseRef: string;
 	readonly baseSha: string;
 	readonly candidateDigest: string;
+	readonly planDigest: string;
 	readonly checksDigest: string;
 	readonly runtimeProfile: WritableRuntimeProfile;
 	readonly checks: readonly { readonly command: string; readonly exitCode: 0; readonly outputDigest: string }[];
@@ -160,6 +161,7 @@ export function createCandidateCheckProof(input: {
 	baseSha: string;
 	runtimeProfile: WritableRuntimeProfile;
 	commands: readonly string[];
+	planDigest: string;
 	results: readonly WritableCheckResult[];
 	candidate: CandidateSnapshot;
 	verifiedAt?: number;
@@ -167,6 +169,7 @@ export function createCandidateCheckProof(input: {
 	if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(input.repository) || !Number.isSafeInteger(input.issueNumber) || input.issueNumber < 1) throw new Error("candidate proof subject is invalid");
 	if (!/^[a-f0-9]{40}$/i.test(input.baseSha) || !input.baseRef || input.baseRef.length > 255) throw new Error("candidate proof base identity is invalid");
 	checkPlanDigest(input.commands);
+	if (!/^[a-f0-9]{64}$/.test(input.planDigest)) throw new Error("candidate proof mandatory check plan is invalid");
 	if (input.results.length !== input.commands.length || input.results.some((check, index) => check.command !== input.commands[index] || check.status !== "passed" || check.exitCode !== 0 || check.candidateDigestBefore !== input.candidate.digest || check.candidateDigestAfter !== input.candidate.digest)) throw new Error("candidate proof requires every exact check to pass against an unchanged candidate");
 	const checks = input.results.map((check) => ({ command: check.command, exitCode: 0 as const, outputDigest: check.outputDigest }));
 	return {
@@ -176,6 +179,7 @@ export function createCandidateCheckProof(input: {
 		baseRef: input.baseRef,
 		baseSha: input.baseSha.toLowerCase(),
 		candidateDigest: input.candidate.digest,
+		planDigest: input.planDigest,
 		checksDigest: checkResultsDigest(checks),
 		runtimeProfile: input.runtimeProfile,
 		checks,
@@ -191,6 +195,7 @@ export function verifyCandidateCheckProof(input: {
 	baseRef: string;
 	baseSha: string;
 	commands: readonly string[];
+	planDigest: string;
 	runtimeProfile: WritableRuntimeProfile;
 }): boolean {
 	try {
@@ -200,6 +205,7 @@ export function verifyCandidateCheckProof(input: {
 			&& input.proof.baseRef === input.baseRef
 			&& input.proof.baseSha === input.baseSha.toLowerCase()
 			&& input.proof.candidateDigest === input.candidate.digest
+			&& input.proof.planDigest === input.planDigest
 			&& checkPlanDigest(input.commands).length === 64
 			&& input.proof.checksDigest === checkResultsDigest(input.proof.checks)
 			&& input.proof.runtimeProfile === input.runtimeProfile
@@ -350,14 +356,18 @@ export async function runCandidateChecks(input: {
 		if (input.signal.aborted) break;
 		const before = snapshotCandidate(input.workspace, input.paths);
 		const result = await runner(input.workspace, command, input.signal);
-		const outputDigest = sha256(`${result.stdout}\0${result.stderr}\0${result.status}\0${result.exitCode ?? "unknown"}`);
 		if (result.status !== "passed" || result.exitCode !== 0) {
+			const outputDigest = sha256(`${result.stdout}\0${result.stderr}\0${result.status}\0${result.exitCode ?? "unknown"}`);
 			results.push({ command, status: result.status, ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }), stdout: result.stdout, stderr: result.stderr, outputDigest, candidateDigestBefore: before.digest });
 			break;
 		}
 		const after = snapshotCandidate(input.workspace, input.paths);
 		const unchanged = before.digest === after.digest;
-		results.push({ command, status: unchanged ? "passed" : "failed", exitCode: unchanged ? 0 : 125, stdout: result.stdout, stderr: unchanged ? result.stderr : `${result.stderr}${result.stderr ? "\n" : ""}candidate files changed while the check ran`, outputDigest, candidateDigestBefore: before.digest, candidateDigestAfter: after.digest });
+		const status = unchanged ? "passed" : "failed";
+		const exitCode = unchanged ? 0 : 125;
+		const stderr = unchanged ? result.stderr : `${result.stderr}${result.stderr ? "\n" : ""}candidate files changed while the check ran`;
+		const outputDigest = sha256(`${result.stdout}\0${stderr}\0${status}\0${exitCode}`);
+		results.push({ command, status, exitCode, stdout: result.stdout, stderr, outputDigest, candidateDigestBefore: before.digest, candidateDigestAfter: after.digest });
 		if (!unchanged) break;
 	}
 	return results;

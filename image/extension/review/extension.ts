@@ -31,7 +31,7 @@ import { observeHumanReviewPolicy } from "./human-review-policy.ts";
 import { operatorLandingDecision } from "./operator-landing.ts";
 import { mcpExpectedHeadQualified } from "./merge-transport.ts";
 import { createReviewerOutputSchema, createReviewerReceiptState, admitReviewerTask, captureReviewerResult, captureReviewerTaskProgress, captureReviewerDelivery, getCleanReviewerReceipt, getDeliveredReviewerReceipt, reviewerDefinitionTrusted, type ReviewerReceiptState, type ReviewSubject } from "./reviewer-receipts.ts";
-import { writableExecutionReplayBlocker, writableIsolationReport } from "./writable-isolation.ts";
+import { shouldDispatchWritableIssueWave, writableExecutionReplayBlocker, writableIsolationReport } from "./writable-isolation.ts";
 import { runWritableIssueWorkflow, type WritableIssueWorkflowResult } from "./writable-worker.ts";
 import type { CandidateCheckProof, WritableRuntimeProfile } from "./writable-executor.ts";
 import {
@@ -169,8 +169,10 @@ export interface PersistedWritableExecution {
 	readonly baseSha?: string;
 	readonly candidateDigest?: string;
 	readonly checksDigest?: string;
+	/** Opaque UUID resolves to a private persisted workspace and base-tree sidecar. */
+	readonly workspaceId?: string;
 	readonly commands?: readonly string[];
-	readonly checks?: readonly { readonly command: string; readonly status: string; readonly exitCode?: number; readonly outputDigest: string }[];
+	readonly checks?: readonly { readonly command: string; readonly status: string; readonly exitCode?: number; readonly outputDigest: string; readonly stdout?: string; readonly stderr?: string }[];
 	readonly proof?: CandidateCheckProof;
 	readonly pullRequest?: { readonly number: number; readonly url: string; readonly branch: string; readonly headSha: string; readonly baseRef: string; readonly baseSha: string; readonly observed: boolean };
 	readonly reason?: string;
@@ -2879,6 +2881,29 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				context: { model: ctx.model, modelRegistry: ctx.modelRegistry },
 				signal: controller.signal,
 				fetchImpl: latestTokenOptions.fetchImpl ?? options.fetchImpl,
+				onWorkspaceCreated: (workspaceId) => {
+					const current = activeBatch;
+					if (!current || current.id !== batch.id || current.currentWave !== batch.currentWave
+						|| ctx.sessionManager?.getSessionId?.() !== sessionId || current.writableExecution?.status !== "running") {
+						throw new Error("writable workspace could not be attached to its active durable attempt");
+					}
+					persistBatch(ctx, { ...current, writableExecution: { ...current.writableExecution, workspaceId } });
+				},
+				onChecksCompleted: (commands, checks) => {
+					const current = activeBatch;
+					const execution = current?.writableExecution;
+					if (!current || current.id !== batch.id || current.currentWave !== batch.currentWave
+						|| ctx.sessionManager?.getSessionId?.() !== sessionId || execution?.status !== "running") {
+						throw new Error("writable check evidence could not be attached to its active durable attempt");
+					}
+					persistBatch(ctx, { ...current, writableExecution: {
+						...execution,
+						commands: [...commands],
+						checks: checks.map(({ command, status, exitCode, outputDigest, stdout, stderr }) => ({
+							command, status, ...(exitCode === undefined ? {} : { exitCode }), outputDigest, stdout, stderr,
+						})),
+					} });
+				},
 				revalidateIssue: async () => {
 					try {
 						const live = await fetchItemsByKey([issueKey], "issues", mode.tokenOptions());
@@ -2910,6 +2935,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const reason = pullRequest
 			? `Draft candidate ${pullRequest.url} was created. It remains a draft; this isolated path has no independent exact-head acceptance or hosted-check receipt and is not PR-ready.`
 			: outcome.reason ?? "Credentialless issue execution did not produce an attributable candidate; preserve claims and inspect /review details.";
+		const progress = activeBatch.writableExecution;
+		const commands = outcome.commands ?? progress?.commands;
+		const checks = outcome.checks ?? progress?.checks;
 		const evidence: PersistedWritableExecution = {
 			version: 1,
 			status: outcome.status,
@@ -2918,10 +2946,11 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			startedAt,
 			finishedAt: Date.now(),
 			...(source ? { baseRef: source.defaultBranch, baseSha: source.baseSha } : {}),
+			...((outcome.workspaceId ?? activeBatch.writableExecution?.workspaceId) ? { workspaceId: outcome.workspaceId ?? activeBatch.writableExecution!.workspaceId } : {}),
 			...(outcome.candidate ? { candidateDigest: outcome.candidate.digest } : {}),
 			...(outcome.proof ? { checksDigest: outcome.proof.checksDigest, proof: outcome.proof } : {}),
-			...(outcome.commands ? { commands: outcome.commands } : {}),
-			...(outcome.checks ? { checks: outcome.checks.map(({ command, status, exitCode, outputDigest }) => ({ command, status, ...(exitCode === undefined ? {} : { exitCode }), outputDigest })) } : {}),
+			...(commands ? { commands } : {}),
+			...(checks ? { checks: checks.map(({ command, status, exitCode, outputDigest, stdout, stderr }) => ({ command, status, ...(exitCode === undefined ? {} : { exitCode }), outputDigest, stdout, stderr })) } : {}),
 			...(pullRequest ? { pullRequest } : {}),
 			reason,
 		};
@@ -3012,8 +3041,14 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				wave = activeBatch.waves[activeBatch.currentWave]!;
 			}
 		}
-		if (isolationReport.mode === "opt-in-ready") {
+		if (isolationReport.mode === "opt-in-ready" && shouldDispatchWritableIssueWave(activeBatch.kind, wave.items)) {
 			await dispatchWritableIssueWave(ctx, wave);
+			return;
+		}
+		if (isolationReport.mode === "opt-in-ready" && (activeBatch.kind === "slay" || activeBatch.kind === "fix")) {
+			const error = "The credentialless writable executor accepts issue work only; no PR worker or shell fallback was started.";
+			persistBatch(ctx, { ...activeBatch, state: "blocked", error });
+			notifyUser(ctx, error, "error");
 			return;
 		}
 		const retryingBlockedWave = activeBatch.state === "blocked";
@@ -3081,7 +3116,9 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			notifyUser(ctx, message, "error");
 			return { kind: "blocked", message };
 		}
-		const qualifiedWritable = kind !== "diff" && writableIsolationReport(env).mode === "opt-in-ready";
+		const qualifiedWritable = (kind === "slay" || kind === "fix")
+			&& items.length > 0 && items.every((item) => item.type === "issue")
+			&& writableIsolationReport(env).mode === "opt-in-ready";
 		const reviewerBlocker = qualifiedWritable ? undefined : reviewerCapabilityBlocker(kind, items);
 		if (reviewerBlocker) {
 			const subject = items.find((item) => item.type === "pr");

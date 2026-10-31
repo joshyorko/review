@@ -30,7 +30,7 @@ export type WritableIsolationReport = {
 	readonly runtime: "krun" | "apptainer" | "unknown";
 	readonly osSandbox: "not-requested" | "unavailable" | "qualified";
 	readonly taskExecutionTools: "legacy-default" | "blocked" | "credentialless-review-tools";
-	readonly dependencyReadiness: "not-assessed" | "qualified";
+	readonly dependencyReadiness: "not-assessed";
 	readonly publicationAuthorization: "not-attempted" | "controller-only";
 	readonly blocker?: string;
 };
@@ -137,7 +137,7 @@ export function writableIsolationReport(env: NodeJS.ProcessEnv): WritableIsolati
 				runtime,
 				osSandbox: "qualified",
 				taskExecutionTools: "credentialless-review-tools",
-				dependencyReadiness: "qualified",
+				dependencyReadiness: "not-assessed",
 				publicationAuthorization: "controller-only",
 			};
 		}
@@ -165,6 +165,11 @@ export function writableIsolationReport(env: NodeJS.ProcessEnv): WritableIsolati
 export function writableDispatchBlocker(env: NodeJS.ProcessEnv, kind: RepositoryBatchKind): string | undefined {
 	if (kind !== "slay" && kind !== "fix") return undefined;
 	return writableIsolationReport(env).blocker;
+}
+
+/** Only Slay/Fix issue work may enter the credentialless writable executor. */
+export function shouldDispatchWritableIssueWave(kind: RepositoryBatchKind, items: readonly { readonly type: string }[]): boolean {
+	return (kind === "slay" || kind === "fix") && items.length > 0 && items.every((item) => item.type === "issue");
 }
 
 export function writableExecutionReplayBlocker(execution: unknown): string | undefined {

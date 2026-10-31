@@ -49,6 +49,7 @@ import {
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
 import { loadWave, saveWave } from "../image/extension/review/wave-store.ts";
+import { shouldDispatchWritableIssueWave } from "../image/extension/review/writable-isolation.ts";
 import { factoryHandoffState, registerFactoryController, registerFactoryBatchSubmitter, registerFactoryDashboardOpener, registeredFactoryReconciler } from "../image/extension/luna-factory/omp/batch-bridge.ts";
 
 const NOW = 1_800_000_000_000;
@@ -3093,6 +3094,36 @@ test("opt-in writable isolation blocks dashboard Fix before OMP prompt dispatch 
 	assert.equal(pi.messages.length, 0, "no coordinator prompt or native task dispatch is sent");
 	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0, "no mutation claims are created");
 	assert.doesNotMatch(savedReviewNoticeText(pi), /synthetic-(?:github|copilot)-canary/, "the capability notice omits synthetic credential values");
+});
+
+test("issue diff remains on the read-only extension route while only Slay/Fix issue waves select the writable executor", async () => {
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const env = { ...ISOLATED_ENV, REVIEW_WRITABLE_ISOLATION: "1", REVIEW_RUNTIME_PROFILE: "krun" };
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: issueBackedFetch({ "projectbluefin/review#77": { title: "inspect only", submittedPrs: [] } }),
+		env,
+	});
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	(ctx.overlays[0] as unknown as ReviewDashboard).handleInput("d");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(batch?.kind, "diff");
+	assert.equal(batch?.writableExecution, undefined, "the read-only diff path never creates writable evidence");
+	assert.equal(pi.messages.length, 1, "issue diff still dispatches its normal inspection task");
+	assert.match(pi.messages[0] ?? "", /Inspect .* as an issue/);
+	assert.doesNotMatch(pi.messages[0] ?? "", /Implement|review_writable_check|shell/i);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+	assert.equal(shouldDispatchWritableIssueWave("diff", [{ type: "issue" }]), false);
+	assert.equal(shouldDispatchWritableIssueWave("diff", [{ type: "pr" }]), false);
+	assert.equal(shouldDispatchWritableIssueWave("slay", [{ type: "issue" }]), true);
+	assert.equal(shouldDispatchWritableIssueWave("fix", [{ type: "issue" }]), true);
+	assert.equal(shouldDispatchWritableIssueWave("slay", [{ type: "pr" }]), false);
 });
 
 test("structured reviewer capability reads OMP ArkType batch schemas through its wire conversion", () => {
