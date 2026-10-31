@@ -41,13 +41,14 @@ gh auth login --web --hostname github.com --scopes repo,read:org,workflow
 review acme/widgets
 ```
 
-Replace `acme/widgets` with your repository, or use `org:acme` for an organization. The scope above is an example. A fresh interactive session can also ask for a scope; headless use requires an explicit one. Authenticate separately with your model provider before using it. See [appliance setup](docs/appliance.md) for provider and runtime setup.
+Replace `acme/widgets` with your repository, or use `org:acme` for an organization. The scope above is an example. A fresh interactive session can also ask for a scope. `REVIEW_DEFAULT_SCOPE` sets an explicit default. Headless use without a scope reports that `owner/repo` or `org:<name>` is required. Authenticate separately with your model provider before using it. See [appliance setup](docs/appliance.md) for provider and runtime setup.
 
 From a source checkout, the appliance and source entry points are:
 
 ```sh
 just review-doctor
 just review-queue acme/widgets
+just review-queue org:acme
 bin/review-source org:acme
 ```
 
