@@ -103,7 +103,7 @@ OMP provides sessions, agents, tools, task execution, model resolution, and canc
 
 OMP resolves models and manages provider authentication. The launcher supports approved credential groups for OpenAI, Anthropic, Gemini, Copilot, AWS SDK, Bedrock bearer and TypeSafe; selection and credential presence do not prove authentication or model availability. Host launch profiles can select groups or approved variable names. See [host launch profiles](docs/appliance.md#host-launch-profiles) for exact controls.
 
-Review and Factory are bundled OMP extensions. The appliance owns its OMP profile and MCP configuration by default; host configuration is an explicit opt-in. The VS Code extension has a separate implementation and release path; check its documentation for its current capabilities.
+Review and Factory are bundled OMP extensions. The appliance owns its OMP profile and MCP configuration by default; host configuration is an explicit opt-in. The VS Code extension is separate from the terminal appliance; check its documentation for its current capabilities.
 
 ## Security and trust
 
