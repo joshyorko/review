@@ -35,6 +35,8 @@ OMP discovers the companion agent definitions in `image/extension/review/agents/
 5. Review tools and prompts consume live GitHub evidence.
 6. Delete a specialist when its responsibility is fully duplicated by OMP or another agent; do not keep wrappers for compatibility.
 
+`REVIEW_WRITABLE_ISOLATION=1` is currently a fail-closed guard, not a credentialless executor. It blocks Review Slay/Fix before task dispatch, reports the selected runtime and unqualified capabilities, and leaves read-only Review usable. Do not describe OMP's native isolated worktree as the security boundary or claim that this guard runs repository commands in a sandbox.
+
 ## Verification
 
 ```bash

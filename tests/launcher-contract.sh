@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # Default-launch assertions must not inherit operator opt-ins.
-unset LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY REVIEW_INHERIT_OMP_CONFIG
+unset LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY REVIEW_INHERIT_OMP_CONFIG REVIEW_WRITABLE_ISOLATION REVIEW_RUNTIME_PROFILE
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
@@ -70,6 +70,7 @@ assert_review_scope_env_names() {
   for name in REVIEW_DEFAULT_SCOPE REVIEW_SKIP_REPOS; do
     [[ "$call" == *"--env $name"* ]] || fail "$context did not forward generic Review setting $name by name: $call"
   done
+  [[ "$call" == *"--env REVIEW_RUNTIME_PROFILE=krun"* ]] || fail "$context did not label the selected runtime in the appliance: $call"
   for name in REVIEW_MODE HIVE_HUB; do
     [[ "$call" != *"--env $name"* ]] || fail "$context forwarded retired Review setting $name: $call"
   done
@@ -344,6 +345,11 @@ if [[ "\${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
   [[ "\${APPTAINERENV_LUNA_FACTORY_CAPACITY:-}" == 7 ]] || exit 19
   # Names, never values: the appliance boundary carries the setting, not argv.
   [[ "\$*" != *LUNA_FACTORY* && "\$*" != *" 7 "* ]] || exit 19
+fi
+if [[ "\${EXPECT_WRITABLE_ENV:-}" == 1 ]]; then
+  [[ "\${APPTAINERENV_REVIEW_WRITABLE_ISOLATION:-}" == 1 ]] || exit 19
+  [[ "\${APPTAINERENV_REVIEW_RUNTIME_PROFILE:-}" == apptainer ]] || exit 19
+  [[ "\$*" != *REVIEW_WRITABLE_ISOLATION* && "\$*" != *" apptainer "* ]] || exit 19
 fi
 if [[ -v EXPECT_RTK_DISABLED ]]; then
   if [[ "\${EXPECT_RTK_DISABLED}" == unset ]]; then
@@ -1004,9 +1010,9 @@ rm -rf "$source_only"
 
 # --- 3b. Factory runtime config crosses the appliance boundary ---------------
 
-# Factory has exactly two public runtime knobs: the execution opt-in and the
-# shared capacity bound. Both are user configuration, so both must reach every
-# personal appliance path by name, and neither value may appear in argv.
+# Factory has two public runtime knobs. Writable isolation has a separate
+# fail-closed opt-in. All settings cross the appliance boundary by name, and
+# values do not appear in argv.
 assert_factory_podman_env_names() {
   local call="$1" context="${2:-launcher}"
   for name in LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY; do
@@ -1015,6 +1021,17 @@ assert_factory_podman_env_names() {
   [[ "$call" != *"--env LUNA_FACTORY_ENABLED="* && "$call" != *"--env LUNA_FACTORY_CAPACITY="* ]] ||
     fail "$context forwarded a Factory value instead of its name: $call"
 }
+
+: >"$mock_podman_log"
+REVIEW_WRITABLE_ISOLATION=1 REVIEW_RUNTIME_PROFILE=forged REVIEW_TEST_KVM_DEVICE="$kvm" \
+  "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 || fail "bin/review did not launch with writable-isolation opt-in"
+writable_podman_call="$(grep '^run ' "$mock_podman_log")"
+[[ "$writable_podman_call" == *"--env REVIEW_WRITABLE_ISOLATION"* ]] || fail "Podman did not receive the explicit writable-isolation opt-in: $writable_podman_call"
+[[ "$writable_podman_call" == *"--env REVIEW_RUNTIME_PROFILE=krun"* && "$writable_podman_call" != *"REVIEW_RUNTIME_PROFILE=forged"* ]] || fail "Podman received a caller-forged runtime profile: $writable_podman_call"
+
+: >"$mock_podman_log"
+REVIEW_WRITABLE_ISOLATION=maybe "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 && fail "bin/review accepted an invalid writable-isolation value"
+[[ ! -s "$mock_podman_log" ]] || fail "bin/review invoked Podman after an invalid writable-isolation value"
 
 : >"$mock_podman_log"
 LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
@@ -1042,6 +1059,11 @@ factory_apptainer_output="$(LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPEC
   REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/review" owner/repo 2>&1)" ||
   fail "Apptainer fallback did not forward Factory configuration: $factory_apptainer_output"
 
+: >"$mock_apptainer_log"
+REVIEW_WRITABLE_ISOLATION=1 REVIEW_RUNTIME_PROFILE=krun EXPECT_WRITABLE_ENV=1 \
+  REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "Apptainer fallback did not forward the fail-closed writable-isolation setting and selected runtime"
+
 factory_sif="$scratch/factory.sif"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$factory_sif"
 chmod +x "$factory_sif"
@@ -1050,6 +1072,11 @@ LUNA_FACTORY_ENABLED=1 LUNA_FACTORY_CAPACITY=7 EXPECT_FACTORY_ENV=1 REVIEW_APPLI
   "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
   fail "packaged Review SIF did not forward Factory configuration"
 [[ "$(cat "$mock_apptainer_log")" == *"$factory_sif"* ]] || fail "packaged Review SIF was not the selected artifact"
+
+: >"$mock_apptainer_log"
+REVIEW_WRITABLE_ISOLATION=1 REVIEW_RUNTIME_PROFILE=krun EXPECT_WRITABLE_ENV=1 REVIEW_APPLIANCE_SIF="$factory_sif" \
+  "${repo_root}/bin/review" owner/repo >/dev/null 2>&1 ||
+  fail "packaged SIF did not receive the fail-closed writable-isolation setting and selected runtime"
 
 : >"$mock_apptainer_log"
 env -u LUNA_FACTORY_ENABLED -u LUNA_FACTORY_CAPACITY EXPECT_NO_FACTORY_ENV=1 \

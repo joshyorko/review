@@ -603,6 +603,8 @@ run_review() {
     review_launch_summary apptainer "$scope"
     factory_verifier_ready apptainer "$selected_sif"
     prepare_apptainer_environment
+    unset REVIEW_RUNTIME_PROFILE
+    export APPTAINERENV_REVIEW_RUNTIME_PROFILE=apptainer
     [[ -z "$REVIEW_AUDIO_PULSE_SERVER" ]] ||
       export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
     local -a sif_args=(run --containall --no-eval)
@@ -644,10 +646,11 @@ run_review() {
     podman_args+=(--env LUNA_FACTORY_CLAIMS_ROOT=/claims)
     for arg in "${REVIEW_LAUNCH_ENV_NAMES[@]}"; do
       case "$arg" in
-        REVIEW_INHERIT_OMP_CONFIG | LUNA_FACTORY_ENABLED | LUNA_FACTORY_CAPACITY) [[ -v "$arg" ]] || continue ;;
+        REVIEW_INHERIT_OMP_CONFIG | REVIEW_WRITABLE_ISOLATION | LUNA_FACTORY_ENABLED | LUNA_FACTORY_CAPACITY) [[ -v "$arg" ]] || continue ;;
       esac
       podman_args+=(--env "$arg")
     done
+    podman_args+=(--env REVIEW_RUNTIME_PROFILE=krun)
     podman_args+=(--env "TERM=${TERM:-xterm-256color}")
     podman_args+=(--env "COLORTERM=${COLORTERM:-truecolor}")
     if [[ -n "$REVIEW_AUDIO_PULSE_SOCKET" ]]; then
@@ -735,6 +738,8 @@ run_review() {
   report_apptainer_image_identity "$image" "review appliance" "$is_override" "$MIN_REVIEW_APPLIANCE_VERSION"
   factory_verifier_ready apptainer "$apptainer_image"
   prepare_apptainer_environment
+  unset REVIEW_RUNTIME_PROFILE
+  export APPTAINERENV_REVIEW_RUNTIME_PROFILE=apptainer
   [[ -z "$REVIEW_AUDIO_PULSE_SERVER" ]] ||
     export APPTAINERENV_PULSE_SERVER="$REVIEW_AUDIO_PULSE_SERVER"
   local -a apptainer_args=(run --containall --no-eval)

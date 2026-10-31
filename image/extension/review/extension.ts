@@ -30,6 +30,7 @@ import { observeHumanReviewPolicy } from "./human-review-policy.ts";
 import { operatorLandingDecision } from "./operator-landing.ts";
 import { mcpExpectedHeadQualified } from "./merge-transport.ts";
 import { createReviewerOutputSchema, createReviewerReceiptState, admitReviewerTask, captureReviewerResult, captureReviewerTaskProgress, captureReviewerDelivery, getCleanReviewerReceipt, getDeliveredReviewerReceipt, reviewerDefinitionTrusted, type ReviewerReceiptState, type ReviewSubject } from "./reviewer-receipts.ts";
+import { writableDispatchBlocker, writableIsolationReport } from "./writable-isolation.ts";
 import {
 	commentInvocation,
 	createCommentActionPlan,
@@ -2761,6 +2762,12 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			persistBatch(ctx, { ...activeBatch, state: "paused" });
 			return;
 		}
+		const isolationBlocker = writableDispatchBlocker(env, activeBatch.kind);
+		if (isolationBlocker) {
+			persistBatch(ctx, { ...activeBatch, state: "blocked", error: isolationBlocker });
+			notifyUser(ctx, isolationBlocker, "error");
+			return;
+		}
 		const dispatchBatch = activeBatch;
 		let wave = activeBatch.waves[activeBatch.currentWave];
 		if (!wave) {
@@ -4186,6 +4193,15 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}, factoryLoadDiagnostic());
 		}
 		mode.setToken(resolveToken(env));
+		const isolationReport = writableIsolationReport(env);
+		if (isolationReport.mode !== "disabled") {
+			notifyNotice(ctx, "warning", "review-writable-isolation-unavailable", {
+				title: "Writable isolation is unavailable",
+				outcome: "Slay/Fix stays blocked before worker or shell dispatch while writable isolation is opted in.",
+				action: "Review the capability report; clear REVIEW_WRITABLE_ISOLATION only if you intend to use the existing native worker path.",
+				steps: ["Do not treat an OMP worktree as an OS security boundary.", "Use read-only Review actions until a credentialless executor is integrated and qualified."],
+			}, JSON.stringify(isolationReport, null, 2));
+		}
 		// Mode, scope and filter apply immediately; the remembered item can only be
 		// found once the queue has actually been fetched, so restore runs twice.
 		const persisted = readPersisted(ctx);

@@ -39,6 +39,11 @@ GITHUB_LOGIN_COMMAND="gh auth login --web --hostname github.com --scopes repo,re
 github_auth_ready() {
   command -v gh &>/dev/null && gh auth status --hostname github.com &>/dev/null
 }
+validate_writable_isolation_setting() {
+  case "${REVIEW_WRITABLE_ISOLATION:-0}" in 0 | 1) return 0 ;; esac
+  echo "ERROR: REVIEW_WRITABLE_ISOLATION must be exactly 0 or 1" >&2
+  return 1
+}
 kvm_device_ready() {
   local device="${REVIEW_TEST_KVM_DEVICE:-/dev/kvm}"
   [[ -r "$device" && -w "$device" ]]
@@ -83,7 +88,9 @@ require_apptainer_fallback() {
 prepare_apptainer_environment() {
   local name host_file
   unset APPTAINERENV_RTK_DISABLED SINGULARITYENV_RTK_DISABLED
-  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY TYPESAFE_API_KEY CONTEXT7_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION REVIEW_DEFAULT_SCOPE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY RTK_DISABLED TERM COLORTERM; do
+  unset APPTAINERENV_REVIEW_WRITABLE_ISOLATION SINGULARITYENV_REVIEW_WRITABLE_ISOLATION
+  unset APPTAINERENV_REVIEW_RUNTIME_PROFILE SINGULARITYENV_REVIEW_RUNTIME_PROFILE
+  for name in GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY TYPESAFE_API_KEY CONTEXT7_API_KEY AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION REVIEW_DEFAULT_SCOPE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS REVIEW_WRITABLE_ISOLATION LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY RTK_DISABLED TERM COLORTERM; do
     [[ -v "$name" ]] && export "APPTAINERENV_${name}=${!name}"
   done
   APPTAINER_HOST_ARGS=()
@@ -367,6 +374,7 @@ review-appliance *appliance_args:
     #!/usr/bin/env bash
     set -euo pipefail
     {{shared_functions}}
+    validate_writable_isolation_setting || exit 1
     IS_OVERRIDE=0
     if [[ -n "${REVIEW_APPLIANCE_IMAGE:-}" ]]; then
       IMAGE="$REVIEW_APPLIANCE_IMAGE"
@@ -443,9 +451,11 @@ review-appliance *appliance_args:
         --env TYPESAFE_API_KEY
         --env AWS_BEARER_TOKEN_BEDROCK --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY --env AWS_SESSION_TOKEN --env AWS_REGION --env AWS_DEFAULT_REGION
         --env REVIEW_DEFAULT_SCOPE --env REVIEW_INHERIT_OMP_CONFIG --env REVIEW_SKIP_REPOS
+        --env REVIEW_RUNTIME_PROFILE=krun
         --env "TERM=${TERM:-xterm-256color}" --env "COLORTERM=${COLORTERM:-truecolor}"
       )
       [[ -v RTK_DISABLED ]] && ARGS+=(--env RTK_DISABLED)
+      [[ -v REVIEW_WRITABLE_ISOLATION ]] && ARGS+=(--env REVIEW_WRITABLE_ISOLATION)
       [[ -v LUNA_FACTORY_ENABLED ]] && ARGS+=(--env LUNA_FACTORY_ENABLED)
       [[ -v LUNA_FACTORY_CAPACITY ]] && ARGS+=(--env LUNA_FACTORY_CAPACITY)
       exec podman "${ARGS[@]}" "$IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}
@@ -461,6 +471,8 @@ review-appliance *appliance_args:
       bin/review factory-verifier-probe apptainer "$APPTAINER_IMAGE" >/dev/null
     fi
     prepare_apptainer_environment
+    unset REVIEW_RUNTIME_PROFILE
+    export APPTAINERENV_REVIEW_RUNTIME_PROFILE=apptainer
     export APPTAINERENV_LUNA_FACTORY_CLAIMS_ROOT=/claims
     exec apptainer run --containall --no-eval "${APPTAINER_HOST_ARGS[@]}" --home "${INSTANCE_HOME}:/home/review" --pwd /workspace \
       --bind "${INSTANCE_WORKSPACE}:/workspace,${INSTANCE_TMP}:/tmp,${CLAIMS_ROOT}:/claims:rw" "$APPTAINER_IMAGE" ${APPLIANCE_ARGS[@]+"${APPLIANCE_ARGS[@]}"}

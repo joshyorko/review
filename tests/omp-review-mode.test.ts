@@ -3026,6 +3026,75 @@ test("Review blocks PR mutation admission when the effective OMP task schema omi
 	assert.ok(savedResolution.steps.length >= 4, "the complete historical notice remains in the session journal");
 });
 
+test("opt-in writable isolation blocks Slay before OMP prompt dispatch or mutation claims", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const env = { ...ISOLATED_ENV, REVIEW_WRITABLE_ISOLATION: "1", REVIEW_RUNTIME_PROFILE: "krun" };
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: githubQueueFetch([queueItem({ ciStatus: "success" })]),
+		env,
+	});
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await pi.commands.get("review").handler("slay", ctx);
+
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(batch?.state, "blocked");
+	assert.match(batch?.error ?? "", /credentialless executor.*not integrated and qualified/i);
+	assert.equal(batch?.waveIdentity, undefined, "no task wave is admitted");
+	assert.equal(pi.messages.length, 0, "no coordinator prompt or native task dispatch is sent");
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0, "no mutation claims are created");
+	assert.match(savedReviewNoticeText(pi), /credentialless executor/i);
+	assert.match(savedReviewNoticeText(pi), /"runtime": "krun"/);
+	assert.match(savedReviewNoticeText(pi), /"taskExecutionTools": "blocked"/);
+});
+
+test("opt-in writable isolation blocks dashboard Fix before OMP prompt dispatch or mutation claims", async () => {
+	const issue = { number: 103, title: "synthetic fix target", repo: "projectbluefin/unmanaged" };
+	const fetchImpl = async (url: string | URL | Request) => {
+		if (!String(url).includes("/graphql")) return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		return {
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({ data: { search: {
+				pageInfo: { hasNextPage: false, endCursor: null },
+				nodes: [{ number: issue.number, title: issue.title,
+					url: `https://github.com/${issue.repo}/issues/${issue.number}`,
+					updatedAt: new Date(NOW - 1000).toISOString(), author: { login: "someone" },
+					repository: { nameWithOwner: issue.repo }, labels: { nodes: [] } }],
+			} } }),
+		};
+	};
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const env = {
+		...ISOLATED_ENV,
+		REVIEW_WRITABLE_ISOLATION: "1",
+		REVIEW_RUNTIME_PROFILE: "apptainer",
+		GH_TOKEN: "synthetic-github-canary",
+		COPILOT_GITHUB_TOKEN: "synthetic-copilot-canary",
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fetchImpl as unknown as typeof fetch, env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	(ctx.overlays[0] as unknown as ReviewDashboard).handleInput("f");
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(batch?.kind, "fix");
+	assert.equal(batch?.state, "blocked");
+	assert.match(batch?.error ?? "", /credentialless executor.*not integrated and qualified/i);
+	assert.equal(batch?.waveIdentity, undefined, "no task wave is admitted");
+	assert.equal(pi.messages.length, 0, "no coordinator prompt or native task dispatch is sent");
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0, "no mutation claims are created");
+	assert.doesNotMatch(savedReviewNoticeText(pi), /synthetic-(?:github|copilot)-canary/, "the capability notice omits synthetic credential values");
+});
+
 test("structured reviewer capability reads OMP ArkType batch schemas through its wire conversion", () => {
 	let conversionOptions;
 	const nativeParameters = Object.assign(() => undefined, {
