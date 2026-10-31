@@ -147,7 +147,7 @@ test("sandbox arguments clear the environment, isolate namespaces and use a boun
 
 test("appliance packages and stages the resource-limit launcher required by writable checks", () => {
 	const containerfile = readFileSync(new URL("../image/appliance/Containerfile", import.meta.url), "utf8");
-	assert.match(containerfile, /bubblewrap\s+util-linux-core/);
+	assert.match(containerfile, /bubblewrap\s+util-linux\s/);
 	assert.ok(containerfile.includes("/usr/bin/prlimit \\"));
 });
 

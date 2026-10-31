@@ -68,7 +68,7 @@ FROM ${RUNTIME_BUILDER_IMAGE} AS build
 
 RUN microdnf --assumeyes --setopt=install_weak_deps=0 --nodocs install \
       bash coreutils git-core curl diffutils findutils gawk grep gzip less glibc-common \
-      sed tar xz python3 python3-libs bubblewrap util-linux-core ShellCheck yq jq just \
+      sed tar xz python3 python3-libs bubblewrap util-linux ShellCheck yq jq just \
       openssl ca-certificates tzdata ncurses-term patch gcc-c++ make && \
     microdnf clean all
 
