@@ -4,11 +4,13 @@ import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openS
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
+	assertCandidatePathLimits,
 	checkPlanDigest,
 	createCandidateCheckProof,
 	snapshotCandidate,
 	validateRepositoryPath,
 	verifyCandidateCheckProof,
+	WRITABLE_EXECUTION_LIMITS,
 	type CandidateCheckProof,
 	type CandidateSnapshot,
 	type WritableCheckResult,
@@ -180,6 +182,8 @@ async function fetchBaseFiles(
 		return { ok: false, outcome: "blocked", message: error instanceof Error ? error.message : "repository source tree is unsafe" };
 	}
 	if (entries.length > (options.maxTreeFiles ?? MAX_TREE_FILES) || total > (options.maxTreeBytes ?? MAX_TREE_BYTES)) return { ok: false, outcome: "blocked", message: "repository source tree exceeds the credentialless workspace limit" };
+	try { assertCandidatePathLimits(entries.map((entry) => entry.path)); }
+	catch (error) { return { ok: false, outcome: "blocked", message: error instanceof Error ? error.message : "repository source paths exceed the credentialless workspace limit" }; }
 	const files = new Map<string, WritableBaseFile>();
 	for (let offset = 0; offset < entries.length; offset += 6) {
 		const batch = entries.slice(offset, offset + 6);
@@ -221,6 +225,9 @@ function ensurePrivateParents(root: string, relativePath: string): string {
 }
 
 export function materializeWritableWorkspace(source: WritableIssueSource, privateStateRoot: string): { readonly root: string; readonly candidatePaths: readonly string[]; readonly workspaceId: string } {
+	const sourcePaths = [...source.files.values()].map((file) => validateRepositoryPath(file.path));
+	if (new Set(sourcePaths).size !== sourcePaths.length) throw new Error("repository source contains duplicate candidate paths");
+	assertCandidatePathLimits(sourcePaths);
 	const stateRoot = privateDirectory(privateStateRoot);
 	const workspaceId = randomUUID();
 	const root = join(stateRoot, `workspace-${workspaceId}`);
@@ -303,13 +310,17 @@ export function inspectWritableWorkspace(privateStateRoot: string, workspaceId: 
 	if (workspaceRoot !== workspacePath) throw new Error("workspace candidate root is not canonical");
 	const candidatePaths = new Set(evidence.files.map((file) => file.path));
 	let fileCount = 0;
+	let directoryCount = 0;
 	const scan = (directory: string, prefix = "") => {
 		for (const entry of readdirSync(directory, { withFileTypes: true })) {
 			const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+			validateRepositoryPath(relative);
 			const absolute = join(directory, entry.name);
 			const stat = lstatSync(absolute);
 			if (stat.isSymbolicLink()) throw new Error("workspace candidate contains a symlink or hardlink");
 			if (stat.isDirectory()) {
+				directoryCount++;
+				if (directoryCount > WRITABLE_EXECUTION_LIMITS.workspaceDirectories) throw new Error("workspace candidate directory count exceeds its bound");
 				if ((stat.mode & 0o077) !== 0) throw new Error("workspace candidate contains a non-private directory");
 				scan(absolute, relative);
 			} else if (stat.isFile()) {
@@ -418,8 +429,9 @@ function parsePullRows(value: unknown): Array<Record<string, unknown>> | undefin
 
 export async function publishDraftCandidate(input: DraftCandidateInput): Promise<DraftCandidateResult> {
 	const { source, options } = input;
+	const snapshot = snapshotCandidate(input.workspaceRoot, input.candidatePaths);
 	let checkPlan;
-	try { checkPlan = deriveWritableCheckPlan(source); }
+	try { checkPlan = deriveWritableCheckPlan(source, snapshot.files.map((file) => file.path)); }
 	catch (error) { return { status: "blocked", reason: error instanceof Error ? error.message : "mandatory check plan could not be derived" }; }
 	if (input.planDigest !== checkPlan.digest || JSON.stringify(input.commands) !== JSON.stringify(checkPlan.commands)) return { status: "blocked", reason: "candidate does not carry the controller-derived mandatory check plan" };
 	if (!verifyCandidateCheckProof({
@@ -427,7 +439,6 @@ export async function publishDraftCandidate(input: DraftCandidateInput): Promise
 		baseRef: source.defaultBranch, baseSha: source.baseSha, commands: input.commands, planDigest: checkPlan.digest, runtimeProfile: input.runtimeProfile,
 	})) return { status: "blocked", reason: "candidate check proof does not match the selected issue, source head, candidate, check plan, or runtime" };
 	if (input.summary.trim().length === 0 || Buffer.byteLength(input.summary) > 8_192) return { status: "blocked", reason: "candidate summary is empty or exceeds its bound" };
-	const snapshot = snapshotCandidate(input.workspaceRoot, input.candidatePaths);
 	if (snapshot.digest !== input.candidate.digest) return { status: "blocked", reason: "candidate changed after its last successful check" };
 	const checkPlanBlocker = writableCheckPlanBlocker({ source, workspaceRoot: input.workspaceRoot, candidatePaths: input.candidatePaths, plan: checkPlan });
 	if (checkPlanBlocker) return { status: "blocked", reason: checkPlanBlocker };
@@ -549,7 +560,7 @@ export function proofStillMatches(input: {
 }): boolean {
 	try {
 		const candidate = snapshotCandidate(input.workspaceRoot, input.candidatePaths);
-		const plan = deriveWritableCheckPlan(input.source);
+		const plan = deriveWritableCheckPlan(input.source, candidate.files.map((file) => file.path));
 		if (JSON.stringify(input.commands) !== JSON.stringify(plan.commands)) return false;
 		return verifyCandidateCheckProof({ proof: input.proof, candidate, repository: input.source.repository, issueNumber: input.source.issueNumber,
 			baseRef: input.source.defaultBranch, baseSha: input.source.baseSha, commands: input.commands, planDigest: plan.digest, runtimeProfile: input.runtimeProfile });
@@ -570,7 +581,7 @@ export function createWritableProof(input: {
 		baseSha: input.source.baseSha,
 		runtimeProfile: input.runtimeProfile,
 		commands: input.commands,
-		planDigest: deriveWritableCheckPlan(input.source).digest,
+		planDigest: deriveWritableCheckPlan(input.source, input.candidate.files.map((file) => file.path)).digest,
 		results: input.results,
 		candidate: input.candidate,
 	});

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { type ChildProcess } from "node:child_process";
-import { linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -113,7 +113,7 @@ function response(data: unknown, status = 200): Response {
 
 test("repository paths reject traversal, absolute paths, controller state, and Windows separators", () => {
 	assert.equal(validateRepositoryPath("src/file.ts"), "src/file.ts");
-	for (const path of ["../secret", "src/../secret", "/etc/passwd", "C:/secret", ".git/config", ".omp/state", "src\\file.ts", "src//file.ts"]) {
+	for (const path of ["../secret", "src/../secret", "/etc/passwd", "C:/secret", ".git/config", ".omp/state", "src\\file.ts", "src//file.ts", "界".repeat(1366)]) {
 		assert.throws(() => validateRepositoryPath(path), path);
 	}
 });
@@ -173,6 +173,25 @@ test("mandatory check plan is controller-derived, rejects no-op tests, and block
 		writeFileSync(join(workspace.root, "package.json"), src.files.get("package.json")!.content);
 		unlinkSync(join(workspace.root, "tests/smoke.test.mjs"));
 		assert.match(writableCheckPlanBlocker({ source: src, workspaceRoot: workspace.root, candidatePaths: workspace.candidatePaths, plan }) ?? "", /test input was deleted/);
+		writeFileSync(join(workspace.root, "tests/smoke.test.mjs"), "// hollowed-out passing test\n");
+		assert.match(writableCheckPlanBlocker({ source: src, workspaceRoot: workspace.root, candidatePaths: workspace.candidatePaths, plan }) ?? "", /captured test input changed/);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Node fallback runs added tests while protecting captured test contents", () => {
+	const root = tempRoot();
+	try {
+		const original = source();
+		const nodeSource: WritableIssueSource = { ...original, files: new Map([...original.files].filter(([path]) => path !== "package.json")) };
+		const workspace = materializeWritableWorkspace(nodeSource, join(root, "state"));
+		const addedPath = "tests/new.spec.ts";
+		writeFileSync(join(workspace.root, addedPath), "import test from 'node:test'; test('added', () => {});\n");
+		const candidatePaths = [...workspace.candidatePaths, addedPath];
+		const plan = deriveWritableCheckPlan(nodeSource, candidatePaths);
+		assert.deepEqual(plan.commands, ["node --test 'tests/new.spec.ts' 'tests/smoke.test.mjs'"]);
+		assert.equal(writableCheckPlanBlocker({ source: nodeSource, workspaceRoot: workspace.root, candidatePaths, plan }), undefined);
+		writeFileSync(join(workspace.root, "tests/smoke.test.mjs"), "// hollowed-out baseline test\n");
+		assert.match(writableCheckPlanBlocker({ source: nodeSource, workspaceRoot: workspace.root, candidatePaths, plan }) ?? "", /captured test input changed/);
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -222,6 +241,44 @@ test("worker path quota bounds many writes and is not replenished by deletions",
 		assert.equal(worker.status, "blocked", "the fixture intentionally ends without a report or checks");
 		assert.equal(worker.candidatePaths.length, WRITABLE_EXECUTION_LIMITS.workspaceFiles);
 		assert.equal(worker.candidatePaths.includes("paths/extra.txt"), false);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("worker path depth is rejected before creating parent directories", async () => {
+	const root = tempRoot();
+	try {
+		const { workspace, worker } = await runWorkerToolActions(root, source(), async (tools, workspaceRoot) => {
+			const deepPath = `${Array.from({ length: 65 }, (_value, index) => `d${index}`).join("/")}/file.txt`;
+			await assert.rejects(tools.get("review_writable_write")!.execute("deep", { path: deepPath, content: "x" }), /path depth/);
+			assert.equal(existsSync(join(workspaceRoot, "d0")), false, "a rejected deep path created no parent directories");
+		});
+		assert.equal(worker.status, "blocked", "the fixture intentionally ends without a report or checks");
+		assert.equal(existsSync(join(workspace.root, "d0")), false);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("worker aggregate directory quota rejects before creating the next path", async () => {
+	const root = tempRoot();
+	let rejectedTopLevel = "";
+	try {
+		const { workspace, worker } = await runWorkerToolActions(root, source(), async (tools, workspaceRoot) => {
+			const write = tools.get("review_writable_write")!;
+			let rejectedPath = "";
+			for (let index = 0; index < 300; index++) {
+				const path = `${Array.from({ length: 63 }, (_value, depth) => `d${depth}-${index}`).join("/")}/file.txt`;
+				try { await write.execute(`deep-${index}`, { path, content: "x" }); }
+				catch (error) {
+					rejectedPath = path;
+					rejectedTopLevel = path.split("/")[0]!;
+					assert.match(error instanceof Error ? error.message : String(error), /candidate directory count exceeds/);
+					break;
+				}
+			}
+			assert.ok(rejectedPath, "the aggregate directory bound stopped a many-directory write sequence");
+			assert.equal(existsSync(join(workspaceRoot, rejectedPath.split("/")[0])), false, "a rejected path created no parent directories");
+		});
+		assert.equal(worker.status, "blocked", "the fixture intentionally ends without a report or checks");
+		assert.equal(existsSync(join(workspace.root, rejectedTopLevel)), false);
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 

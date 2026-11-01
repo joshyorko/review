@@ -59,6 +59,9 @@ export const WRITABLE_EXECUTION_LIMITS = Object.freeze({
 	outputBytes: 256 * 1024,
 	workspaceBytes: 64 * 1024 * 1024,
 	workspaceFiles: 8_000,
+	workspaceDirectories: 16_000,
+	pathComponents: 64,
+	pathComponentBytes: 255,
 	workTmpfsBytes: 256 * 1024 * 1024,
 	tmpTmpfsBytes: 64 * 1024 * 1024,
 	homeTmpfsBytes: 32 * 1024 * 1024,
@@ -70,12 +73,37 @@ export const WRITABLE_EXECUTION_LIMITS = Object.freeze({
 });
 
 export function validateRepositoryPath(input: string): string {
-	if (typeof input !== "string" || !input || input.length > 4096 || input.includes("\0") || input.includes("\\")) throw new Error("repository path is invalid");
+	if (typeof input !== "string" || !input || input.length > 4096 || Buffer.byteLength(input, "utf8") > 4096 || input.includes("\0") || input.includes("\\")) throw new Error("repository path is invalid");
 	if (input.startsWith("/") || /^[A-Za-z]:/.test(input)) throw new Error("repository path must be relative");
 	const parts = input.split("/");
 	if (parts.some((part) => !part || part === "." || part === "..")) throw new Error("repository path traversal is forbidden");
+	if (parts.length > WRITABLE_EXECUTION_LIMITS.pathComponents) throw new Error("repository path depth exceeds the supported limit");
+	if (parts.some((part) => Buffer.byteLength(part, "utf8") > WRITABLE_EXECUTION_LIMITS.pathComponentBytes)) throw new Error("repository path component exceeds the supported limit");
 	if (parts[0] === ".git" || parts[0] === ".omp" || parts[0] === ".pi" || parts[0] === ".claude") throw new Error("controller-owned repository paths are unavailable");
 	return parts.join("/");
+}
+
+/** Relative directory entries required by a set of candidate file paths. */
+export function repositoryDirectoryPaths(paths: readonly string[]): string[] {
+	const directories = new Set<string>();
+	for (const raw of paths) {
+		const path = validateRepositoryPath(raw);
+		let directory = "";
+		for (const component of path.split("/").slice(0, -1)) {
+			directory = directory ? `${directory}/${component}` : component;
+			directories.add(directory);
+		}
+	}
+	return [...directories];
+}
+
+/** Validate aggregate path and directory bounds before any workspace mutation. */
+export function assertCandidatePathLimits(paths: readonly string[]): string[] {
+	const normalized = [...new Set(paths.map(validateRepositoryPath))];
+	if (normalized.length > WRITABLE_EXECUTION_LIMITS.workspaceFiles) throw new Error("candidate file count exceeds the supported limit");
+	const directories = repositoryDirectoryPaths(normalized);
+	if (directories.length > WRITABLE_EXECUTION_LIMITS.workspaceDirectories) throw new Error("candidate directory count exceeds the supported limit");
+	return directories;
 }
 
 function sha256(bytes: Uint8Array | string): string {
@@ -88,7 +116,7 @@ export function snapshotCandidate(root: string, paths: readonly string[]): Candi
 	const rootStat = lstatSync(canonicalRoot);
 	if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("candidate root is not a canonical directory");
 	const normalized = [...new Set(paths.map(validateRepositoryPath))].sort();
-	if (normalized.length > WRITABLE_EXECUTION_LIMITS.workspaceFiles) throw new Error("candidate file count exceeds the supported limit");
+	assertCandidatePathLimits(normalized);
 	const files: CandidateFile[] = [];
 	let totalBytes = 0;
 	const digest = createHash("sha256");

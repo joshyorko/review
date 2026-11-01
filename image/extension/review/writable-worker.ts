@@ -5,7 +5,9 @@ import { closeSync, constants, lstatSync, mkdirSync, openSync, readdirSync, read
 import { join, resolve, sep } from "node:path";
 import {
 	createCandidateCheckProof,
+	assertCandidatePathLimits,
 	runCandidateChecks,
+	repositoryDirectoryPaths,
 	snapshotCandidate,
 	validateRepositoryPath,
 	type CandidateCheckProof,
@@ -86,12 +88,12 @@ const MAX_FILE_BYTES = 128 * 1024;
 const MAX_MODEL_PAGE_BYTES = 4 * 1024;
 const MAX_TOOL_OUTPUT_BYTES = 32 * 1024;
 
-type CandidateWorkspaceQuota = { readonly fileSizes: Map<string, number>; totalBytes: number; healthy: boolean };
+type CandidateWorkspaceQuota = { readonly fileSizes: Map<string, number>; readonly directoryPaths: Set<string>; totalBytes: number; healthy: boolean };
 
 function candidateWorkspaceQuota(root: string, candidatePaths: ReadonlySet<string>): CandidateWorkspaceQuota {
-	if (candidatePaths.size > WRITABLE_EXECUTION_LIMITS.workspaceFiles) throw new Error("candidate file count exceeds the supported limit");
+	const directoryPaths = new Set(assertCandidatePathLimits([...candidatePaths]));
 	const snapshot = snapshotCandidate(root, [...candidatePaths]);
-	return { fileSizes: new Map(snapshot.files.map((file) => [file.path, file.bytes])), totalBytes: snapshot.totalBytes, healthy: true };
+	return { fileSizes: new Map(snapshot.files.map((file) => [file.path, file.bytes])), directoryPaths, totalBytes: snapshot.totalBytes, healthy: true };
 }
 
 function assertQuotaHealthy(quota: CandidateWorkspaceQuota): void {
@@ -159,9 +161,14 @@ function safeWrite(root: string, input: string, content: string, candidatePaths:
 	if (contentBytes > MAX_FILE_BYTES) throw new Error("file exceeds 128 KiB");
 	const knownPath = candidatePaths.has(path);
 	if (!knownPath && candidatePaths.size >= WRITABLE_EXECUTION_LIMITS.workspaceFiles) throw new Error("candidate file count exceeds the supported limit");
+	const newDirectories = repositoryDirectoryPaths([path]).filter((directory) => !quota.directoryPaths.has(directory));
+	if (quota.directoryPaths.size + newDirectories.length > WRITABLE_EXECUTION_LIMITS.workspaceDirectories) throw new Error("candidate directory count exceeds the supported limit");
 	const priorBytes = quota.fileSizes.get(path) ?? 0;
 	if (!knownPath && quota.fileSizes.has(path)) throw new Error("candidate write quota accounting is inconsistent");
 	if (quota.totalBytes - priorBytes + contentBytes > WRITABLE_EXECUTION_LIMITS.workspaceBytes) throw new Error("candidate byte size exceeds the supported limit");
+	// Reserve directory quota before mkdir so a partially failed write cannot
+	// create unaccounted workspace entries or make the limit reusable.
+	for (const directory of newDirectories) quota.directoryPaths.add(directory);
 	const destination = assertPrivateParents(root, path);
 	let mode = 0o600;
 	try {
@@ -250,12 +257,11 @@ function nativeTools(input: {
 	readonly candidatePaths: Set<string>;
 	readonly quota: CandidateWorkspaceQuota;
 	readonly source: WritableIssueSource;
-	readonly checkPlan: WritableCheckPlan;
 	readonly signal: AbortSignal;
 	readonly checkRunner?: typeof runCandidateChecks;
 	readonly onChecksCompleted?: (commands: readonly string[], checks: readonly WritableCheckResult[]) => void;
 }): { readonly tools: CustomTool[]; readonly getResult: () => { summary?: string; commands?: string[]; checks?: readonly WritableCheckResult[] } } {
-	const { schema, root, candidatePaths, quota, source, checkPlan, signal } = input;
+	const { schema, root, candidatePaths, quota, source, signal } = input;
 	let summary: string | undefined;
 	let commands: string[] | undefined;
 	let checks: readonly WritableCheckResult[] | undefined;
@@ -331,10 +337,13 @@ function nativeTools(input: {
 			async execute(_id, rawArgs) {
 				if (!objectArgs(rawArgs) || Object.keys(rawArgs).length !== 0) throw new Error("the controller-derived check plan takes no worker arguments");
 				assertQuotaHealthy(quota);
-				const blocker = writableCheckPlanBlocker({ source, workspaceRoot: root, candidatePaths: [...candidatePaths], plan: checkPlan });
+				const paths = [...candidatePaths].sort();
+				const candidate = snapshotCandidate(root, paths);
+				const checkPlan = deriveWritableCheckPlan(source, candidate.files.map((file) => file.path));
+				const blocker = writableCheckPlanBlocker({ source, workspaceRoot: root, candidatePaths: paths, plan: checkPlan });
 				if (blocker) throw new Error(blocker);
 				commands = [...checkPlan.commands];
-				checks = await (input.checkRunner ?? runCandidateChecks)({ workspace: root, paths: [...candidatePaths].sort(), commands, signal });
+				checks = await (input.checkRunner ?? runCandidateChecks)({ workspace: root, paths, commands, signal });
 				input.onChecksCompleted?.(commands, checks);
 				return result(JSON.stringify({ checks }), { checks });
 			},
@@ -384,7 +393,7 @@ export async function runWritableIssueWorker(input: {
 	} catch (error) {
 		return { status: "blocked", reason: error instanceof Error ? error.message : "candidate limits or mandatory checks could not be established", source, workspaceRoot, candidatePaths: [...candidatePaths] };
 	}
-	const worker = nativeTools({ schema: input.schema, root: workspaceRoot, candidatePaths, quota, source, checkPlan, signal, checkRunner: input.checkRunner, onChecksCompleted: input.onChecksCompleted });
+	const worker = nativeTools({ schema: input.schema, root: workspaceRoot, candidatePaths, quota, source, signal, checkRunner: input.checkRunner, onChecksCompleted: input.onChecksCompleted });
 	mkdirSync(input.sessionRoot, { recursive: true, mode: 0o700 });
 	const sessionRoot = realpathSync(input.sessionRoot);
 	if ((lstatSync(sessionRoot).mode & 0o077) !== 0) return { status: "blocked", reason: "native worker session storage is not private", source, workspaceRoot, candidatePaths: [...candidatePaths] };
@@ -452,9 +461,11 @@ export async function runWritableIssueWorker(input: {
 	let candidate: CandidateSnapshot;
 	let proof: CandidateCheckProof;
 	try {
+		candidate = snapshotCandidate(workspaceRoot, [...candidatePaths].sort());
+		checkPlan = deriveWritableCheckPlan(source, candidate.files.map((file) => file.path));
 		const blocker = writableCheckPlanBlocker({ source, workspaceRoot, candidatePaths: [...candidatePaths], plan: checkPlan });
 		if (blocker) throw new Error(blocker);
-		candidate = snapshotCandidate(workspaceRoot, [...candidatePaths].sort());
+		if (JSON.stringify(checkPlan.commands) !== JSON.stringify(workerResult.commands)) throw new Error("mandatory check plan changed after its last successful run");
 		proof = createCandidateCheckProof({
 			repository: source.repository, issueNumber: source.issueNumber, baseRef: source.defaultBranch, baseSha: source.baseSha,
 			runtimeProfile: input.runtimeProfile, commands: workerResult.commands, planDigest: checkPlan.digest, results: workerResult.checks, candidate,

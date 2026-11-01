@@ -1,7 +1,7 @@
 ---
 name: review-checks
 version: "2.2"
-last_updated: 2026-09-23
+last_updated: 2026-11-01
 id: review-checks
 one_line_purpose: Maintain neutral Review agents and generic policy.
 entry_point: docs/skills/review-checks.md
@@ -35,7 +35,7 @@ OMP discovers the companion agent definitions in `image/extension/review/agents/
 5. Review tools and prompts consume live GitHub evidence.
 6. Delete a specialist when its responsibility is fully duplicated by OMP or another agent; do not keep wrappers for compatibility.
 
-`REVIEW_WRITABLE_ISOLATION=1` opts into the credentialless issue executor. It runs only when the root-owned image qualification artifact matches the selected runtime profile and packaged Bubblewrap/`prlimit` binaries; the current image has no such artifact, so writable Slay/Fix remains blocked before task dispatch. The executor gives the issue worker only bounded Review tools, derives mandatory checks from the captured base tree, and exposes no command-list argument for the worker. Check definitions must still match the captured base before checks and publication. Workspace writes enforce the aggregate byte and distinct-path limits before creating or truncating candidate files. Check output and an opaque private-workspace locator are retained with bounded durable evidence for post-restart inspection; interruption never resumes or replays a writable attempt. OS qualification does not qualify dependency readiness. Authenticated GitHub publication stays in the trusted controller. Draft creation is not PR-ready acceptance. Do not describe OMP's native isolated worktree as the security boundary or claim runtime qualification from unit tests or a blocked cloud smoke.
+`REVIEW_WRITABLE_ISOLATION=1` opts into the credentialless issue executor. It runs only when the root-owned image qualification artifact matches the selected runtime profile and packaged Bubblewrap/`prlimit` binaries; the current image has no such artifact, so writable Slay/Fix remains blocked before task dispatch. The executor gives the issue worker only bounded Review tools, derives mandatory checks from the captured base tree, and exposes no command-list argument for the worker. Check definitions and existing test inputs must retain their captured bytes and modes before checks and publication; supported Node test plans include newly added test files. Workspace writes enforce aggregate byte, file, directory, depth, and component limits before creating or truncating candidate files. Check output and an opaque private-workspace locator are retained with bounded durable evidence for post-restart inspection; interruption never resumes or replays a writable attempt. OS qualification does not qualify dependency readiness. Authenticated GitHub publication stays in the trusted controller. Draft creation is not PR-ready acceptance. Do not describe OMP's native isolated worktree as the security boundary or claim runtime qualification from unit tests or a blocked cloud smoke.
 
 ## Verification
 

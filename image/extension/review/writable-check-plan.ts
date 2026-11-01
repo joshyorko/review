@@ -8,6 +8,7 @@ export type WritableCheckPlan = {
 	readonly commands: readonly string[];
 	readonly definitionFiles: readonly string[];
 	readonly requiredFiles: readonly string[];
+	readonly requiredFileFingerprints: readonly { readonly path: string; readonly mode: "100644" | "100755"; readonly bytes: number; readonly sha256: string }[];
 	readonly digest: string;
 };
 
@@ -39,7 +40,7 @@ function packageTest(source: WritableIssueSource): { command: string; definition
 	return { command: "npm test", definitionFiles: ["package.json"] };
 }
 
-export function deriveWritableCheckPlan(source: WritableIssueSource): WritableCheckPlan {
+export function deriveWritableCheckPlan(source: WritableIssueSource, candidateFiles: readonly string[] = [...source.files.keys()]): WritableCheckPlan {
 	let commands: string[];
 	let definitionFiles: string[];
 	let requiredFiles: string[];
@@ -64,7 +65,10 @@ export function deriveWritableCheckPlan(source: WritableIssueSource): WritableCh
 			} else {
 				const nodeTests = sourceTestFiles(source);
 				if (nodeTests.length === 0) throw new Error("mandatory check plan blocked: no controller-derived repository test plan is available");
-				commands = [`node --test ${nodeTests.map(shellQuote).join(" ")}`];
+				const candidateTests = candidateFiles
+					.map(validateRepositoryPath)
+					.filter((path) => testFile.test(path) && !source.files.has(path));
+				commands = [`node --test ${[...new Set([...nodeTests, ...candidateTests])].sort().map(shellQuote).join(" ")}`];
 				definitionFiles = [];
 				requiredFiles = nodeTests;
 			}
@@ -76,8 +80,13 @@ export function deriveWritableCheckPlan(source: WritableIssueSource): WritableCh
 		if (!file) throw new Error(`mandatory check plan blocked: base definition ${path} is unavailable`);
 		return { path, mode: file.mode, bytes: file.bytes, sha256: sha256(file.content) };
 	});
-	const digest = sha256(JSON.stringify({ commands, definitions, requiredFiles: [...requiredFiles].sort() }));
-	return { commands, definitionFiles: [...new Set(definitionFiles)].sort(), requiredFiles: [...new Set(requiredFiles)].sort(), digest };
+	const requiredFileFingerprints = [...new Set(requiredFiles)].sort().map((path) => {
+		const file = source.files.get(validateRepositoryPath(path));
+		if (!file) throw new Error(`mandatory check plan blocked: captured test input ${path} is unavailable`);
+		return { path, mode: file.mode, bytes: file.bytes, sha256: sha256(file.content) };
+	});
+	const digest = sha256(JSON.stringify({ commands, definitions, requiredFileFingerprints }));
+	return { commands, definitionFiles: [...new Set(definitionFiles)].sort(), requiredFiles: [...new Set(requiredFiles)].sort(), requiredFileFingerprints, digest };
 }
 
 /** Return a blocker when the candidate changed a check definition or removed a required test input. */
@@ -88,9 +97,9 @@ export function writableCheckPlanBlocker(input: {
 	readonly plan: WritableCheckPlan;
 }): string | undefined {
 	try {
-		const paths = [...new Set([...input.plan.definitionFiles, ...input.plan.requiredFiles])];
+		const paths = [...new Set([...input.candidatePaths, ...input.plan.definitionFiles, ...input.plan.requiredFiles])];
 		const tracked = new Set(input.candidatePaths);
-		for (const path of paths) if (!tracked.has(path)) return `mandatory check plan blocked: captured check input is missing from the candidate index (${path})`;
+		for (const path of [...input.plan.definitionFiles, ...input.plan.requiredFiles]) if (!tracked.has(path)) return `mandatory check plan blocked: captured check input is missing from the candidate index (${path})`;
 		const snapshot = snapshotCandidate(input.workspaceRoot, paths);
 		const files = new Map(snapshot.files.map((file) => [file.path, file]));
 		for (const path of input.plan.definitionFiles) {
@@ -103,11 +112,20 @@ export function writableCheckPlanBlocker(input: {
 		for (const path of input.plan.requiredFiles) {
 			if (!files.has(path)) return `mandatory check plan blocked: captured test input was deleted (${path})`;
 		}
-		const derived = deriveWritableCheckPlan(input.source);
+		for (const inputFile of input.plan.requiredFileFingerprints) {
+			const base = input.source.files.get(inputFile.path);
+			const candidate = files.get(inputFile.path);
+			if (!base || !candidate || candidate.sha256 !== inputFile.sha256 || candidate.sha256 !== sha256(base.content)
+				|| candidate.bytes !== inputFile.bytes || candidate.bytes !== base.bytes || candidate.mode !== inputFile.mode || candidate.mode !== base.mode) {
+				return `mandatory check plan blocked: captured test input changed (${inputFile.path})`;
+			}
+		}
+		const derived = deriveWritableCheckPlan(input.source, snapshot.files.map((file) => file.path));
 		if (input.plan.commands.length === 0 || input.plan.digest !== derived.digest
 			|| JSON.stringify(input.plan.commands) !== JSON.stringify(derived.commands)
 			|| JSON.stringify(input.plan.definitionFiles) !== JSON.stringify(derived.definitionFiles)
-			|| JSON.stringify(input.plan.requiredFiles) !== JSON.stringify(derived.requiredFiles)) return "mandatory check plan blocked: controller check plan identity changed";
+			|| JSON.stringify(input.plan.requiredFiles) !== JSON.stringify(derived.requiredFiles)
+			|| JSON.stringify(input.plan.requiredFileFingerprints) !== JSON.stringify(derived.requiredFileFingerprints)) return "mandatory check plan blocked: controller check plan identity changed";
 		return undefined;
 	} catch (error) {
 		return error instanceof Error ? error.message : "mandatory check plan could not be verified";
