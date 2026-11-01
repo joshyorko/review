@@ -6,6 +6,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { type DashboardAction, ReviewDashboard } from "./dashboard.ts";
 import { createNativeToastWidget, createReviewNoticeComponent, wrapNoticeText } from "./notice.ts";
 import { safePreview } from "./safe-output.ts";
@@ -30,6 +31,9 @@ import { observeHumanReviewPolicy } from "./human-review-policy.ts";
 import { operatorLandingDecision } from "./operator-landing.ts";
 import { mcpExpectedHeadQualified } from "./merge-transport.ts";
 import { createReviewerOutputSchema, createReviewerReceiptState, admitReviewerTask, captureReviewerResult, captureReviewerTaskProgress, captureReviewerDelivery, getCleanReviewerReceipt, getDeliveredReviewerReceipt, reviewerDefinitionTrusted, type ReviewerReceiptState, type ReviewSubject } from "./reviewer-receipts.ts";
+import { shouldDispatchWritableIssueWave, writableExecutionReplayBlocker, writableIsolationReport } from "./writable-isolation.ts";
+import { runWritableIssueWorkflow, type WritableIssueWorkflowResult } from "./writable-worker.ts";
+import type { CandidateCheckProof, WritableRuntimeProfile } from "./writable-executor.ts";
 import {
 	commentInvocation,
 	createCommentActionPlan,
@@ -147,9 +151,31 @@ export interface PersistedRepositoryBatch {
 	readonly issueWorkerReceipts?: Readonly<Record<string, PersistedIssueWorkerReceipt>>;
 	/** Hosted-check state is keyed by issue, never inferred from the queue's selected row. */
 	readonly issuePrReadiness?: Readonly<Record<string, PersistedIssuePrReadiness>>;
+	/** Controller-owned credentialless execution evidence; separate from workflowz task receipts. */
+	readonly writableExecution?: PersistedWritableExecution;
 	/** Operator requested cancellation; the current wave must drain before archive. */
 	readonly cancelRequested?: boolean;
 	readonly error?: string;
+}
+
+export interface PersistedWritableExecution {
+	readonly version: 1;
+	readonly status: "running" | "submitted" | "blocked" | "unknown";
+	readonly issueKey: string;
+	readonly runtimeProfile: WritableRuntimeProfile;
+	readonly startedAt: number;
+	readonly finishedAt?: number;
+	readonly baseRef?: string;
+	readonly baseSha?: string;
+	readonly candidateDigest?: string;
+	readonly checksDigest?: string;
+	/** Opaque UUID resolves to a private persisted workspace and base-tree sidecar. */
+	readonly workspaceId?: string;
+	readonly commands?: readonly string[];
+	readonly checks?: readonly { readonly command: string; readonly status: string; readonly exitCode?: number; readonly outputDigest: string; readonly stdout?: string; readonly stderr?: string }[];
+	readonly proof?: CandidateCheckProof;
+	readonly pullRequest?: { readonly number: number; readonly url: string; readonly branch: string; readonly headSha: string; readonly baseRef: string; readonly baseSha: string; readonly observed: boolean };
+	readonly reason?: string;
 }
 
 export interface PersistedIssueWorkerReceipt {
@@ -340,6 +366,8 @@ interface SessionSetupManager {
 interface CtxLike {
 	hasUI: boolean;
 	cwd?: string;
+	model?: { readonly provider?: string; readonly id?: string };
+	modelRegistry?: { readonly authStorage?: unknown; hasConfiguredAuth?(model: unknown): boolean };
 	ui: UiLike;
 	newSession?(options?: { parentSession?: string; setup?: (sessionManager: SessionSetupManager) => Promise<void> }): Promise<{ cancelled: boolean }>;
 	sessionManager?: { getBranch(): Array<{ type?: string; customType?: string; data?: unknown; message?: unknown }>; getSessionId?(): string; getLeafId?(): string | null; getSessionFile?(): string | undefined; saveArtifact?(content: string, toolType: string): Promise<string | undefined>; getArtifactPath?(id: string): Promise<string | null>; getArtifactsDir?(): string | null };
@@ -1057,6 +1085,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	let started: Promise<void> = Promise.resolve();
 	const recoveryBatches = new Map<string, PersistedRepositoryBatch>();
 	let activeBatch: PersistedRepositoryBatch | undefined;
+	let activeWritableAttempt: { readonly batchId: string; readonly sessionId: string; readonly controller: AbortController } | undefined;
 	let issuePrObserverInFlight = false;
 	let batchRequestGeneration = 0;
 	// Local teardown identity distinguishes late callbacks from a restored session
@@ -1129,6 +1158,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			expected.issueTaskAssignments,
 			expected.issueWorkerReceipts,
 			expected.issuePrReadiness,
+			expected.writableExecution,
 			expected.skippedItems,
 			expected.cancelRequested,
 		]) === JSON.stringify([
@@ -1162,6 +1192,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			current.issueTaskAssignments,
 			current.issueWorkerReceipts,
 			current.issuePrReadiness,
+			current.writableExecution,
 			current.skippedItems,
 			current.cancelRequested,
 		]);
@@ -1229,6 +1260,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		const batch = batchForOwner(owner);
 		const ctx = activeCtx;
 		if (!batch || !ctx || !batch.waves[batch.currentWave]) return "unknown";
+		if (writableExecutionReplayBlocker(batch.writableExecution)) return "unknown";
 		return reconcileBlockedRepositoryClaim(
 			resourceClaims(),
 			batch,
@@ -2755,10 +2787,193 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 		return undefined;
 	};
 
+	const dispatchWritableIssueWave = async (ctx: CtxLike, wave: PersistedRepositoryBatch["waves"][number]) => {
+		const batch = activeBatch;
+		if (!batch) return;
+		const item = wave.items.length === 1 ? wave.items[0] : undefined;
+		if (!item || item.type !== "issue") {
+			const error = "The credentialless Review executor currently admits exactly one issue per run; no task or shell fallback was started.";
+			persistBatch(ctx, { ...batch, state: "blocked", error });
+			notifyUser(ctx, error, "error");
+			return;
+		}
+		const isolation = writableIsolationReport(env);
+		if (isolation.mode !== "opt-in-ready" || (isolation.runtime !== "krun" && isolation.runtime !== "apptainer")) {
+			const error = isolation.blocker ?? "Credentialless runtime qualification changed before dispatch; no worker was started.";
+			persistBatch(ctx, { ...batch, state: "blocked", error });
+			notifyUser(ctx, error, "error");
+			return;
+		}
+		const priorAttempt = writableExecutionReplayBlocker(batch.writableExecution);
+		if (priorAttempt) {
+			persistBatch(ctx, { ...batch, state: "blocked", error: priorAttempt });
+			notifyUser(ctx, priorAttempt, "warning");
+			return;
+		}
+		const sessionId = ctx.sessionManager?.getSessionId?.();
+		if (!sessionId) {
+			const error = "Credentialless issue execution requires the current native OMP session identity; no worker was started.";
+			persistBatch(ctx, { ...batch, state: "blocked", error });
+			notifyUser(ctx, error, "error");
+			return;
+		}
+		const tokenOptions = mode.tokenOptions();
+		const token = tokenOptions.token ?? resolveToken(env);
+		if (!token) {
+			const error = "GitHub controller authentication is unavailable; no issue source was fetched.";
+			persistBatch(ctx, { ...batch, state: "blocked", error });
+			notifyUser(ctx, error, "error");
+			return;
+		}
+		const issueKey = `${item.repo.toLowerCase()}#${item.id}`;
+		const owner = `review:${batch.id}:${batch.currentWave}`;
+		const resources = resourcesForBatch(batch);
+		const retrying = batch.state === "blocked";
+		if (!batch.waveIdentity) {
+			saveWave(factoryClaimsRoot(env), {
+				...batch,
+				state: "blocked",
+				waveIdentity: `${batch.id}:${batch.currentWave}`,
+				waveSessionId: sessionId,
+				wavePromptDigest: undefined,
+				waveEffectResources: resources,
+				error: "Credentialless issue admission pending; no model worker or repository command has started",
+			});
+		}
+		try { claimItems(wave.items, owner, !retrying); }
+		catch (errorValue) {
+			const error = errorValue instanceof Error ? errorValue.message : "Review could not acquire mutation claims";
+			persistBatch(ctx, { ...activeBatch!, state: "blocked", error });
+			notifyUser(ctx, error, "error");
+			return;
+		}
+		const controller = new AbortController();
+		activeWritableAttempt = { batchId: batch.id, sessionId, controller };
+		const startedAt = Date.now();
+		persistBatch(ctx, {
+			...activeBatch!,
+			state: "running",
+			waveStartedAt: startedAt,
+			waveIdentity: `${batch.id}:${batch.currentWave}`,
+			waveSessionId: sessionId,
+			wavePromptDigest: undefined,
+			waveTaskWorkers: undefined,
+			waveJobIds: undefined,
+			waveTerminalJobStatuses: undefined,
+			waveEffectResources: resources,
+			writableExecution: { version: 1, status: "running", issueKey, runtimeProfile: isolation.runtime, startedAt },
+			error: "Credentialless issue worker is running; an interrupted attempt will remain UNKNOWN and will not be replayed",
+		});
+		notifyUser(ctx, `Running credentialless Review execution for ${item.repo}#${item.id}`, "info");
+		let outcome: WritableIssueWorkflowResult;
+		try {
+			const sdk = await import("@oh-my-pi/pi-coding-agent") as unknown as Parameters<typeof runWritableIssueWorkflow>[0]["sdk"];
+			const latestTokenOptions = mode.tokenOptions();
+			outcome = await runWritableIssueWorkflow({
+				repository: item.repo,
+				issueNumber: item.id,
+				privateStateRoot: join(factoryStateRoot(env), "writable-review", "workspaces"),
+				sessionRoot: join(factoryStateRoot(env), "writable-review", "sessions"),
+				token,
+				runtimeProfile: isolation.runtime,
+				sdk,
+				schema: pi.zod as Parameters<typeof runWritableIssueWorkflow>[0]["schema"],
+				context: { model: ctx.model, modelRegistry: ctx.modelRegistry },
+				signal: controller.signal,
+				fetchImpl: latestTokenOptions.fetchImpl ?? options.fetchImpl,
+				onWorkspaceCreated: (workspaceId) => {
+					const current = activeBatch;
+					if (!current || current.id !== batch.id || current.currentWave !== batch.currentWave
+						|| ctx.sessionManager?.getSessionId?.() !== sessionId || current.writableExecution?.status !== "running") {
+						throw new Error("writable workspace could not be attached to its active durable attempt");
+					}
+					persistBatch(ctx, { ...current, writableExecution: { ...current.writableExecution, workspaceId } });
+				},
+				onChecksCompleted: (commands, checks) => {
+					const current = activeBatch;
+					const execution = current?.writableExecution;
+					if (!current || current.id !== batch.id || current.currentWave !== batch.currentWave
+						|| ctx.sessionManager?.getSessionId?.() !== sessionId || execution?.status !== "running") {
+						throw new Error("writable check evidence could not be attached to its active durable attempt");
+					}
+					persistBatch(ctx, { ...current, writableExecution: {
+						...execution,
+						commands: [...commands],
+						checks: checks.map(({ command, status, exitCode, outputDigest, stdout, stderr }) => ({
+							command, status, ...(exitCode === undefined ? {} : { exitCode }), outputDigest, stdout, stderr,
+						})),
+					} });
+				},
+				revalidateIssue: async () => {
+					try {
+						const live = await fetchItemsByKey([issueKey], "issues", mode.tokenOptions());
+						const current = live.items.find((candidate) => `${candidate.repo.toLowerCase()}#${candidate.id}` === issueKey);
+						if (live.error || !current) return { issueOpen: false, issueUpdatedAt: "", existingSubmittedPullRequests: [], authorizedWrite: false };
+						return {
+							issueOpen: true,
+							issueUpdatedAt: new Date(current.updatedAt).toISOString(),
+							existingSubmittedPullRequests: current.submittedPrs ?? [],
+							authorizedWrite: Boolean(token),
+						};
+					} catch {
+						return { issueOpen: false, issueUpdatedAt: "", existingSubmittedPullRequests: [], authorizedWrite: false };
+					}
+				},
+			});
+		} catch {
+			outcome = { status: "unknown", reason: "credentialless controller execution ended unexpectedly; preserve claims and inspect GitHub before any retry" };
+		} finally {
+			if (activeWritableAttempt?.batchId === batch.id) activeWritableAttempt = undefined;
+		}
+		if (activeBatch?.id !== batch.id) return;
+		// A late worker completion must not be attached to a newly selected OMP
+		// session. Leave the durable status as running so recovery classifies it
+		// as UNKNOWN and fences any replay.
+		if (shuttingDownSessionId === sessionId || ctx.sessionManager?.getSessionId?.() !== sessionId) return;
+		const source = outcome.source;
+		const pullRequest = outcome.publication?.status === "submitted" ? outcome.publication : undefined;
+		const reason = pullRequest
+			? `Draft candidate ${pullRequest.url} was created. It remains a draft; this isolated path has no independent exact-head acceptance or hosted-check receipt and is not PR-ready.`
+			: outcome.reason ?? "Credentialless issue execution did not produce an attributable candidate; preserve claims and inspect /review details.";
+		const progress = activeBatch.writableExecution;
+		const commands = outcome.commands ?? progress?.commands;
+		const checks = outcome.checks ?? progress?.checks;
+		const evidence: PersistedWritableExecution = {
+			version: 1,
+			status: outcome.status,
+			issueKey,
+			runtimeProfile: isolation.runtime,
+			startedAt,
+			finishedAt: Date.now(),
+			...(source ? { baseRef: source.defaultBranch, baseSha: source.baseSha } : {}),
+			...((outcome.workspaceId ?? activeBatch.writableExecution?.workspaceId) ? { workspaceId: outcome.workspaceId ?? activeBatch.writableExecution!.workspaceId } : {}),
+			...(outcome.candidate ? { candidateDigest: outcome.candidate.digest } : {}),
+			...(outcome.proof ? { checksDigest: outcome.proof.checksDigest, proof: outcome.proof } : {}),
+			...(commands ? { commands } : {}),
+			...(checks ? { checks: checks.map(({ command, status, exitCode, outputDigest, stdout, stderr }) => ({ command, status, ...(exitCode === undefined ? {} : { exitCode }), outputDigest, stdout, stderr })) } : {}),
+			...(pullRequest ? { pullRequest } : {}),
+			reason,
+		};
+		persistBatch(ctx, { ...activeBatch, state: "blocked", writableExecution: evidence, error: reason });
+		notifyUser(ctx, reason, pullRequest ? "warning" : "error");
+	};
+
 	const dispatchCurrentWave = async (ctx: CtxLike, deliverAs?: "steer" | "followUp", prevalidated = false) => {
 		if (!activeBatch || activeBatch.waveExit || shuttingDownSessionId) return;
 		if (mode.paused) {
 			persistBatch(ctx, { ...activeBatch, state: "paused" });
+			return;
+		}
+		const isolationReport = writableIsolationReport(env);
+		if (activeBatch.kind !== "diff" && isolationReport.blocker) {
+			persistBatch(ctx, { ...activeBatch, state: "blocked", error: isolationReport.blocker });
+			notifyUser(ctx, isolationReport.blocker, "error");
+			return;
+		}
+		const replayBlocker = writableExecutionReplayBlocker(activeBatch.writableExecution);
+		if (replayBlocker) {
+			persistBatch(ctx, { ...activeBatch, state: "blocked", error: replayBlocker });
+			notifyUser(ctx, replayBlocker, "warning");
 			return;
 		}
 		const dispatchBatch = activeBatch;
@@ -2826,6 +3041,16 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 				wave = activeBatch.waves[activeBatch.currentWave]!;
 			}
 		}
+		if (isolationReport.mode === "opt-in-ready" && shouldDispatchWritableIssueWave(activeBatch.kind, wave.items)) {
+			await dispatchWritableIssueWave(ctx, wave);
+			return;
+		}
+		if (isolationReport.mode === "opt-in-ready" && (activeBatch.kind === "slay" || activeBatch.kind === "fix")) {
+			const error = "The credentialless writable executor accepts issue work only; no PR worker or shell fallback was started.";
+			persistBatch(ctx, { ...activeBatch, state: "blocked", error });
+			notifyUser(ctx, error, "error");
+			return;
+		}
 		const retryingBlockedWave = activeBatch.state === "blocked";
 		let waveOperatorPolicy: OperatorPolicySnapshot;
 		try { waveOperatorPolicy = readOperatorPolicy(wave.repo, env); }
@@ -2891,7 +3116,10 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			notifyUser(ctx, message, "error");
 			return { kind: "blocked", message };
 		}
-		const reviewerBlocker = reviewerCapabilityBlocker(kind, items);
+		const qualifiedWritable = (kind === "slay" || kind === "fix")
+			&& items.length > 0 && items.every((item) => item.type === "issue")
+			&& writableIsolationReport(env).mode === "opt-in-ready";
+		const reviewerBlocker = qualifiedWritable ? undefined : reviewerCapabilityBlocker(kind, items);
 		if (reviewerBlocker) {
 			const subject = items.find((item) => item.type === "pr");
 			const retryKey = kind === "fix" ? "f" : "s";
@@ -3996,6 +4224,20 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	const advanceRepositoryBatch = async (ctx: CtxLike) => {
 		if (!activeBatch || (activeBatch.state !== "running" && !(activeBatch.state === "paused" && activeBatch.cancelRequested))) return;
 		if (activeBatch.waveExit) return;
+		const writableReplayBlocker = writableExecutionReplayBlocker(activeBatch.writableExecution);
+		if (writableReplayBlocker) {
+			if (activeWritableAttempt?.batchId === activeBatch.id) return;
+			const prior = activeBatch.writableExecution;
+			const error = prior && typeof prior === "object" && prior.status === "running"
+				? "Writable isolated execution was interrupted before its result was persisted; its outcome is UNKNOWN. Preserve claims and do not resume or fall back to workflowz."
+				: writableReplayBlocker;
+			const updatedEvidence = prior && typeof prior === "object" && !Array.isArray(prior)
+				? { ...prior, status: prior.status === "running" ? "unknown" as const : prior.status }
+				: prior;
+			persistBatch(ctx, { ...activeBatch, state: "blocked", writableExecution: updatedEvidence, error });
+			notifyUser(ctx, error, "warning");
+			return;
+		}
 		const batchAtEntry = activeBatch;
 		const wave = batchAtEntry.waves[batchAtEntry.currentWave];
 		const jobs = ctx.getAsyncJobSnapshot?.();
@@ -4186,6 +4428,17 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 			}, factoryLoadDiagnostic());
 		}
 		mode.setToken(resolveToken(env));
+		const isolationReport = writableIsolationReport(env);
+		if (isolationReport.mode === "opt-in-ready") {
+			notifyUser(ctx, "Credentialless issue execution is enabled. Any candidate PR remains a draft and is not PR-ready; Review will not run the legacy workflowz worker path for opted-in Slay/Fix.", "warning");
+		} else if (isolationReport.mode !== "disabled") {
+			notifyNotice(ctx, "warning", "review-writable-isolation-unavailable", {
+				title: "Writable isolation is unavailable",
+				outcome: "Opted-in Slay/Fix stays blocked before any worker, repository command, or publication while runtime qualification is unavailable.",
+				action: "Review the runtime qualification blocker and continue with read-only Review actions until the packaged runtime is qualified.",
+				steps: ["Do not treat an OMP worktree as an OS security boundary.", "The qualification file must be root-owned, image-baked, profile-matched, and bound to the packaged Bubblewrap/prlimit binaries."],
+			}, JSON.stringify(isolationReport, null, 2));
+		}
 		// Mode, scope and filter apply immediately; the remembered item can only be
 		// found once the queue has actually been fetched, so restore runs twice.
 		const persisted = readPersisted(ctx);
@@ -4318,6 +4571,7 @@ export function createReviewExtension(pi: ReviewExtensionHost, options: Extensio
 	pi.on("session_shutdown", (_event, ctx) => {
 		const sessionId = ctx.sessionManager?.getSessionId?.();
 		shuttingDownSessionId = sessionId;
+		if (sessionId && activeWritableAttempt?.sessionId === sessionId) activeWritableAttempt.controller.abort();
 		batchRequestGeneration++;
 		const choice = pendingExit && pendingExit.sessionId === sessionId && pendingExit.batch.id === activeBatch?.id && pendingExit.batch.waveIdentity === activeBatch?.waveIdentity && pendingExit.batch.wavePromptDigest === activeBatch?.wavePromptDigest ? pendingExit.choice : "pause";
 		pendingExit = undefined;

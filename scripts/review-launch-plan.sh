@@ -12,7 +12,7 @@ declare -A REVIEW_LAUNCH_GROUP_NAMES=(
   [copilot]="COPILOT_GITHUB_TOKEN GITHUB_COPILOT_TOKEN COPILOT_INTEGRATION_ID"
 )
 REVIEW_LAUNCH_GROUPS=(aws-sdk bedrock-bearer openai anthropic gemini typesafe copilot)
-REVIEW_LAUNCH_FIXED_NAMES=(GH_TOKEN GITHUB_TOKEN REVIEW_DEFAULT_SCOPE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY RTK_DISABLED)
+REVIEW_LAUNCH_FIXED_NAMES=(GH_TOKEN GITHUB_TOKEN REVIEW_DEFAULT_SCOPE REVIEW_INHERIT_OMP_CONFIG REVIEW_SKIP_REPOS REVIEW_WRITABLE_ISOLATION LUNA_FACTORY_ENABLED LUNA_FACTORY_CAPACITY RTK_DISABLED)
 
 review_launch_fail() {
   printf 'ERROR: %s\n' "$1" >&2
@@ -62,6 +62,11 @@ review_launch_validate() {
   esac
   case "${REVIEW_LAUNCH_PLAN[github_auth]}" in auto | gh-cli | environment) ;; *)
     review_launch_fail "GitHub auth source must be auto, gh-cli or environment"
+    return 1
+    ;;
+  esac
+  case "${REVIEW_WRITABLE_ISOLATION:-0}" in 0 | 1) ;; *)
+    review_launch_fail "REVIEW_WRITABLE_ISOLATION must be exactly 0 or 1"
     return 1
     ;;
   esac
@@ -310,6 +315,11 @@ review_launch_environment() {
     if ((REVIEW_LAUNCH_FILTERED)); then [[ -v "$name" ]] || continue; fi
     REVIEW_LAUNCH_ENV_NAMES+=("$name")
   done
+  # This safety mode is a controller setting rather than a provider capability;
+  # preserve an explicit opt-in even when a named profile filters credentials.
+  if [[ -v REVIEW_WRITABLE_ISOLATION && ! -v "seen[REVIEW_WRITABLE_ISOLATION]" ]]; then
+    REVIEW_LAUNCH_ENV_NAMES+=(REVIEW_WRITABLE_ISOLATION)
+  fi
 }
 
 review_launch_summary() {

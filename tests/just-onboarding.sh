@@ -115,6 +115,10 @@ fi
 if [[ "${1:-}" == run && "${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
   [[ "$*" == *"--env LUNA_FACTORY_ENABLED"* && "$*" == *"--env LUNA_FACTORY_CAPACITY"* ]] || exit 19
 fi
+if [[ "${1:-}" == run && "${EXPECT_WRITABLE_ISOLATION:-}" == 1 ]]; then
+  [[ "$*" == *"--env REVIEW_WRITABLE_ISOLATION"* && "$*" == *"--env REVIEW_RUNTIME_PROFILE=krun"* ]] || exit 19
+  [[ "$*" != *"REVIEW_RUNTIME_PROFILE=forged"* ]] || exit 19
+fi
 if [[ "${1:-}" == run && -v EXPECT_RTK_DISABLED ]]; then
   if [[ "$EXPECT_RTK_DISABLED" == unset ]]; then
     [[ "$*" != *"--env RTK_DISABLED"* ]] || exit 19
@@ -147,6 +151,11 @@ fi
 if [[ "${EXPECT_FACTORY_ENV:-}" == 1 ]]; then
   [[ "${APPTAINERENV_LUNA_FACTORY_ENABLED:-}" == 1 && "${APPTAINERENV_LUNA_FACTORY_CAPACITY:-}" == 7 ]] || exit 19
   [[ "$*" != *LUNA_FACTORY* && "$*" != *" 7 "* ]] || exit 19
+fi
+if [[ "${EXPECT_WRITABLE_ISOLATION:-}" == 1 ]]; then
+  [[ "${APPTAINERENV_REVIEW_WRITABLE_ISOLATION:-}" == 1 ]] || exit 19
+  [[ "${APPTAINERENV_REVIEW_RUNTIME_PROFILE:-}" == apptainer ]] || exit 19
+  [[ "$*" != *REVIEW_WRITABLE_ISOLATION* && "$*" != *" apptainer "* && "$*" != *forged* ]] || exit 19
 fi
 if [[ -v EXPECT_RTK_DISABLED ]]; then
   if [[ "$EXPECT_RTK_DISABLED" == unset ]]; then
@@ -307,6 +316,30 @@ FAKE_KRUN_RUNTIME=krun run_just review-appliance owner/repo
 log_contains 'run --runtime=krun --rm --interactive --tty' "$podman_log"
 log_contains 'runtime-probe info --runtime=krun' "$podman_log"
 [[ ! -s "$apptainer_log" ]] || fail "registered krun runtime fell back to Apptainer"
+
+scenario="writable isolation opt-in and selected runtime cross the just launcher boundary"
+export REVIEW_WRITABLE_ISOLATION=1 REVIEW_RUNTIME_PROFILE=forged EXPECT_WRITABLE_ISOLATION=1
+FAKE_KRUN_RUNTIME=krun run_just review-appliance owner/repo
+[[ "$status" -eq 17 ]] || fail "krun launch failed with fail-closed writable isolation: $output"
+log_contains '--env REVIEW_WRITABLE_ISOLATION' "$podman_log"
+log_contains '--env REVIEW_RUNTIME_PROFILE=krun' "$podman_log"
+unset REVIEW_WRITABLE_ISOLATION REVIEW_RUNTIME_PROFILE EXPECT_WRITABLE_ISOLATION
+
+scenario="just Apptainer fallback receives the same fail-closed opt-in and its actual runtime profile"
+export REVIEW_WRITABLE_ISOLATION=1 REVIEW_RUNTIME_PROFILE=krun EXPECT_WRITABLE_ISOLATION=1 FAKE_PODMAN_INFO_FAIL=1
+export APPTAINERENV_REVIEW_WRITABLE_ISOLATION=0 APPTAINERENV_REVIEW_RUNTIME_PROFILE=krun
+run_just review-appliance owner/repo
+[[ "$status" -eq 18 ]] || fail "Apptainer launch failed with fail-closed writable isolation: $output"
+unset REVIEW_WRITABLE_ISOLATION REVIEW_RUNTIME_PROFILE EXPECT_WRITABLE_ISOLATION FAKE_PODMAN_INFO_FAIL
+unset APPTAINERENV_REVIEW_WRITABLE_ISOLATION APPTAINERENV_REVIEW_RUNTIME_PROFILE
+
+scenario="just rejects invalid writable isolation before launching a runtime"
+export REVIEW_WRITABLE_ISOLATION=maybe
+: >"$apptainer_log"
+run_just review-appliance owner/repo
+[[ "$status" -ne 0 && "$output" == *"REVIEW_WRITABLE_ISOLATION must be exactly 0 or 1"* ]] || fail "just accepted an invalid writable-isolation value: $output"
+[[ ! -s "$podman_log" && ! -s "$apptainer_log" ]] || fail "just invoked a runtime with an invalid writable-isolation value"
+unset REVIEW_WRITABLE_ISOLATION
 
 scenario="unregistered krun runtime keeps the precise Apptainer fallback diagnostic"
 FAKE_KRUN_RUNTIME=unavailable run_just review-doctor

@@ -4,9 +4,80 @@ import { join } from "node:path";
 import type { PersistedRepositoryBatch } from "./extension.ts";
 import { isOperatorPolicySnapshot } from "./operator-policy.ts";
 import { parseReviewerReceiptState } from "./reviewer-receipts.ts";
+import { checkPlanDigest, checkResultsDigest, WRITABLE_EXECUTION_LIMITS } from "./writable-executor.ts";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const filename = (root: string, owner: string): string => join(root, "review-waves", `${digest(owner)}.json`);
+
+function isRecord(value: unknown): value is Record<string, any> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validWritableChecks(checks: unknown, commands: unknown): boolean {
+	if (!Array.isArray(checks) || !Array.isArray(commands) || checks.length > commands.length || checks.length > WRITABLE_EXECUTION_LIMITS.checksPerAttempt) return false;
+	let retainedOutputBytes = 0;
+	for (let index = 0; index < checks.length; index++) {
+		const check = checks[index];
+		if (!isRecord(check) || check.command !== commands[index]
+			|| !["passed", "failed", "unavailable", "timed-out", "cancelled", "output-limit"].includes(check.status)
+			|| check.exitCode !== undefined && !Number.isSafeInteger(check.exitCode)
+			|| typeof check.outputDigest !== "string" || !/^[a-f0-9]{64}$/.test(check.outputDigest)
+			|| check.status === "passed" && check.exitCode !== 0) return false;
+		if (check.stdout !== undefined || check.stderr !== undefined) {
+			if (typeof check.stdout !== "string" || typeof check.stderr !== "string") return false;
+			const bytes = Buffer.byteLength(check.stdout) + Buffer.byteLength(check.stderr);
+			if (bytes > WRITABLE_EXECUTION_LIMITS.outputBytes) return false;
+			retainedOutputBytes += bytes;
+			if (retainedOutputBytes > WRITABLE_EXECUTION_LIMITS.outputBytes * WRITABLE_EXECUTION_LIMITS.checksPerAttempt) return false;
+			const expected = digest(`${check.stdout}\0${check.stderr}\0${check.status}\0${check.exitCode ?? "unknown"}`);
+			if (check.outputDigest !== expected) return false;
+		}
+	}
+	return true;
+}
+
+function validWritableExecution(value: unknown, batch: any): boolean {
+	if (!isRecord(value) || value.version !== 1 || !["running", "submitted", "blocked", "unknown"].includes(value.status)
+		|| !["krun", "apptainer"].includes(value.runtimeProfile) || !Number.isFinite(value.startedAt)
+		|| value.finishedAt !== undefined && (!Number.isFinite(value.finishedAt) || value.finishedAt < value.startedAt)
+		|| typeof value.issueKey !== "string" || !batch.waves[batch.currentWave].items.some((item: any) => item.type === "issue" && `${item.repo.toLowerCase()}#${item.id}` === value.issueKey)) return false;
+	if (value.reason !== undefined && (typeof value.reason !== "string" || value.reason.length > 8192)) return false;
+	if (value.baseRef !== undefined && (typeof value.baseRef !== "string" || !value.baseRef || value.baseRef.length > 255)) return false;
+	if (value.baseSha !== undefined && (typeof value.baseSha !== "string" || !/^[a-f0-9]{40}$/.test(value.baseSha))) return false;
+	if ((value.baseRef === undefined) !== (value.baseSha === undefined)) return false;
+	if (value.candidateDigest !== undefined && (typeof value.candidateDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.candidateDigest))) return false;
+	if (value.checksDigest !== undefined && (typeof value.checksDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.checksDigest))) return false;
+	if (value.workspaceId !== undefined && (typeof value.workspaceId !== "string" || !/^[a-f0-9-]{36}$/i.test(value.workspaceId))) return false;
+	if (value.commands !== undefined && (!Array.isArray(value.commands) || value.commands.length < 1 || value.commands.length > WRITABLE_EXECUTION_LIMITS.checksPerAttempt
+		|| !value.commands.every((command: unknown) => typeof command === "string" && command.trim() && Buffer.byteLength(command) <= WRITABLE_EXECUTION_LIMITS.commandBytes))) return false;
+	if (value.checks !== undefined && !validWritableChecks(value.checks, value.commands)) return false;
+	if (value.proof !== undefined) {
+		const proof = value.proof;
+		try {
+			if (!isRecord(proof) || proof.version !== 1 || proof.repository !== value.issueKey.split("#")[0]
+				|| proof.issueNumber !== Number(value.issueKey.split("#")[1]) || proof.baseRef !== value.baseRef || proof.baseSha !== value.baseSha
+				|| proof.candidateDigest !== value.candidateDigest || proof.checksDigest !== value.checksDigest
+				|| typeof proof.planDigest !== "string" || !/^[a-f0-9]{64}$/.test(proof.planDigest)
+				|| proof.runtimeProfile !== value.runtimeProfile || !Number.isFinite(proof.verifiedAt)
+				|| !Array.isArray(proof.checks) || !value.commands || proof.checks.length !== value.commands.length
+				|| proof.checks.some((check: any, index: number) => !isRecord(check) || check.command !== value.commands[index] || check.exitCode !== 0
+					|| typeof check.outputDigest !== "string" || !/^[a-f0-9]{64}$/.test(check.outputDigest))
+				|| checkPlanDigest(value.commands).length !== 64 || checkResultsDigest(proof.checks) !== value.checksDigest) return false;
+		} catch { return false; }
+	}
+	if (value.pullRequest !== undefined) {
+		const pr = value.pullRequest;
+		if (value.status !== "submitted" || !isRecord(pr) || !Number.isSafeInteger(pr.number) || pr.number < 1
+			|| typeof pr.url !== "string" || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(pr.url)
+			|| typeof pr.branch !== "string" || !/^review\/issue-[1-9][0-9]*-[a-f0-9]{12}$/.test(pr.branch)
+			|| typeof pr.headSha !== "string" || !/^[a-f0-9]{40}$/.test(pr.headSha)
+			|| typeof pr.baseRef !== "string" || !pr.baseRef || typeof pr.baseSha !== "string" || !/^[a-f0-9]{40}$/.test(pr.baseSha)
+			|| typeof pr.observed !== "boolean" || !value.candidateDigest || !value.proof
+			|| pr.branch !== `review/issue-${Number(value.issueKey.split("#")[1])}-${value.candidateDigest.slice(0, 12)}`) return false;
+	}
+	if (value.status === "submitted" && !value.pullRequest) return false;
+	return true;
+}
 
 /** One durable record per claim owner, independent of the OMP branch projection. */
 export function saveWave(root: string, batch: PersistedRepositoryBatch): void {
@@ -92,6 +163,7 @@ export function loadWave(root: string, owner: string): PersistedRepositoryBatch 
 						|| typeof readiness.observation.headSha !== "string" || !/^[a-f0-9]{40}$/.test(readiness.observation.headSha))
 					|| readiness.state === "ready" && (!readiness.pullRequest || !readiness.workerReceiptDigest || readiness.observation?.result !== "passed" && readiness.reason !== "no-required-checks-with-local-acceptance")))) return;
 		}
+		if (batch.writableExecution !== undefined && (batch.version !== 2 || !validWritableExecution(batch.writableExecution, batch))) return;
 		if (batch.waveSessionId !== undefined && (typeof batch.waveSessionId !== "string" || !batch.waveSessionId)) return;
 		if (batch.waveOperatorPolicy !== undefined && (!isOperatorPolicySnapshot(batch.waveOperatorPolicy) || batch.waveOperatorPolicy.repository !== batch.waves[batch.currentWave].repo.toLowerCase())) return;
 		if (batch.waveReviewerReceipts !== undefined && !parseReviewerReceiptState(batch.waveReviewerReceipts)) return;

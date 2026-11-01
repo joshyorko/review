@@ -59,7 +59,7 @@ else:
                  if k.startswith("SINGULARITYENV_")}
     forwarded.update({k.removeprefix("APPTAINERENV_"): v for k,v in os.environ.items()
                       if k.startswith("APPTAINERENV_")})
-controls = {k: forwarded.get(k) for k in ("LUNA_FACTORY_ENABLED", "LUNA_FACTORY_CAPACITY", "REVIEW_INHERIT_OMP_CONFIG", "RTK_DISABLED")}
+controls = {k: forwarded.get(k) for k in ("LUNA_FACTORY_ENABLED", "LUNA_FACTORY_CAPACITY", "REVIEW_INHERIT_OMP_CONFIG", "REVIEW_WRITABLE_ISOLATION", "REVIEW_RUNTIME_PROFILE", "RTK_DISABLED")}
 print(json.dumps({"runtime": tool, "args": args, "names": sorted(forwarded), "controls": controls,
                   "stored_authority": forwarded.get("GH_TOKEN") == os.environ["FIXTURE_STORED_TOKEN"],
                   "environment_authority": forwarded.get("GH_TOKEN") == os.environ.get("FIXTURE_ENV_TOKEN"),
@@ -167,10 +167,25 @@ print(os.environ['FIXTURE_STORED_TOKEN'])
     def test_explicit_apptainer_never_probes_krun(self):
         result = self.receipt(self.run_launch("--runtime", "apptainer", "owner/repo"))
         self.assertEqual(result["runtime"], "apptainer")
+        self.assertEqual(result["controls"]["REVIEW_RUNTIME_PROFILE"], "apptainer")
         self.assertFalse(any(c["tool"] == "podman" for c in self.calls()))
         self.assertNotIn("--runtime", result["args"])
         self.assertIn("--containall", result["args"])
         self.assertIn("--no-eval", result["args"])
+
+    def test_writable_isolation_opt_in_survives_profile_filtering_and_runtime_is_launcher_owned(self):
+        self.profile(runtime="apptainer", env_groups="", env_names="OPENAI_API_KEY")
+        self.env["REVIEW_WRITABLE_ISOLATION"] = "1"
+        self.env["REVIEW_RUNTIME_PROFILE"] = "krun"
+        result = self.receipt(self.run_launch("--launcher-profile", "personal", "owner/repo"))
+        self.assertEqual(result["controls"]["REVIEW_WRITABLE_ISOLATION"], "1")
+        self.assertEqual(result["controls"]["REVIEW_RUNTIME_PROFILE"], "apptainer")
+        self.assertIn("REVIEW_WRITABLE_ISOLATION", result["names"])
+
+    def test_invalid_writable_isolation_value_refuses_before_runtime(self):
+        self.env["REVIEW_WRITABLE_ISOLATION"] = "yes"
+        self.run_launch("owner/repo", ok=False)
+        self.assertEqual(self.calls(), [])
 
     def test_explicit_krun_unavailable_never_downgrades(self):
         self.env["REVIEW_TEST_KVM_DEVICE"] = str(self.root / "missing-kvm")

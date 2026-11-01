@@ -49,6 +49,7 @@ import {
 import lunaFactoryExtension, { createLunaFactoryExtension } from "../image/extension/luna-factory/index.ts";
 import { ResourceClaims } from "../image/extension/luna-factory/omp/batch-store.ts";
 import { loadWave, saveWave } from "../image/extension/review/wave-store.ts";
+import { shouldDispatchWritableIssueWave } from "../image/extension/review/writable-isolation.ts";
 import { factoryHandoffState, registerFactoryController, registerFactoryBatchSubmitter, registerFactoryDashboardOpener, registeredFactoryReconciler } from "../image/extension/luna-factory/omp/batch-bridge.ts";
 
 const NOW = 1_800_000_000_000;
@@ -3024,6 +3025,105 @@ test("Review blocks PR mutation admission when the effective OMP task schema omi
 	const savedResolution = pi.entries.filter((entry) => entry.customType === NOTICE_ENTRY && entry.data?.resolution).at(-1).data;
 	assert.match(savedResolution.outcome, /No new work was started/);
 	assert.ok(savedResolution.steps.length >= 4, "the complete historical notice remains in the session journal");
+});
+
+test("opt-in writable isolation blocks Slay before OMP prompt dispatch or mutation claims", async () => {
+	const pi = fakeHost();
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const env = { ...ISOLATED_ENV, REVIEW_WRITABLE_ISOLATION: "1", REVIEW_RUNTIME_PROFILE: "krun" };
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: githubQueueFetch([queueItem({ ciStatus: "success" })]),
+		env,
+	});
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	await pi.commands.get("review").handler("slay", ctx);
+
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(batch?.state, "blocked");
+	assert.match(batch?.error ?? "", /image-baked root-owned runtime qualification artifact/i);
+	assert.equal(batch?.waveIdentity, undefined, "no task wave is admitted");
+	assert.equal(pi.messages.length, 0, "no coordinator prompt or native task dispatch is sent");
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0, "no mutation claims are created");
+	assert.match(savedReviewNoticeText(pi), /runtime qualification/i);
+	assert.match(savedReviewNoticeText(pi), /"runtime": "krun"/);
+	assert.match(savedReviewNoticeText(pi), /"taskExecutionTools": "blocked"/);
+});
+
+test("opt-in writable isolation blocks dashboard Fix before OMP prompt dispatch or mutation claims", async () => {
+	const issue = { number: 103, title: "synthetic fix target", repo: "projectbluefin/unmanaged" };
+	const fetchImpl = async (url: string | URL | Request) => {
+		if (!String(url).includes("/graphql")) return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+		return {
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			json: async () => ({ data: { search: {
+				pageInfo: { hasNextPage: false, endCursor: null },
+				nodes: [{ number: issue.number, title: issue.title,
+					url: `https://github.com/${issue.repo}/issues/${issue.number}`,
+					updatedAt: new Date(NOW - 1000).toISOString(), author: { login: "someone" },
+					repository: { nameWithOwner: issue.repo }, labels: { nodes: [] } }],
+			} } }),
+		};
+	};
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const env = {
+		...ISOLATED_ENV,
+		REVIEW_WRITABLE_ISOLATION: "1",
+		REVIEW_RUNTIME_PROFILE: "apptainer",
+		GH_TOKEN: "synthetic-github-canary",
+		COPILOT_GITHUB_TOKEN: "synthetic-copilot-canary",
+	};
+	const review = createReviewExtension(pi, { org: "projectbluefin", fetchImpl: fetchImpl as unknown as typeof fetch, env });
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	(ctx.overlays[0] as unknown as ReviewDashboard).handleInput("f");
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(batch?.kind, "fix");
+	assert.equal(batch?.state, "blocked");
+	assert.match(batch?.error ?? "", /image-baked root-owned runtime qualification artifact/i);
+	assert.equal(batch?.waveIdentity, undefined, "no task wave is admitted");
+	assert.equal(pi.messages.length, 0, "no coordinator prompt or native task dispatch is sent");
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0, "no mutation claims are created");
+	assert.doesNotMatch(savedReviewNoticeText(pi), /synthetic-(?:github|copilot)-canary/, "the capability notice omits synthetic credential values");
+});
+
+test("issue diff remains on the read-only extension route while only Slay/Fix issue waves select the writable executor", async () => {
+	const pi = fakeHost();
+	pi.flagValues.set("issues", true);
+	const ctx = fakeCtx();
+	ctx.ui.parent = ctx;
+	const env = { ...ISOLATED_ENV, REVIEW_WRITABLE_ISOLATION: "1", REVIEW_RUNTIME_PROFILE: "krun" };
+	const review = createReviewExtension(pi, {
+		org: "projectbluefin",
+		fetchImpl: issueBackedFetch({ "projectbluefin/review#77": { title: "inspect only", submittedPrs: [] } }),
+		env,
+	});
+	await pi.events.get("session_start")({}, ctx);
+	await review.whenStarted();
+	(ctx.overlays[0] as unknown as ReviewDashboard).handleInput("d");
+	await new Promise((resolve) => setImmediate(resolve));
+
+	const batch = pi.entries.filter((entry) => entry.customType === BATCH_ENTRY).at(-1)?.data;
+	assert.equal(batch?.kind, "diff");
+	assert.equal(batch?.writableExecution, undefined, "the read-only diff path never creates writable evidence");
+	assert.equal(pi.messages.length, 1, "issue diff still dispatches its normal inspection task");
+	assert.match(pi.messages[0] ?? "", /Inspect .* as an issue/);
+	assert.doesNotMatch(pi.messages[0] ?? "", /Implement|review_writable_check|shell/i);
+	assert.equal(new ResourceClaims(env.LUNA_FACTORY_STATE_ROOT, env.LUNA_FACTORY_CLAIMS_ROOT).list().length, 0);
+	assert.equal(shouldDispatchWritableIssueWave("diff", [{ type: "issue" }]), false);
+	assert.equal(shouldDispatchWritableIssueWave("diff", [{ type: "pr" }]), false);
+	assert.equal(shouldDispatchWritableIssueWave("slay", [{ type: "issue" }]), true);
+	assert.equal(shouldDispatchWritableIssueWave("fix", [{ type: "issue" }]), true);
+	assert.equal(shouldDispatchWritableIssueWave("slay", [{ type: "pr" }]), false);
 });
 
 test("structured reviewer capability reads OMP ArkType batch schemas through its wire conversion", () => {
