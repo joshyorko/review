@@ -185,10 +185,12 @@ test("Node fallback runs added tests while protecting captured test contents", (
 		const nodeSource: WritableIssueSource = { ...original, files: new Map([...original.files].filter(([path]) => path !== "package.json")) };
 		const workspace = materializeWritableWorkspace(nodeSource, join(root, "state"));
 		const addedPath = "tests/new.spec.ts";
+		const optionLookingPath = "--test-skip-pattern=.test.js";
 		writeFileSync(join(workspace.root, addedPath), "import test from 'node:test'; test('added', () => {});\n");
-		const candidatePaths = [...workspace.candidatePaths, addedPath];
+		writeFileSync(join(workspace.root, optionLookingPath), "import test from 'node:test'; test('option-looking filename', () => {});\n");
+		const candidatePaths = [...workspace.candidatePaths, addedPath, optionLookingPath];
 		const plan = deriveWritableCheckPlan(nodeSource, candidatePaths);
-		assert.deepEqual(plan.commands, ["node --test 'tests/new.spec.ts' 'tests/smoke.test.mjs'"]);
+		assert.deepEqual(plan.commands, ["node --test -- '--test-skip-pattern=.test.js' 'tests/new.spec.ts' 'tests/smoke.test.mjs'"]);
 		assert.equal(writableCheckPlanBlocker({ source: nodeSource, workspaceRoot: workspace.root, candidatePaths, plan }), undefined);
 		writeFileSync(join(workspace.root, "tests/smoke.test.mjs"), "// hollowed-out baseline test\n");
 		assert.match(writableCheckPlanBlocker({ source: nodeSource, workspaceRoot: workspace.root, candidatePaths, plan }) ?? "", /captured test input changed/);

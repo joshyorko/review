@@ -68,7 +68,7 @@ export function deriveWritableCheckPlan(source: WritableIssueSource, candidateFi
 				const candidateTests = candidateFiles
 					.map(validateRepositoryPath)
 					.filter((path) => testFile.test(path) && !source.files.has(path));
-				commands = [`node --test ${[...new Set([...nodeTests, ...candidateTests])].sort().map(shellQuote).join(" ")}`];
+				commands = [`node --test -- ${[...new Set([...nodeTests, ...candidateTests])].sort().map(shellQuote).join(" ")}`];
 				definitionFiles = [];
 				requiredFiles = nodeTests;
 			}
