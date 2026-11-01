@@ -184,7 +184,7 @@ test("package checks bind a simple direct Node test entrypoint to its captured b
 	try {
 		const base = source();
 		const manifest = Buffer.from('{"scripts":{"test":"node test.js"}}\n');
-	const entrypoint = Buffer.from("import assert from 'node:assert/strict'; assert.equal(1, 1);\n");
+		const entrypoint = Buffer.from("import assert from 'node:assert/strict'; assert.equal(1, 1);\n");
 		const src: WritableIssueSource = {
 			...base,
 			files: new Map([
