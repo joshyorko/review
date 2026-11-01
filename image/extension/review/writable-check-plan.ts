@@ -23,7 +23,14 @@ function sourceTestFiles(source: WritableIssueSource): string[] {
 	return [...source.files.keys()].filter((path) => testFile.test(path)).sort();
 }
 
-function packageTest(source: WritableIssueSource): { command: string; definitionFiles: string[] } | undefined {
+function explicitNodeTestEntryPoint(command: string): string | undefined {
+	const match = /^node(?:\s+--test)?\s+([A-Za-z0-9_.\/-]+)$/.exec(command.trim());
+	if (!match) return undefined;
+	try { return validateRepositoryPath(match[1]!); }
+	catch { return undefined; }
+}
+
+function packageTest(source: WritableIssueSource): { command: string; definitionFiles: string[]; script: string } | undefined {
 	const manifestFile = source.files.get("package.json");
 	if (!manifestFile) return undefined;
 	if (manifestFile.bytes > 128 * 1024) throw new Error("mandatory check plan blocked: package.json exceeds its bound");
@@ -37,7 +44,7 @@ function packageTest(source: WritableIssueSource): { command: string; definition
 		: undefined;
 	if (typeof test !== "string" || !test.trim()) return undefined;
 	if (/^(?:true|:|echo(?:\s|$)|exit\s+0)$/i.test(test.trim())) throw new Error("mandatory check plan blocked: package test command is a no-op");
-	return { command: "npm test", definitionFiles: ["package.json"] };
+	return { command: "npm test", definitionFiles: ["package.json"], script: test };
 }
 
 export function deriveWritableCheckPlan(source: WritableIssueSource, candidateFiles: readonly string[] = [...source.files.keys()]): WritableCheckPlan {
@@ -55,7 +62,12 @@ export function deriveWritableCheckPlan(source: WritableIssueSource, candidateFi
 			commands = [npm.command];
 			definitionFiles = npm.definitionFiles;
 			requiredFiles = sourceTestFiles(source);
-			if (requiredFiles.length === 0) requiredFiles = ["package.json"];
+			const entryPoint = explicitNodeTestEntryPoint(npm.script);
+			if (entryPoint) {
+				if (!source.files.has(entryPoint)) throw new Error(`mandatory check plan blocked: explicit Node test entrypoint is not captured (${entryPoint})`);
+				requiredFiles = [...new Set([...requiredFiles, entryPoint])].sort();
+			}
+			if (requiredFiles.length === 0) throw new Error("mandatory check plan blocked: package test inputs cannot be identified");
 		} else {
 			const pythonTests = [...source.files.keys()].filter((path) => /(?:^|\/)test[^/]*\.py$/i.test(path) && path.startsWith("tests/")).sort();
 			if (pythonTests.length > 0) {

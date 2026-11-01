@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+	assertCandidatePathLimits,
 	checkPlanDigest,
 	createCandidateCheckProof,
 	credentiallessSandboxArgs,
@@ -178,6 +179,43 @@ test("mandatory check plan is controller-derived, rejects no-op tests, and block
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("package checks bind a simple direct Node test entrypoint to its captured base bytes", () => {
+	const root = tempRoot();
+	try {
+		const base = source();
+		const manifest = Buffer.from('{"scripts":{"test":"node test.js"}}\n');
+	const entrypoint = Buffer.from("import assert from 'node:assert/strict'; assert.equal(1, 1);\n");
+		const src: WritableIssueSource = {
+			...base,
+			files: new Map([
+				["package.json", { ...base.files.get("package.json")!, content: manifest, bytes: manifest.byteLength }],
+				["test.js", { path: "test.js", sha: "1".repeat(40), mode: "100644", content: entrypoint, bytes: entrypoint.byteLength }],
+			]),
+		};
+		const workspace = materializeWritableWorkspace(src, join(root, "state"));
+		const plan = deriveWritableCheckPlan(src);
+		assert.deepEqual(plan.commands, ["npm test"]);
+		assert.deepEqual(plan.requiredFiles, ["test.js"]);
+		assert.equal(writableCheckPlanBlocker({ source: src, workspaceRoot: workspace.root, candidatePaths: workspace.candidatePaths, plan }), undefined);
+		writeFileSync(join(workspace.root, "test.js"), "process.exit(0);\n");
+		assert.match(writableCheckPlanBlocker({ source: src, workspaceRoot: workspace.root, candidatePaths: workspace.candidatePaths, plan }) ?? "", /captured test input changed \(test\.js\)/);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("package checks block when the baseline test input cannot be identified", () => {
+	const base = source();
+	const manifest = Buffer.from('{"scripts":{"test":"node test.js --skip-checks"}}\n');
+	const entrypoint = Buffer.from("process.exit(0);\n");
+	const src: WritableIssueSource = {
+		...base,
+		files: new Map([
+			["package.json", { ...base.files.get("package.json")!, content: manifest, bytes: manifest.byteLength }],
+			["test.js", { path: "test.js", sha: "1".repeat(40), mode: "100644", content: entrypoint, bytes: entrypoint.byteLength }],
+		]),
+	};
+	assert.throws(() => deriveWritableCheckPlan(src), /package test inputs cannot be identified/);
+});
+
 test("Node fallback runs added tests while protecting captured test contents", () => {
 	const root = tempRoot();
 	try {
@@ -282,6 +320,18 @@ test("worker aggregate directory quota rejects before creating the next path", a
 		assert.equal(worker.status, "blocked", "the fixture intentionally ends without a report or checks");
 		assert.equal(existsSync(join(workspace.root, rejectedTopLevel)), false);
 	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("aggregate source path limits stop before processing paths beyond the directory budget", () => {
+	const nearLimitPaths = Array.from({ length: 257 }, (_value, index) => {
+		const directories = Array.from({ length: 63 }, (_part, depth) => `d${String(depth).padStart(2, "0")}-${String(index).padStart(3, "0")}-${"x".repeat(52)}`);
+		return [...directories, "file.txt"].join("/");
+	});
+	assert.ok(nearLimitPaths.every((path) => Buffer.byteLength(path, "utf8") <= 4096));
+	assert.throws(
+		() => assertCandidatePathLimits([...nearLimitPaths, "../must-not-be-inspected"]),
+		/candidate directory count exceeds the supported limit/,
+	);
 });
 
 test("sandbox arguments clear the environment, isolate namespaces and use a bounded tmpfs copy", () => {

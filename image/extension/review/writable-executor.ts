@@ -84,26 +84,33 @@ export function validateRepositoryPath(input: string): string {
 }
 
 /** Relative directory entries required by a set of candidate file paths. */
+function addRepositoryDirectories(path: string, directories: Set<string>): void {
+	let directory = "";
+	for (const component of path.split("/").slice(0, -1)) {
+		directory = directory ? `${directory}/${component}` : component;
+		directories.add(directory);
+		if (directories.size > WRITABLE_EXECUTION_LIMITS.workspaceDirectories) throw new Error("candidate directory count exceeds the supported limit");
+	}
+}
+
 export function repositoryDirectoryPaths(paths: readonly string[]): string[] {
 	const directories = new Set<string>();
-	for (const raw of paths) {
-		const path = validateRepositoryPath(raw);
-		let directory = "";
-		for (const component of path.split("/").slice(0, -1)) {
-			directory = directory ? `${directory}/${component}` : component;
-			directories.add(directory);
-		}
-	}
+	for (const raw of paths) addRepositoryDirectories(validateRepositoryPath(raw), directories);
 	return [...directories];
 }
 
 /** Validate aggregate path and directory bounds before any workspace mutation. */
 export function assertCandidatePathLimits(paths: readonly string[]): string[] {
-	const normalized = [...new Set(paths.map(validateRepositoryPath))];
-	if (normalized.length > WRITABLE_EXECUTION_LIMITS.workspaceFiles) throw new Error("candidate file count exceeds the supported limit");
-	const directories = repositoryDirectoryPaths(normalized);
-	if (directories.length > WRITABLE_EXECUTION_LIMITS.workspaceDirectories) throw new Error("candidate directory count exceeds the supported limit");
-	return directories;
+	const normalized = new Set<string>();
+	const directories = new Set<string>();
+	for (const raw of paths) {
+		const path = validateRepositoryPath(raw);
+		if (normalized.has(path)) continue;
+		if (normalized.size >= WRITABLE_EXECUTION_LIMITS.workspaceFiles) throw new Error("candidate file count exceeds the supported limit");
+		normalized.add(path);
+		addRepositoryDirectories(path, directories);
+	}
+	return [...directories];
 }
 
 function sha256(bytes: Uint8Array | string): string {
