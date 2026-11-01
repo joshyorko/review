@@ -3,6 +3,27 @@
 Release notes for the Review appliance. New sections are drafted with git-cliff
 and reviewed in the version-bump pull request.
 
+## [0.1.9]
+
+### Dependencies
+
+- **deps**: update dependency python-discovery to v1.9.0 (#115) ([7e07a78](https://github.com/joshyorko/review/commit/7e07a780b906e0880c475fdb0cb4437658dc4e81))
+- **deps**: update dependency virtualenv to v21.15.2 (#113) ([07a6351](https://github.com/joshyorko/review/commit/07a6351d2e6dc430278b8a09e693a79982ef9c76))
+- **deps**: update dependency filelock to v4.2.5 (#114) ([ca51c10](https://github.com/joshyorko/review/commit/ca51c10058b50c26159b2d55e721443449d736f3))
+- **deps**: update dependency pi-typesafe to v0.13.1 (#116) ([5c8cb50](https://github.com/joshyorko/review/commit/5c8cb500d3b66210e72ac182ee1eb97fcb6795dd))
+- **deps**: update dependency platformdirs to v4.14.2 (#121) ([5b02df7](https://github.com/joshyorko/review/commit/5b02df73af770512a1bdb44483c362c35cce8539))
+- **deps**: update dependency nodeenv to v1.12.0 (#122) ([1bc68fe](https://github.com/joshyorko/review/commit/1bc68fe0e942dccb87eff44f73257eaebd3da4d9))
+- **deps**: update dependency filelock to v4.2.6 (#120) ([2ec0b6a](https://github.com/joshyorko/review/commit/2ec0b6aa6503dea211dcf465d6b500e90ac46bd5))
+- **deps**: update dependency can1357/oh-my-pi to v18.15.0 (#124) ([237f90d](https://github.com/joshyorko/review/commit/237f90dcbf8add34c8f0f0fe9c3c99442b69ee97))
+
+### Documentation
+
+- introduce the runtime and workbench guides (#117) ([6844349](https://github.com/joshyorko/review/commit/6844349fd7ab2bcb4da7c1cffe9d835e926e7728))
+
+### Features
+
+- isolate writable Review issue execution (#119) ([b85955d](https://github.com/joshyorko/review/commit/b85955dcd70a9cb334c2d5704904a4f5022c0640))
+
 ## [0.1.8]
 
 ### Bug Fixes
