@@ -3,6 +3,15 @@
 Release notes for the Review appliance. New sections are drafted with git-cliff
 and reviewed in the version-bump pull request.
 
+## [0.1.10]
+
+### Dependencies
+
+- **deps**: update dependency platformdirs to v4.14.3 (#126) ([3199144](https://github.com/joshyorko/review/commit/3199144584ab4d4417e9fbdf82f5c462cd9fcef3))
+- **deps**: update dependency can1357/oh-my-pi to v18.16.0 (#129) ([6101d48](https://github.com/joshyorko/review/commit/6101d48dc29756a8012b32ad58a9eadfb36d3e91))
+- **deps**: update dependency python-discovery to v1.9.2 (#128) ([5c47b2d](https://github.com/joshyorko/review/commit/5c47b2d4304f2f9f6cc955fe446eda4317cb5dd9))
+- **deps**: update dependency filelock to v4.2.7 (#127) ([7c1268a](https://github.com/joshyorko/review/commit/7c1268a50cb2b752e964ee79e360330a9f9ac703))
+
 ## [0.1.9]
 
 ### Dependencies
