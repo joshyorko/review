@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 
 const REPOSITORY = "can1357/oh-my-pi";
 const API = `https://api.github.com/repos/${REPOSITORY}`;
 const CONTAINERFILES = ["image/appliance/Containerfile"];
+const SDK_PACKAGE = "ci/sdk-types/package.json";
+const SDK_LOCK = "ci/sdk-types/package-lock.json";
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const NATIVE_PACKAGES = ["pi-natives-linux-x64", "pi-natives-linux-arm64"];
@@ -47,6 +51,44 @@ export function updateContainerfile(source, pins, path = "Containerfile") {
 	updated = replaceArg(updated, "OMP_NATIVES_VERSION", pins.nativesVersion, path);
 	updated = replaceArg(updated, "OMP_NATIVES_X86_64_SHA512", pins.nativesX86_64Sha512, path);
 	return replaceArg(updated, "OMP_NATIVES_AARCH64_SHA512", pins.nativesAarch64Sha512, path);
+}
+
+export async function updateSdkLock({ packageJson, lockfile, version, npmVersion, runNpm = (tempRoot, environment) => {
+	execFileSync("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], {
+		cwd: tempRoot,
+		env: environment,
+		stdio: "pipe",
+	});
+} }) {
+	const tempRoot = await mkdtemp(join(tmpdir(), "review-omp-sdk-lock-"));
+	try {
+		await writeFile(join(tempRoot, "package.json"), packageJson);
+		await writeFile(join(tempRoot, "package-lock.json"), lockfile);
+		const npmEnvironment = {
+			PATH: process.env.PATH ?? "/usr/bin:/bin",
+			HOME: tempRoot,
+			NPM_CONFIG_USERCONFIG: join(tempRoot, "empty.npmrc"),
+			NPM_CONFIG_GLOBALCONFIG: join(tempRoot, "empty-global.npmrc"),
+			NPM_CONFIG_CACHE: join(tempRoot, "npm-cache"),
+			...Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"].filter(name => process.env[name]).map(name => [name, process.env[name]])),
+		};
+		if (npmVersion) {
+			const actualNpmVersion = execFileSync("npm", ["--version"], { env: npmEnvironment, encoding: "utf8" }).trim();
+			if (actualNpmVersion !== npmVersion) {
+				throw new Error(`SDK lock generator requires npm ${npmVersion}, found ${actualNpmVersion}`);
+			}
+		}
+		await runNpm(tempRoot, npmEnvironment);
+		const updated = await readFile(join(tempRoot, "package-lock.json"), "utf8");
+		const parsed = JSON.parse(updated);
+		if (parsed.packages?.[""]?.dependencies?.["@oh-my-pi/pi-coding-agent"] !== version ||
+			parsed.packages?.["node_modules/@oh-my-pi/pi-coding-agent"]?.version !== version) {
+			throw new Error(`SDK lock update did not resolve @oh-my-pi/pi-coding-agent@${version}`);
+		}
+		return updated;
+	} finally {
+		await rm(tempRoot, { recursive: true, force: true });
+	}
 }
 
 function githubHeaders() {
@@ -99,7 +141,7 @@ async function fetchNativeSha512(packageName, version, fetchImpl) {
 	return digest.toString("hex");
 }
 
-export async function syncOmpPins({ root = process.cwd(), requestedVersion, fetchImpl = fetch } = {}) {
+export async function syncOmpPins({ root = process.cwd(), requestedVersion, fetchImpl = fetch, sdkLockUpdater = updateSdkLock } = {}) {
 	const files = await Promise.all(CONTAINERFILES.map(async (relativePath) => {
 		const path = join(root, relativePath);
 		return { relativePath, path, source: await readFile(path, "utf8") };
@@ -121,10 +163,42 @@ export async function syncOmpPins({ root = process.cwd(), requestedVersion, fetc
 		nativesX86_64Sha512,
 		nativesAarch64Sha512,
 	};
+	const toolchains = JSON.parse(await readFile(join(root, "ci/toolchains.json"), "utf8"));
+	const sdkLockNpmVersion = String(toolchains.verification?.sdkLockGeneratorNpm ?? "");
+	if (!/^\d+\.\d+\.\d+$/.test(sdkLockNpmVersion)) throw new Error("ci/toolchains.json has no pinned SDK lock npm version");
+	const sdkPackagePath = join(root, SDK_PACKAGE);
+	const sdkLockPath = join(root, SDK_LOCK);
+	const sdkPackage = JSON.parse(await readFile(sdkPackagePath, "utf8"));
+	const originalSdkLock = await readFile(sdkLockPath, "utf8");
+	const sdkVersion = sdkPackage.dependencies?.["@oh-my-pi/pi-coding-agent"];
+	if (!VERSION_PATTERN.test(sdkVersion ?? "")) throw new Error(`${SDK_PACKAGE}: invalid OMP SDK version ${sdkVersion ?? "missing"}`);
+	JSON.parse(originalSdkLock);
+	const updatedSdkPackage = { ...sdkPackage, dependencies: { ...sdkPackage.dependencies, "@oh-my-pi/pi-coding-agent": pins.version } };
+	const updatedSdkPackageText = `${JSON.stringify(updatedSdkPackage, null, 2)}\n`;
+	// Regenerate even when the package manifest already has this pin: a previous
+	// partial update may have left a stale lock that would otherwise be kept.
+	const updatedSdkLock = await sdkLockUpdater({
+		packageJson: updatedSdkPackageText,
+		lockfile: originalSdkLock,
+		version: pins.version,
+		npmVersion: sdkLockNpmVersion,
+	});
+	const validatedSdkLock = JSON.parse(updatedSdkLock);
+	if (validatedSdkLock.packages?.[""]?.dependencies?.["@oh-my-pi/pi-coding-agent"] !== pins.version ||
+		validatedSdkLock.packages?.["node_modules/@oh-my-pi/pi-coding-agent"]?.version !== pins.version) {
+		throw new Error(`${SDK_LOCK}: expected a lock for @oh-my-pi/pi-coding-agent@${pins.version}`);
+	}
+
+	// Write only after the source, native integrity, and refreshed SDK lock have
+	// all validated, so a network/registry failure leaves the original pins intact.
 	for (const { relativePath, path, source } of files) {
 		const updated = updateContainerfile(source, pins, relativePath);
 		if (updated !== source) await writeFile(path, updated);
 	}
+	if (updatedSdkPackageText !== `${JSON.stringify(sdkPackage, null, 2)}\n`) {
+		await writeFile(sdkPackagePath, updatedSdkPackageText);
+	}
+	if (updatedSdkLock !== originalSdkLock) await writeFile(sdkLockPath, updatedSdkLock);
 	return pins;
 }
 

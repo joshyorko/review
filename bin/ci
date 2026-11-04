@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+profile="pre-push"
+base=""
+ref="HEAD"
+ref_set=0
+require_native=0
+require_os=""
+plan_only=0
+requested_version=""
+requested_bump=""
+apply_release=0
+native_adapter=""
+while (($#)); do
+  case "$1" in
+  --profile)
+    profile="${2:?missing value for --profile}"
+    shift 2
+    ;;
+  --base)
+    base="${2:?missing value for --base}"
+    shift 2
+    ;;
+  --ref)
+    ref="${2:?missing value for --ref}"
+    ref_set=1
+    shift 2
+    ;;
+  --require-native)
+    require_native=1
+    shift
+    ;;
+  --require-os)
+    require_os="${2:?missing value for --require-os}"
+    shift 2
+    ;;
+  --requested-version)
+    requested_version="${2:?missing value for --requested-version}"
+    shift 2
+    ;;
+  --bump)
+    requested_bump="${2:?missing value for --bump}"
+    shift 2
+    ;;
+  --apply)
+    apply_release=1
+    shift
+    ;;
+  --plan-only)
+    plan_only=1
+    shift
+    ;;
+  -h | --help)
+    cat <<'HELP'
+Usage:
+  bin/ci --profile contract|portable
+  bin/ci --profile pre-push --base <git-ref> [--ref <git-ref>]
+         [--require-native] [--require-os <release>] [--plan-only]
+  bin/ci --profile release-plan [--requested-version <version>] [--bump patch|minor|major] [--apply]
+
+Runs the checked-in Dagger profile over a sanitized snapshot of the working
+tree. The pre-push planner includes staged, unstaged, untracked, renamed, and
+deleted paths. The appliance-artifact adapter requires a clean committed source
+and checks the same Dagger-exported OCI archive through Podman and Apptainer/SIF.
+release-plan is read-only unless --apply is explicit.
+HELP
+    exit 0
+    ;;
+  *)
+    echo "bin/ci: unsupported argument: $1" >&2
+    exit 2
+    ;;
+  esac
+done
+
+dagger_profile=""
+native_state="not-required"
+plan_json=""
+case "$profile" in
+pre-push)
+  if [[ -z "$base" ]]; then
+    echo "bin/ci: blocked pre-push: an explicit --base is required; no tests were selected" >&2
+    exit 3
+  fi
+  if [[ -n "$requested_version" || -n "$requested_bump" || "$apply_release" -eq 1 ]]; then
+    echo "bin/ci: blocked: release-request options require --profile release-plan" >&2
+    exit 3
+  fi
+  plan_args=(--repo "$repo_root" --base "$base" --ref "$ref")
+  ((require_native == 0)) || plan_args+=(--require-native)
+  [[ -z "$require_os" ]] || plan_args+=(--require-os "$require_os")
+  plan_json="$(python3 "$repo_root/scripts/ci/path-plan.py" "${plan_args[@]}")" || exit $?
+  dagger_profile="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["profile"])' <<<"$plan_json")"
+  native_state="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["native"])' <<<"$plan_json")"
+  native_adapter="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("nativeAdapter") or "")' <<<"$plan_json")"
+  printf 'bin/ci selected plan: %s\n' "$plan_json" >&2
+  if ((plan_only)); then
+    printf '%s\n' "$plan_json"
+    [[ "$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["blocked"]).lower())' <<<"$plan_json")" == false ]] || exit 3
+    exit 0
+  fi
+  ;;
+contract | portable)
+  if [[ -n "$base" || "$ref_set" -eq 1 || "$require_native" -eq 1 || -n "$require_os" || "$plan_only" -eq 1 || -n "$requested_version" || -n "$requested_bump" || "$apply_release" -eq 1 ]]; then
+    echo "bin/ci: blocked: --base/--ref/native options are only valid with --profile pre-push" >&2
+    exit 3
+  fi
+  dagger_profile="$profile"
+  ;;
+release-plan)
+  if [[ -n "$base" || "$ref_set" -eq 1 || "$require_native" -eq 1 || -n "$require_os" || "$plan_only" -eq 1 ]]; then
+    echo "bin/ci: blocked: release-plan does not accept pre-push subject/native options" >&2
+    exit 3
+  fi
+  [[ -z "$requested_bump" || "$requested_bump" == patch || "$requested_bump" == minor || "$requested_bump" == major ]] || {
+    echo "bin/ci: unsupported release bump: $requested_bump" >&2
+    exit 2
+  }
+  dagger_profile="release-plan"
+  ;;
+*)
+  echo "bin/ci: profile '$profile' requires a native/authorized adapter not available in this runner" >&2
+  exit 3
+  ;;
+esac
+
+command -v dagger >/dev/null || {
+  echo "bin/ci: Dagger CLI 0.21.11 is required" >&2
+  exit 127
+}
+version="$(dagger version)"
+[[ "$version" == "dagger v0.21.11 "* ]] || {
+  echo "bin/ci: expected Dagger v0.21.11, found: $version" >&2
+  exit 2
+}
+
+cd "$repo_root"
+if [[ "$profile" == "release-plan" ]]; then
+  request_args=()
+  [[ -z "$requested_version" ]] || request_args+=(--requested-version "$requested_version")
+  [[ -z "$requested_bump" ]] || request_args+=(--bump "$requested_bump")
+  ((apply_release == 0)) || request_args+=(--apply)
+  exec python3 scripts/ci/github-release-request "${request_args[@]}"
+fi
+snapshot="$(mktemp -d "${TMPDIR:-/tmp}/review-ci-source.XXXXXX")"
+native_work=""
+cleanup() {
+  python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)' "$snapshot"
+  [[ -z "$native_work" ]] || python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)' "$native_work"
+}
+trap cleanup EXIT
+python3 scripts/ci/source-snapshot.py "$snapshot" --history
+env \
+  -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_COPILOT_TOKEN -u COPILOT_GITHUB_TOKEN \
+  -u RENOVATE_TOKEN -u REVIEW_GH_TOKEN \
+  -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u CONTEXT7_API_KEY \
+  -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+  DAGGER_NO_NAG=1 dagger call check --source="$snapshot" --profile="$dagger_profile"
+
+if [[ "$native_state" != "not-required" ]]; then
+  if [[ "$native_adapter" != appliance-artifact ]]; then
+    echo "bin/ci: blocked native profile; status=$native_state adapter=${native_adapter:-unavailable}. Portable checks passed but are not native proof." >&2
+    exit 3
+  fi
+  native_work="$(mktemp -d "${TMPDIR:-/tmp}/review-ci-native-artifact.XXXXXX")"
+  revision="$(git -C "$repo_root" rev-parse "$ref")"
+  archive="$native_work/review-appliance.oci.tar"
+  env \
+    -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_COPILOT_TOKEN -u COPILOT_GITHUB_TOKEN \
+    -u RENOVATE_TOKEN -u REVIEW_GH_TOKEN \
+    -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u CONTEXT7_API_KEY \
+    -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+    DAGGER_NO_NAG=1 dagger call appliance-archive --source="$snapshot" --revision="$revision" -o "$archive"
+  bash "$repo_root/scripts/ci/native-appliance.sh" "$snapshot" "$revision" "$archive"
+fi

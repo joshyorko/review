@@ -1,0 +1,11 @@
+{
+  "name": "review-ci-renovate-validator",
+  "private": true,
+  "allowScripts": {
+    "re2": true
+  },
+  "dependencies": {
+    "renovate": "44.181.2",
+    "re2": "1.27.0"
+  }
+}

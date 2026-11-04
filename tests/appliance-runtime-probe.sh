@@ -58,11 +58,11 @@ probe podman.version 'podman --version'
 probe podman.info 'podman info --format json'
 probe podman.oci-runtime "podman info --format '{{.Host.OCIRuntime}}'"
 probe podman.runtimes "podman info --format '{{json .Host.OCIRuntimes}}'"
-probe krun.version 'krun --version'
+probe krun.version "runtime_path=\$(podman info --runtime=krun --format '{{.Host.OCIRuntime.Path}}' 2>/dev/null) && test -x \"\$runtime_path\" && \"\$runtime_path\" --version"
 
 probe apptainer.version 'apptainer --version'
 probe apptainer.buildcfg 'apptainer buildcfg'
-probe squashfuse-ll.version 'squashfuse_ll --version'
+probe squashfuse-ll.available 'command -v squashfuse_ll >/dev/null 2>&1'
 probe squashfuse.version 'squashfuse --version'
 probe squashfs-tools.mksquashfs 'mksquashfs -version'
 probe squashfs-tools.unsquashfs 'unsquashfs -version'

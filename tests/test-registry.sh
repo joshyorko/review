@@ -32,6 +32,14 @@ done < <(
   grep -oE 'tests/[A-Za-z0-9_.-]+\.(sh|py|mjs|test\.ts)' "$workflow" | sed 's|^tests/||' | sort -u
 )
 
+dagger_roots="$(python3 "$repo_root/scripts/ci/dagger-registry.py" "$repo_root")" || {
+  fail "Dagger suite manifest cannot be resolved through .dagger/main.go"
+  exit 1
+}
+while IFS= read -r name; do
+  [[ -n "$name" ]] && roots+=("$name")
+done <<<"$dagger_roots"
+
 ((${#roots[@]} > 0)) || fail "validate.yml names no test files at all"
 
 is_referenced_by_roots() {

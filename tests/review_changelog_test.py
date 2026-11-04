@@ -122,13 +122,20 @@ else:
         args = json.loads(self.cliff_args.read_text())
         self.assertEqual(args[0], f"v0.1.5..{self.git('rev-parse', 'HEAD').strip()}")
 
-    def test_request_workflow_separates_published_baselines_from_duplicate_tags(self):
+    def test_request_workflow_delegates_planning_and_mutation_to_bounded_tools(self):
         workflow = (ROOT / '.github' / 'workflows' / 'request-release.yml').read_text()
-        self.assertIn("[.tag_name, .draft, .prerelease] | @tsv", workflow)
-        self.assertIn('git tag --list >> "$RUNNER_TEMP/release-tags"', workflow)
-        self.assertIn('published-stable-release-tags', workflow)
-        self.assertIn('Supersedes unpublished v%s', workflow)
-        self.assertIn('scripts/validate-release-version.py', workflow)
+        planner = (ROOT / 'scripts/ci/release-request-plan.py').read_text()
+        adapter = (ROOT / 'scripts/ci/github-release-request').read_text()
+        local_entrypoint = (ROOT / 'bin/ci').read_text()
+        self.assertIn('module: .dagger/release-request', workflow)
+        self.assertIn('run: bin/ci --profile release-plan --apply', workflow)
+        self.assertIn('scripts/ci/github-release-request', local_entrypoint)
+        self.assertIn('dagger', adapter)
+        self.assertIn('latest_published_ancestor(published_tags', planner)
+        self.assertIn('scripts/validate-release-version.py', planner)
+        self.assertIn('known_tags = parse_json_array(tag_json', planner)
+        self.assertIn('if not args.apply:', adapter)
+        self.assertIn('remote_release_conflict(gh, f"release/v{plan[\'requestedVersion\']}", root=root)', adapter)
 
     @unittest.skipUnless(shutil.which('git-cliff'), 'git-cliff authoring tool not installed')
     def test_real_generator_uses_only_requested_range_and_is_repeatable(self):

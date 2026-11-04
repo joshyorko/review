@@ -122,7 +122,9 @@
           "node scripts/update-omp-pins.mjs"
         ],
         "fileFilters": [
-          "image/appliance/Containerfile"
+          "image/appliance/Containerfile",
+          "ci/sdk-types/package.json",
+          "ci/sdk-types/package-lock.json"
         ],
         "executionMode": "branch"
       }
