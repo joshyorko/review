@@ -3,6 +3,16 @@
 Release notes for the Review appliance. New sections are drafted with git-cliff
 and reviewed in the version-bump pull request.
 
+## [0.1.11]
+
+### Dependencies
+
+- **deps**: update dependency virtualenv to v21.15.5 (#132) ([6ff2ad0](https://github.com/joshyorko/review/commit/6ff2ad063de87bca037ef57cec02c30bb643aa9f))
+- **deps**: update amannn/action-semantic-pull-request action to v6.1.2 (#136) ([351a671](https://github.com/joshyorko/review/commit/351a671ea229e847343686908998fc68ba4bf470))
+- **deps**: update dependency filelock to v4.2.9 (#134) ([4cf4d23](https://github.com/joshyorko/review/commit/4cf4d231a981d004712f65de4c5ddf0605373900))
+- **deps**: update dependency python-discovery to v1.9.4 (#133) ([08236aa](https://github.com/joshyorko/review/commit/08236aa230463f1c7e902cb9529de89ae349e50d))
+- **deps**: update dependency platformdirs to v4.14.5 (#135) ([a44cbc8](https://github.com/joshyorko/review/commit/a44cbc8c5bbdd21a79294ab8cb8d4fcdf7b1c337))
+
 ## [0.1.10]
 
 ### Dependencies
