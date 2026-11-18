@@ -3,6 +3,21 @@
 Release notes for the Review appliance. New sections are drafted with git-cliff
 and reviewed in the version-bump pull request.
 
+## [0.1.12]
+
+### Dependencies
+
+- **deps**: update dependency filelock to v4.2.10 (#144) ([f6d56ed](https://github.com/joshyorko/review/commit/f6d56ed7d1170aec4c24f1813ef706f54547b067))
+- **deps**: update dependency virtualenv to v21.15.6 (#142) ([5c1453d](https://github.com/joshyorko/review/commit/5c1453dcc3b811a8d1593f3a7d50186f3ff12416))
+- **deps**: update dependency python-discovery to v1.9.5 (#141) ([a148b5a](https://github.com/joshyorko/review/commit/a148b5ace4268755b58297e63fc97b9a7461fe95))
+- **deps**: update typesafe runtime (#139) ([1e239a5](https://github.com/joshyorko/review/commit/1e239a5938a88b2842b659e95f0a8bd01cc1983b))
+- **deps**: update dependency can1357/oh-my-pi to v18.22.2 (#140) ([83bf23e](https://github.com/joshyorko/review/commit/83bf23e3af446545c12d8abfc1b98b3225c6827c))
+- **deps**: update dependency python-discovery to v1.9.6 (#150) ([29c12a2](https://github.com/joshyorko/review/commit/29c12a218870a2720349e38db21fe6d920f9ac3b))
+- **deps**: update dependency platformdirs to v4.14.7 (#149) ([cc3a162](https://github.com/joshyorko/review/commit/cc3a1621eb58a87271c2f98a40bd55090ceafac0))
+- **deps**: update dependency filelock to v4.2.12 (#148) ([76f9630](https://github.com/joshyorko/review/commit/76f9630bae80d7624eaa23d896f0d85a43916cd8))
+- **deps**: update dependency typebox to v1.4.7 (#146) ([18bf5c9](https://github.com/joshyorko/review/commit/18bf5c92394f0df74bb40a5e59b1866e56916649))
+- **deps**: update dependency cli/cli to v2.105.0 (#145) ([e78ab3f](https://github.com/joshyorko/review/commit/e78ab3f5cd272953692bd1999cfda4e4f8998d31))
+
 ## [0.1.11]
 
 ### Dependencies
