@@ -14,10 +14,11 @@ export async function loadPackagedJobManager(root: string) {
 	const tag = execFileSync("git", ["-C", root, "describe", "--tags", "--exact-match", "HEAD"], { encoding: "utf8" }).trim();
 	if (tag !== `v${expectedVersion}`) throw new Error(`Expected packaged OMP tag v${expectedVersion}, found ${tag}`);
 	execFileSync("git", ["-C", root, "diff", "--exit-code", "HEAD", "--", "packages/coding-agent/src/async/job-manager.ts"]);
+	const typeGuards = pathToFileURL(join(root, "packages/utils/src/type-guards.ts")).href;
 	const hooks = registerHooks({
 		resolve(specifier, context, next) {
 			if (specifier === "@oh-my-pi/pi-utils" && context.parentURL?.endsWith("/async/job-manager.ts")) {
-				return { url: "data:text/javascript,export const logger = { warn: console.warn, error: console.error };", shortCircuit: true };
+				return { url: `data:text/javascript,${encodeURIComponent(`export { isRecord } from "${typeGuards}"; export const logger = { warn: console.warn, error: console.error };`)}`, shortCircuit: true };
 			}
 			if (specifier === "../irc/bus" && context.parentURL?.endsWith("/async/job-manager.ts")) {
 				// These cases use unowned jobs; fail if upstream starts routing their replies through IRC.
