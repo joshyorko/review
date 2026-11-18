@@ -27,7 +27,7 @@ sudo sed -i \
   -e '/^Architectures:/d' \
   -e "/^Components:/a Architectures: $arch" \
   "${ppa_sources[0]}"
-sudo apt-get update -qq
+sudo apt-get update -qq -o Acquire::Retries=4 -o APT::Update::Error-Mode=any
 
 policy="$(apt-cache policy "apptainer:$arch")"
 printf '%s\n' "$policy"
