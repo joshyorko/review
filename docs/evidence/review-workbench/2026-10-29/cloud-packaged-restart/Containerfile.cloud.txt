@@ -1,7 +1,7 @@
 # Review appliance: a pinned Fedora builder stages an explicit runtime closure.
 # The final scratch filesystem contains no package manager or build credentials.
 # renovate: datasource=docker depName=registry.fedoraproject.org/fedora-minimal
-ARG RUNTIME_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:130c65faca818217d6d2d801dfef31d479986127b045bffdf987cc6a2edee8f1
+ARG RUNTIME_BUILDER_IMAGE=registry.fedoraproject.org/fedora-minimal:46@sha256:cefba07f13c252c405adef3eb86db7898f65695c926c0ecbb704847017468458
 ARG AUDIO_BUILDER_IMAGE=${RUNTIME_BUILDER_IMAGE}
 
 # renovate: datasource=github-releases depName=can1357/oh-my-pi
